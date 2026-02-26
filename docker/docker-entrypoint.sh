@@ -7,14 +7,28 @@ set -e
 
 echo "[START] Starting TradeTally backend container..."
 
-# Wait for database to be ready
-echo "[WAIT] Waiting for database connection..."
-until nc -z "${DB_HOST:-localhost}" "${DB_PORT:-5432}"; do
-  echo "   Database not ready, waiting..."
+# Wait for database to be ready (timeout after 30 seconds)
+DB_HOST_VAL="${DB_HOST:-localhost}"
+DB_PORT_VAL="${DB_PORT:-5432}"
+echo "[WAIT] Waiting for database at ${DB_HOST_VAL}:${DB_PORT_VAL}..."
+DB_RETRIES=0
+DB_MAX_RETRIES=15
+DB_READY=false
+while [ $DB_RETRIES -lt $DB_MAX_RETRIES ]; do
+  if nc -z "$DB_HOST_VAL" "$DB_PORT_VAL" 2>/dev/null; then
+    DB_READY=true
+    break
+  fi
+  DB_RETRIES=$((DB_RETRIES + 1))
+  echo "   Database not ready, attempt ${DB_RETRIES}/${DB_MAX_RETRIES}..."
   sleep 2
 done
 
-echo "[OK] Database connection established"
+if [ "$DB_READY" = true ]; then
+  echo "[OK] Database connection established"
+else
+  echo "[WARN] Database not reachable after ${DB_MAX_RETRIES} attempts — starting without DB"
+fi
 
 # Run database migrations
 echo "[MIGRATE] Running database migrations..."
