@@ -65,12 +65,14 @@ fi
 # Set environment variables for mobile support
 export RUN_MIGRATIONS="${RUN_MIGRATIONS:-true}"
 
+# Start nginx first so port 80 is reachable immediately
+echo "[START] Starting Nginx on port 80..."
+nginx &
+
 # Start backend (migrations will run automatically)
 echo "[START] Starting TradeTally backend..."
 cd /app/backend && node src/server.js &
 
-# Wait for backend to start
-sleep 5
-
-# Start nginx
-nginx -g "daemon off;"
+# Wait for any process to exit
+wait -n
+exit $?
