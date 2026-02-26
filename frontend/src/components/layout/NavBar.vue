@@ -373,6 +373,36 @@ const baseNavigation = [
       }
     ]
   },
+  {
+    name: 'Simulation',
+    type: 'dropdown',
+    items: [
+      {
+        name: 'Webhook Inbox',
+        to: '/sim/webhooks',
+        route: 'sim-webhooks',
+        description: 'View raw TradingView webhook events and processing status'
+      },
+      {
+        name: 'Sim Trades',
+        to: '/sim/trades',
+        route: 'sim-trades',
+        description: 'Simulated trades from webhook signals'
+      },
+      {
+        name: 'Equity Curve',
+        to: '/sim/equity',
+        route: 'sim-equity',
+        description: 'Simulated portfolio equity curve and open positions'
+      },
+      {
+        name: 'Strategy Breakdown',
+        to: '/sim/strategies',
+        route: 'sim-strategies',
+        description: 'Performance analytics by strategy and DTE bucket'
+      }
+    ]
+  },
   { name: 'Calendar', to: '/calendar', route: 'calendar' },
   { name: 'Import', to: '/import', route: 'import' },
   { name: 'Settings', to: '/settings', route: 'settings' }

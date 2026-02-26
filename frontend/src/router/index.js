@@ -156,6 +156,36 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/sim/webhooks',
+      name: 'sim-webhooks',
+      component: () => import('@/views/simulation/WebhookInboxView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/sim/trades',
+      name: 'sim-trades',
+      component: () => import('@/views/simulation/SimTradesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/sim/equity',
+      name: 'sim-equity',
+      component: () => import('@/views/simulation/SimEquityCurveView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/sim/strategies',
+      name: 'sim-strategies',
+      component: () => import('@/views/simulation/StrategyBreakdownView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/sim/intelligence',
+      name: 'sim-intelligence',
+      component: () => import('@/views/simulation/IntelligenceDashboardView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),

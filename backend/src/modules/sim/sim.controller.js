@@ -1,0 +1,322 @@
+'use strict';
+
+const ledgerService = require('./ledger.service');
+const webhookProcessor = require('./webhook-processor');
+const safetyGuards = require('./safety-guards');
+const replayService = require('./replay.service');
+const db = require('../../config/database');
+const logger = require('../../utils/logger');
+
+/**
+ * GET /api/sim/account
+ */
+async function getAccountState(req, res) {
+  try {
+    const account = await ledgerService.getAccountState(req.user.id);
+    res.json(account);
+  } catch (error) {
+    logger.error(`Get account state failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get account state' });
+  }
+}
+
+/**
+ * POST /api/sim/account/reset
+ */
+async function resetAccount(req, res) {
+  try {
+    await ledgerService.resetAccount(req.user.id);
+    const account = await ledgerService.getAccountState(req.user.id);
+    res.json({ message: 'Account reset to initial state', account });
+  } catch (error) {
+    logger.error(`Reset account failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to reset account' });
+  }
+}
+
+/**
+ * GET /api/sim/positions
+ */
+async function getPositions(req, res) {
+  try {
+    const { status, page, limit } = req.query;
+    const result = await ledgerService.getPositions(req.user.id, {
+      status,
+      page: parseInt(page) || 1,
+      limit: parseInt(limit) || 25,
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error(`Get positions failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get positions' });
+  }
+}
+
+/**
+ * GET /api/sim/orders
+ */
+async function getOrders(req, res) {
+  try {
+    const { status, page, limit } = req.query;
+    const result = await ledgerService.getOrders(req.user.id, {
+      status,
+      page: parseInt(page) || 1,
+      limit: parseInt(limit) || 25,
+    });
+    res.json(result);
+  } catch (error) {
+    logger.error(`Get orders failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get orders' });
+  }
+}
+
+/**
+ * GET /api/sim/trades
+ */
+async function getTrades(req, res) {
+  try {
+    const { strategy, symbol, page, limit, startDate, endDate } = req.query;
+    const conditions = ['user_id = $1'];
+    const params = [req.user.id];
+    let idx = 2;
+
+    if (strategy) { conditions.push(`strategy = $${idx++}`); params.push(strategy); }
+    if (symbol) { conditions.push(`symbol = $${idx++}`); params.push(symbol.toUpperCase()); }
+    if (startDate) { conditions.push(`entry_time >= $${idx++}`); params.push(startDate); }
+    if (endDate) { conditions.push(`entry_time <= $${idx++}`); params.push(endDate); }
+
+    const where = conditions.join(' AND ');
+    const offset = ((parseInt(page) || 1) - 1) * (parseInt(limit) || 25);
+
+    const [dataResult, countResult] = await Promise.all([
+      db.query(
+        `SELECT * FROM sim_trades WHERE ${where} ORDER BY entry_time DESC LIMIT $${idx++} OFFSET $${idx}`,
+        [...params, parseInt(limit) || 25, offset]
+      ),
+      db.query(`SELECT COUNT(*) as total FROM sim_trades WHERE ${where}`, params),
+    ]);
+
+    res.json({
+      trades: dataResult.rows,
+      total: parseInt(countResult.rows[0].total, 10),
+      page: parseInt(page) || 1,
+      limit: parseInt(limit) || 25,
+    });
+  } catch (error) {
+    logger.error(`Get trades failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get trades' });
+  }
+}
+
+/**
+ * GET /api/sim/equity-curve
+ */
+async function getEquityCurve(req, res) {
+  try {
+    const { simRunId, startDate, endDate, limit } = req.query;
+    const data = await ledgerService.getEquityCurve(req.user.id, {
+      simRunId,
+      startDate,
+      endDate,
+      limit: parseInt(limit) || 500,
+    });
+    res.json(data);
+  } catch (error) {
+    logger.error(`Get equity curve failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get equity curve' });
+  }
+}
+
+/**
+ * GET /api/sim/analytics/strategy
+ */
+async function getStrategyBreakdown(req, res) {
+  try {
+    const result = await db.query(
+      `SELECT
+        strategy,
+        COUNT(*) as total_trades,
+        COUNT(*) FILTER (WHERE pnl > 0) as winning_trades,
+        COUNT(*) FILTER (WHERE pnl <= 0) as losing_trades,
+        ROUND(COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as win_rate,
+        ROUND(COALESCE(AVG(r_multiple), 0)::numeric, 4) as avg_r_multiple,
+        ROUND(SUM(pnl)::numeric, 2) as total_pnl,
+        ROUND(AVG(pnl)::numeric, 2) as avg_pnl,
+        ROUND(MAX(pnl)::numeric, 2) as best_trade,
+        ROUND(MIN(pnl)::numeric, 2) as worst_trade,
+        ROUND(COALESCE(AVG(dte_at_entry), 0)::numeric, 1) as avg_dte
+      FROM sim_trades
+      WHERE user_id = $1
+      GROUP BY strategy
+      ORDER BY total_pnl DESC`,
+      [req.user.id]
+    );
+
+    // Calculate drawdown per strategy
+    const strategies = result.rows.map(row => ({
+      ...row,
+      profit_factor: parseFloat(row.winning_trades) > 0 && parseFloat(row.losing_trades) > 0
+        ? Math.abs(parseFloat(row.best_trade) * parseFloat(row.winning_trades) / (parseFloat(row.worst_trade) * parseFloat(row.losing_trades)))
+        : null,
+    }));
+
+    res.json(strategies);
+  } catch (error) {
+    logger.error(`Get strategy breakdown failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get strategy breakdown' });
+  }
+}
+
+/**
+ * GET /api/sim/analytics/dte
+ */
+async function getDteBreakdown(req, res) {
+  try {
+    const result = await db.query(
+      `SELECT
+        CASE
+          WHEN dte_at_entry IS NULL THEN 'N/A'
+          WHEN dte_at_entry = 0 THEN '0DTE'
+          WHEN dte_at_entry BETWEEN 1 AND 2 THEN '1-2DTE'
+          WHEN dte_at_entry BETWEEN 3 AND 7 THEN '3-7DTE'
+          WHEN dte_at_entry BETWEEN 8 AND 21 THEN '8-21DTE'
+          WHEN dte_at_entry BETWEEN 22 AND 45 THEN '22-45DTE'
+          ELSE '45+DTE'
+        END as dte_bucket,
+        COUNT(*) as total_trades,
+        COUNT(*) FILTER (WHERE pnl > 0) as winners,
+        ROUND(COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*), 0) * 100, 2) as win_rate,
+        ROUND(SUM(pnl)::numeric, 2) as total_pnl,
+        ROUND(AVG(pnl)::numeric, 2) as avg_pnl
+      FROM sim_trades
+      WHERE user_id = $1
+      GROUP BY dte_bucket
+      ORDER BY MIN(COALESCE(dte_at_entry, 9999))`,
+      [req.user.id]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    logger.error(`Get DTE breakdown failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get DTE breakdown' });
+  }
+}
+
+/**
+ * POST /api/sim/process
+ * Manually trigger processing of pending webhook events
+ */
+async function processPending(req, res) {
+  try {
+    const results = await webhookProcessor.processPending();
+    res.json({ processed: results.length, results });
+  } catch (error) {
+    logger.error(`Process pending failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to process pending webhooks' });
+  }
+}
+
+/**
+ * POST /api/sim/kill-switch
+ */
+async function toggleKillSwitch(req, res) {
+  try {
+    const { active } = req.body;
+    if (active) {
+      await safetyGuards.activateKillSwitch(req.user.id);
+    } else {
+      await safetyGuards.deactivateKillSwitch(req.user.id);
+    }
+    const account = await ledgerService.getAccountState(req.user.id);
+    res.json({ killSwitchActive: account.kill_switch_active, account });
+  } catch (error) {
+    logger.error(`Toggle kill switch failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to toggle kill switch' });
+  }
+}
+
+/**
+ * POST /api/sim/replay
+ */
+async function startReplay(req, res) {
+  try {
+    const { symbol, timeframe, startDate, endDate, strategy, config } = req.body;
+
+    if (!symbol || !timeframe || !startDate || !endDate || !strategy) {
+      return res.status(400).json({
+        error: 'Missing required fields: symbol, timeframe, startDate, endDate, strategy',
+      });
+    }
+
+    const run = await replayService.startReplay(req.user.id, {
+      symbol, timeframe, startDate, endDate, strategy, config: config || {},
+    });
+
+    res.status(202).json({ message: 'Replay started', run });
+  } catch (error) {
+    logger.error(`Start replay failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to start replay' });
+  }
+}
+
+/**
+ * GET /api/sim/runs
+ */
+async function getSimRuns(req, res) {
+  try {
+    const { page, limit } = req.query;
+    const offset = ((parseInt(page) || 1) - 1) * (parseInt(limit) || 25);
+
+    const [dataResult, countResult] = await Promise.all([
+      db.query(
+        `SELECT * FROM sim_runs WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+        [req.user.id, parseInt(limit) || 25, offset]
+      ),
+      db.query(`SELECT COUNT(*) as total FROM sim_runs WHERE user_id = $1`, [req.user.id]),
+    ]);
+
+    res.json({
+      runs: dataResult.rows,
+      total: parseInt(countResult.rows[0].total, 10),
+      page: parseInt(page) || 1,
+      limit: parseInt(limit) || 25,
+    });
+  } catch (error) {
+    logger.error(`Get sim runs failed: ${error.message}`, 'sim');
+    res.status(500).json({ error: 'Failed to get simulation runs' });
+  }
+}
+
+/**
+ * GET /api/sim/status
+ */
+async function getStatus(req, res) {
+  const processorStatus = webhookProcessor.getStatus();
+  const account = await ledgerService.getAccountState(req.user.id).catch(() => null);
+
+  res.json({
+    tradingMode: 'SIM',
+    processor: processorStatus,
+    account: account ? {
+      equity: account.equity,
+      dailyPnl: account.daily_pnl,
+      killSwitchActive: account.kill_switch_active,
+    } : null,
+  });
+}
+
+module.exports = {
+  getAccountState,
+  resetAccount,
+  getPositions,
+  getOrders,
+  getTrades,
+  getEquityCurve,
+  getStrategyBreakdown,
+  getDteBreakdown,
+  processPending,
+  toggleKillSwitch,
+  startReplay,
+  getSimRuns,
+  getStatus,
+};

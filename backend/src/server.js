@@ -5,6 +5,9 @@ const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+// Validate trading mode on startup (hard-fail if not SIM)
+const { TRADING_MODE } = require('./config/tradingMode');
+
 const { migrate } = require('./utils/migrate');
 const { initializePostHogTelemetry, shutdown: shutdownPostHogTelemetry } = require('./posthog-telemetry');
 const { securityMiddleware } = require('./middleware/security');
@@ -50,6 +53,10 @@ const tradeManagementRoutes = require('./routes/tradeManagement.routes');
 const aiRoutes = require('./routes/ai.routes');
 const symbolsRoutes = require('./routes/symbols.routes');
 const unsubscribeRoutes = require('./routes/unsubscribe.routes');
+const webhookRoutes = require('./modules/webhooks/webhook.routes');
+const simRoutes = require('./modules/sim/sim.routes');
+const webhookProcessor = require('./modules/sim/webhook-processor');
+const exitMonitor = require('./modules/sim/exit-monitor');
 const BillingService = require('./services/billingService');
 const priceMonitoringService = require('./services/priceMonitoringService');
 const backupScheduler = require('./services/backupScheduler.service');
@@ -194,10 +201,20 @@ if (process.env.NODE_ENV !== 'production') {
 // Cookie parser middleware
 app.use(cookieParser());
 
-// Body parsing middleware (skip for webhook routes that need raw body)
+// Body parsing middleware (skip for routes that need raw body)
 app.use((req, res, next) => {
   if (req.originalUrl === '/api/billing/webhooks/stripe') {
     next();
+  } else if (req.originalUrl === '/api/webhooks/tradingview') {
+    // Capture raw body for HMAC signature verification
+    let data = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => {
+      req.rawBody = data;
+      try { req.body = JSON.parse(data); } catch (e) { req.body = {}; }
+      next();
+    });
   } else {
     express.json()(req, res, next);
   }
@@ -247,6 +264,10 @@ app.use('/api/trade-management', tradeManagementRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/symbols', symbolsRoutes);
 app.use('/api/unsubscribe', unsubscribeRoutes);
+
+// Simulation engine routes
+app.use('/api/webhooks', webhookRoutes);
+app.use('/api/sim', simRoutes);
 
 // OAuth2 Provider endpoints
 app.use('/oauth', oauth2Routes);
@@ -530,9 +551,24 @@ async function startServer() {
       console.log('Stock scanner disabled (ENABLE_STOCK_SCANNER=false)');
     }
 
+    // Start webhook processor for simulation engine
+    if (process.env.ENABLE_WEBHOOK_PROCESSOR !== 'false') {
+      console.log(`Starting webhook processor (TRADING_MODE=${TRADING_MODE})...`);
+      webhookProcessor.start(parseInt(process.env.WEBHOOK_PROCESSOR_INTERVAL || '5000', 10));
+      console.log('✓ Webhook processor started for simulation engine');
+
+      // Start exit monitor for automated position exits
+      if (process.env.ENABLE_EXIT_MONITOR !== 'false') {
+        exitMonitor.start(parseInt(process.env.EXIT_MONITOR_INTERVAL || '15000', 10));
+        console.log('✓ Exit monitor started (stop-loss, take-profit, DTE, trailing stops)');
+      }
+    } else {
+      console.log('Webhook processor disabled (ENABLE_WEBHOOK_PROCESSOR=false)');
+    }
+
     // Start the server
     app.listen(PORT, () => {
-      logger.info(`✓ TradeTally server running on port ${PORT}`);
+      logger.info(`✓ TradePartners server running on port ${PORT} (mode: ${TRADING_MODE})`);
       logger.info(`✓ Environment: ${process.env.NODE_ENV || 'development'}`);
       logger.info(`✓ Log level: ${process.env.LOG_LEVEL || 'INFO'}`);
       
@@ -550,6 +586,8 @@ async function startServer() {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully...');
+  webhookProcessor.stop();
+  exitMonitor.stop();
   await priceMonitoringService.stop();
   OptionsScheduler.stop();
   brokerSyncScheduler.stop();
@@ -567,6 +605,8 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully...');
+  webhookProcessor.stop();
+  exitMonitor.stop();
   await priceMonitoringService.stop();
   OptionsScheduler.stop();
   brokerSyncScheduler.stop();
