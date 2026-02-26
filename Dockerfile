@@ -79,7 +79,8 @@ COPY --from=backend-builder /app/backend ./backend
 COPY docker/nginx.conf /etc/nginx/http.d/default.conf
 COPY docker/start.sh /app/start.sh
 COPY docker/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/start.sh /app/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /app/start.sh /app/docker-entrypoint.sh && \
+    chmod +x /app/start.sh /app/docker-entrypoint.sh
 
 EXPOSE 80 3000
 CMD ["/app/start.sh"]
