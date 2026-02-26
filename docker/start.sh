@@ -31,9 +31,17 @@ inject_analytics() {
 # Inject analytics script at startup
 inject_analytics
 
+# Extract DB_HOST from DATABASE_URL if individual vars aren't set
+if [ -z "$DB_HOST" ] && [ -n "$DATABASE_URL" ]; then
+  DB_HOST_VAL=$(echo "$DATABASE_URL" | sed -n 's|.*@\([^:/]*\).*|\1|p')
+  DB_PORT_VAL=$(echo "$DATABASE_URL" | sed -n 's|.*:\([0-9]*\)/.*|\1|p')
+  DB_PORT_VAL="${DB_PORT_VAL:-5432}"
+else
+  DB_HOST_VAL="${DB_HOST:-postgres}"
+  DB_PORT_VAL="${DB_PORT:-5432}"
+fi
+
 # Wait for database to be ready (timeout after 30 seconds)
-DB_HOST_VAL="${DB_HOST:-postgres}"
-DB_PORT_VAL="${DB_PORT:-5432}"
 echo "[WAIT] Waiting for database at ${DB_HOST_VAL}:${DB_PORT_VAL}..."
 DB_RETRIES=0
 DB_MAX_RETRIES=15
