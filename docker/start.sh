@@ -67,12 +67,8 @@ export RUN_MIGRATIONS="${RUN_MIGRATIONS:-true}"
 
 # Start nginx first so port 80 is reachable immediately
 echo "[START] Starting Nginx on port 80..."
-nginx &
+nginx
 
-# Start backend (migrations will run automatically)
+# Start backend in foreground (keeps container alive)
 echo "[START] Starting TradeTally backend..."
-cd /app/backend && node src/server.js &
-
-# Wait for any process to exit
-wait -n
-exit $?
+cd /app/backend && exec node src/server.js
