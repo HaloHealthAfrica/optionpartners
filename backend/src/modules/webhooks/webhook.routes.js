@@ -24,6 +24,7 @@ router.post('/chain', webhookRateLimit, optionalAuth, webhookController.receiveC
 
 // Authenticated endpoints for viewing webhook history
 router.get('/stats', authenticate, webhookController.getWebhookStats);
+router.get('/traded-signals', authenticate, webhookController.listTradedSignals);
 router.get('/', authenticate, webhookController.listWebhooks);
 router.get('/:id', authenticate, webhookController.getWebhook);
 

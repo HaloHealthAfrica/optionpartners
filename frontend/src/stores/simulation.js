@@ -161,6 +161,10 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  const tradedSignals = ref([])
+  const tradedSignalsPagination = ref({ page: 1, limit: 25, total: 0 })
+  const tradedSignalsCounts = ref({ traded_count: 0, blocked_count: 0, total: 0 })
+
   async function fetchWebhookEvents(params = {}) {
     loading.value = true
     try {
@@ -173,6 +177,31 @@ export const useSimulationStore = defineStore('simulation', () => {
       const { data } = await api.get('/webhooks', { params: queryParams })
       webhookEvents.value = data.events
       webhookPagination.value.total = data.total
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function fetchTradedSignals(params = {}) {
+    loading.value = true
+    try {
+      const queryParams = {
+        page: tradedSignalsPagination.value.page,
+        limit: tradedSignalsPagination.value.limit,
+        ...params,
+      }
+      const { data } = await api.get('/webhooks/traded-signals', { params: queryParams })
+      tradedSignals.value = data.signals
+      tradedSignalsPagination.value.total = data.total
+      tradedSignalsCounts.value = {
+        traded_count: data.traded_count,
+        blocked_count: data.blocked_count,
+        total: data.traded_count + data.blocked_count,
+      }
       return data
     } catch (err) {
       error.value = err.response?.data?.error || err.message
@@ -362,9 +391,10 @@ export const useSimulationStore = defineStore('simulation', () => {
     strategyBreakdown, dteBreakdown, webhookEvents, simRuns,
     status, loading, error, pagination, webhookPagination, filters,
     totalPnL, equity, killSwitchActive,
+    tradedSignals, tradedSignalsPagination, tradedSignalsCounts,
     fetchAccountState, resetAccount, fetchPositions, fetchOrders,
     fetchTrades, fetchEquityCurve, fetchStrategyBreakdown,
-    fetchDteBreakdown, fetchWebhookEvents, fetchSimRuns,
+    fetchDteBreakdown, fetchWebhookEvents, fetchTradedSignals, fetchSimRuns,
     fetchStatus, toggleKillSwitch, processPending, startReplay,
     // Intelligence layer
     scorecard, cooldowns, rejections, livePositions,

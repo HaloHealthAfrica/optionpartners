@@ -82,14 +82,35 @@ class TradeDecisionEngine {
       return this._blocked(ticker, 0, rationale);
     }
 
-    // ── Part 2: TREND alignment check ──
+    // ── Part 2: TREND alignment check (penalty-based, not a hard gate) ──
     const trendCheck = this._applyTrendRules(symbolState, rationale);
-    if (trendCheck.blocked) {
-      return this._blocked(ticker, 0, rationale);
-    }
 
     // ── Part 3: Conviction calculation ──
-    const conviction = this._computeConviction(signal, symbolState, rationale);
+    let conviction = this._computeConviction(signal, symbolState, rationale);
+
+    // Apply trend penalty after conviction is computed
+    if (trendCheck.penalty > 0) {
+      conviction = Math.max(0, conviction - trendCheck.penalty);
+      rationale.push(`CONVICTION after trend penalty: ${conviction}`);
+    }
+
+    // Apply staleness penalties
+    if (symbolState.macro_updated_at) {
+      const macroAgeMs = Date.now() - new Date(symbolState.macro_updated_at).getTime();
+      const STATE_TTL_MS = parseInt(process.env.SIM_STATE_TTL_MS || '1800000', 10);
+      if (macroAgeMs > STATE_TTL_MS) {
+        conviction = Math.max(0, conviction - 10);
+        rationale.push(`CONVICTION -10: stale macro data (${Math.round(macroAgeMs / 1000)}s old)`);
+      }
+    }
+    if (symbolState.local_updated_at) {
+      const localAgeMs = Date.now() - new Date(symbolState.local_updated_at).getTime();
+      const STATE_TTL_MS = parseInt(process.env.SIM_STATE_TTL_MS || '1800000', 10);
+      if (localAgeMs > STATE_TTL_MS) {
+        conviction = Math.max(0, conviction - 10);
+        rationale.push(`CONVICTION -10: stale trend data (${Math.round(localAgeMs / 1000)}s old)`);
+      }
+    }
 
     if (conviction < 40) {
       rationale.push(`CONVICTION_FAIL: Score ${conviction} below minimum 40`);
@@ -196,21 +217,28 @@ class TradeDecisionEngine {
       }
     }
 
-    // Macro bias staleness
+    // Macro bias staleness — demote to warning so SIGNALS can trade standalone.
+    // Only hard-block if data is severely stale (> 4x TTL, i.e. 2 hours default).
     if (state.macro_updated_at) {
       const macroAgeMs = Date.now() - new Date(state.macro_updated_at).getTime();
-      if (macroAgeMs > STATE_TTL_MS) {
-        rationale.push(`FAIL_CLOSED: Macro bias stale (${Math.round(macroAgeMs / 1000)}s old, max ${STATE_TTL_MS / 1000}s)`);
+      if (macroAgeMs > STATE_TTL_MS * 4) {
+        rationale.push(`FAIL_CLOSED: Macro bias severely stale (${Math.round(macroAgeMs / 1000)}s old)`);
         return this._blocked(ticker, 0, rationale);
+      }
+      if (macroAgeMs > STATE_TTL_MS) {
+        rationale.push(`WARN: Macro bias stale (${Math.round(macroAgeMs / 1000)}s old) — conviction penalty applied`);
       }
     }
 
-    // Trend alignment staleness
+    // Trend alignment staleness — same graceful degradation.
     if (state.local_updated_at) {
       const localAgeMs = Date.now() - new Date(state.local_updated_at).getTime();
-      if (localAgeMs > STATE_TTL_MS) {
-        rationale.push(`FAIL_CLOSED: Trend data stale (${Math.round(localAgeMs / 1000)}s old, max ${STATE_TTL_MS / 1000}s)`);
+      if (localAgeMs > STATE_TTL_MS * 4) {
+        rationale.push(`FAIL_CLOSED: Trend data severely stale (${Math.round(localAgeMs / 1000)}s old)`);
         return this._blocked(ticker, 0, rationale);
+      }
+      if (localAgeMs > STATE_TTL_MS) {
+        rationale.push(`WARN: Trend data stale (${Math.round(localAgeMs / 1000)}s old) — conviction penalty applied`);
       }
     }
 
@@ -438,27 +466,37 @@ class TradeDecisionEngine {
   // ═══════════════════════════════════════════════════════════════════
 
   _applyTrendRules(state, rationale) {
-    // Only enforce if TREND data has arrived
+    // No TREND data yet — proceed without alignment check
     if (!state.local_updated_at) {
       rationale.push('TREND: No trend data yet — skipping alignment check');
-      return { blocked: false };
+      return { blocked: false, penalty: 0 };
     }
 
-    if (state.alignment_score < 45) {
-      rationale.push(`TREND_BLOCK: alignment_score=${state.alignment_score} < 45`);
-      return { blocked: true };
+    // Trend alignment and conflict are conviction modifiers, not hard gates.
+    // This allows SIGNALS to trade standalone when trend data is partial or weak.
+    let penalty = 0;
+
+    if (state.alignment_score < 30) {
+      penalty += 20;
+      rationale.push(`TREND_PENALTY -20: alignment_score=${state.alignment_score} < 30 (very weak)`);
+    } else if (state.alignment_score < 45) {
+      penalty += 10;
+      rationale.push(`TREND_PENALTY -10: alignment_score=${state.alignment_score} < 45 (weak)`);
     }
 
-    if (state.conflict_score > 40) {
-      rationale.push(`TREND_BLOCK: conflict_score=${state.conflict_score} > 40`);
-      return { blocked: true };
+    if (state.conflict_score > 60) {
+      penalty += 15;
+      rationale.push(`TREND_PENALTY -15: conflict_score=${state.conflict_score} > 60 (high conflict)`);
+    } else if (state.conflict_score > 40) {
+      penalty += 10;
+      rationale.push(`TREND_PENALTY -10: conflict_score=${state.conflict_score} > 40 (moderate conflict)`);
     }
 
     if (state.alignment_score >= 75) {
       rationale.push(`TREND: alignment=${state.alignment_score} ≥ 75 — aggressive delta allowed`);
     }
 
-    return { blocked: false };
+    return { blocked: false, penalty };
   }
 
   // ═══════════════════════════════════════════════════════════════════

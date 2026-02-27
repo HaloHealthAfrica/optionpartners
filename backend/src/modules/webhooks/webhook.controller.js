@@ -174,6 +174,106 @@ async function getWebhookStats(req, res) {
 }
 
 /**
+ * GET /api/webhooks/traded-signals
+ * List signals that reached the trade decision engine, with verdict + trade outcome.
+ */
+async function listTradedSignals(req, res) {
+  try {
+    const { page, limit, outcome } = req.query;
+    const pageNum = parseInt(page) || 1;
+    const limitNum = Math.min(parseInt(limit) || 25, 100);
+    const offset = (pageNum - 1) * limitNum;
+    const userId = req.user.id;
+
+    let outcomeFilter = '';
+    const params = [userId, limitNum, offset];
+    if (outcome === 'traded') {
+      outcomeFilter = 'AND iv.allowed = TRUE';
+    } else if (outcome === 'blocked') {
+      outcomeFilter = 'AND iv.allowed = FALSE';
+    }
+
+    const [dataResult, countResult] = await Promise.all([
+      db.query(
+        `SELECT
+           iv.id,
+           iv.created_at,
+           iv.symbol,
+           iv.direction,
+           iv.strategy,
+           iv.intelligence_score  AS conviction_score,
+           iv.allowed             AS traded,
+           iv.rejection_reason,
+           iv.signal_confidence,
+           iv.checks_detail,
+           iv.confluence_count,
+           iv.flow_alignment,
+           we.id                  AS webhook_event_id,
+           we.raw_payload,
+           we.received_at,
+           we.processed_at,
+           we.status              AS webhook_status,
+           we.error_message,
+           st.id                  AS trade_id,
+           st.pnl,
+           st.pnl_percent,
+           st.entry_price,
+           st.exit_price,
+           st.entry_time,
+           st.exit_time,
+           st.exit_reason,
+           st.contract_type,
+           st.strike,
+           st.expiration,
+           st.dte_at_entry,
+           st.delta_at_entry,
+           st.side,
+           st.r_multiple,
+           sr.gate                AS rejection_gate,
+           sr.reason              AS rejection_detail
+         FROM intelligence_verdicts iv
+         JOIN webhook_events we ON iv.webhook_event_id = we.id
+         LEFT JOIN sim_trades st ON st.webhook_event_id = we.id
+         LEFT JOIN LATERAL (
+           SELECT gate, reason FROM signal_rejections
+           WHERE webhook_event_id = we.id
+           ORDER BY created_at DESC LIMIT 1
+         ) sr ON TRUE
+         WHERE iv.user_id = $1 ${outcomeFilter}
+         ORDER BY iv.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        params
+      ),
+      db.query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE allowed = TRUE)::int AS traded_count,
+           COUNT(*) FILTER (WHERE allowed = FALSE)::int AS blocked_count
+         FROM intelligence_verdicts
+         WHERE user_id = $1`,
+        [userId]
+      ),
+    ]);
+
+    const counts = countResult.rows[0] || { total: 0, traded_count: 0, blocked_count: 0 };
+
+    res.json({
+      signals: dataResult.rows,
+      total: outcome === 'traded' ? counts.traded_count
+           : outcome === 'blocked' ? counts.blocked_count
+           : counts.total,
+      traded_count: counts.traded_count,
+      blocked_count: counts.blocked_count,
+      page: pageNum,
+      limit: limitNum,
+    });
+  } catch (error) {
+    logger.error(`List traded signals failed: ${error.message}`, 'webhook');
+    res.status(500).json({ error: 'Failed to list traded signals' });
+  }
+}
+
+/**
  * GET /api/webhooks/:id
  * Get a single webhook event
  */
@@ -262,6 +362,7 @@ module.exports = {
   receivePriceTick,
   receiveChainSnapshot,
   listWebhooks,
+  listTradedSignals,
   getWebhook,
   getWebhookStats,
 };
