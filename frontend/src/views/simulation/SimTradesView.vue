@@ -134,10 +134,7 @@
           <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
             <tr v-for="trade in store.trades" :key="trade.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
               <td class="px-4 py-3 text-sm font-medium text-gray-900 dark:text-white whitespace-nowrap">
-                {{ trade.symbol }}
-                <span v-if="trade.strike && !hasContractDetails(trade.symbol)" class="text-gray-400 text-xs ml-1">
-                  ${{ trade.strike }} {{ trade.contract_type }}
-                </span>
+                {{ formatContractSymbol(trade) }}
               </td>
               <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">
                 <span
@@ -221,8 +218,26 @@ function safeLocale(v) {
   return isNaN(n) ? '0' : n.toLocaleString()
 }
 
-function hasContractDetails(symbol) {
-  return symbol && /\d{8}/.test(symbol)
+function formatContractSymbol(trade) {
+  const sym = trade.symbol || ''
+  if (/\d{8}/.test(sym)) return sym
+
+  if (trade.contract_type && trade.contract_type !== 'STOCK' && trade.expiration) {
+    const underlying = (trade.underlying_symbol || sym).toUpperCase()
+    const exp = trade.expiration.slice(0, 10).replace(/-/g, '')
+    const typeChar = trade.contract_type === 'PUT' ? 'P'
+      : trade.contract_type === 'CREDIT_SPREAD' ? 'CS' : 'C'
+    const strike = trade.strike
+      ? (Number(trade.strike) % 1 === 0 ? Number(trade.strike).toFixed(0) : String(Number(trade.strike)))
+      : ''
+    return `${underlying} ${exp} ${typeChar} ${strike}`.trim()
+  }
+
+  if (trade.strike) {
+    return `${sym} $${trade.strike} ${trade.contract_type}`
+  }
+
+  return sym
 }
 
 function contractTypeClass(type) {
