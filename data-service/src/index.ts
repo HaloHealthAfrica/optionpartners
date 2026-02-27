@@ -124,8 +124,9 @@ async function main() {
   process.on('SIGINT', shutdown);
 
   // --- Start server ---
-  app.listen(config.port, () => {
-    logger.info({ port: config.port, env: config.nodeEnv }, 'Data Integration Service started');
+  const host = process.env.HOST || '0.0.0.0';
+  app.listen(config.port, host, () => {
+    logger.info({ port: config.port, host, env: config.nodeEnv }, 'Data Integration Service started');
   });
 }
 
