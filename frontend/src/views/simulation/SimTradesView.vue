@@ -135,7 +135,7 @@
             <tr v-for="trade in store.trades" :key="trade.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
               <td class="px-4 py-3 text-sm font-medium text-gray-900 dark:text-white whitespace-nowrap">
                 {{ trade.symbol }}
-                <span v-if="trade.strike" class="text-gray-400 text-xs ml-1">
+                <span v-if="trade.strike && !hasContractDetails(trade.symbol)" class="text-gray-400 text-xs ml-1">
                   ${{ trade.strike }} {{ trade.contract_type }}
                 </span>
               </td>
@@ -219,6 +219,10 @@ function formatNum(v) {
 function safeLocale(v) {
   const n = Number(v)
   return isNaN(n) ? '0' : n.toLocaleString()
+}
+
+function hasContractDetails(symbol) {
+  return symbol && /\d{8}/.test(symbol)
 }
 
 function contractTypeClass(type) {

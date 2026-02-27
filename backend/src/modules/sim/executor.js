@@ -187,11 +187,14 @@ class SimExecutor {
         ? Math.ceil((new Date(intent.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
         : null;
 
+      const contractSymbol = this._formatContractSymbol(intent);
+      const underlyingSymbol = intent.symbol;
+
       const result = await client.query(
         `INSERT INTO sim_positions (id, user_id, symbol, underlying_symbol, contract_type, strike, strike_short, strike_long, expiration, quantity, avg_price, delta_at_entry, strategy, webhook_event_id, status, stop_loss, take_profit, stop_source)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'OPEN', $15, $16, $17)
          RETURNING *`,
-        [id, userId, intent.symbol, intent.symbol, intent.contractType,
+        [id, userId, contractSymbol, underlyingSymbol, intent.contractType,
          intent.strike, intent.strikeShort, intent.strikeLong, intent.expiration,
          intent.quantity, fillPrice, intent.delta, intent.strategy, intent.webhookEventId,
          intent.stopLoss || null, intent.takeProfit || null, intent.stopSource || null]
@@ -204,7 +207,7 @@ class SimExecutor {
       const positionId = intent.positionId;
       if (!positionId) {
         const existing = await client.query(
-          `SELECT id FROM sim_positions WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' ORDER BY opened_at ASC LIMIT 1`,
+          `SELECT id FROM sim_positions WHERE user_id = $1 AND underlying_symbol = $2 AND status = 'OPEN' ORDER BY opened_at ASC LIMIT 1`,
           [userId, intent.symbol]
         );
         if (existing.rows.length === 0) {
@@ -224,6 +227,37 @@ class SimExecutor {
     }
 
     return null;
+  }
+
+  /**
+   * Format a full option contract symbol from intent fields.
+   * If the symbol already contains expiration info (e.g. "TSLA 20260315 P 350"), keep it.
+   * Otherwise build it from underlying + expiration + type + strike.
+   */
+  _formatContractSymbol(intent) {
+    if (!intent.contractType || intent.contractType === 'STOCK') {
+      return intent.symbol;
+    }
+
+    const raw = intent.symbol || '';
+    if (/\d{8}/.test(raw)) {
+      return raw;
+    }
+
+    if (!intent.expiration || !intent.strike) {
+      return raw;
+    }
+
+    const underlying = raw.toUpperCase();
+    const expDate = intent.expiration.replace(/-/g, '').slice(0, 8);
+    const typeChar = intent.contractType === 'PUT' ? 'P'
+      : intent.contractType === 'CREDIT_SPREAD' ? 'CS'
+      : 'C';
+    const strike = Number(intent.strike) % 1 === 0
+      ? Number(intent.strike).toFixed(0)
+      : Number(intent.strike).toString();
+
+    return `${underlying} ${expDate} ${typeChar} ${strike}`;
   }
 
   async _updateLedger(client, userId, intent, fillPrice, multiplier, commission, position) {

@@ -522,7 +522,7 @@ class DecisionRouter {
   }
 
   async _findOpenPosition(userId, signal) {
-    const conditions = ['user_id = $1', 'status = $2', 'symbol = $3'];
+    const conditions = ['user_id = $1', 'status = $2', 'underlying_symbol = $3'];
     const params = [userId, 'OPEN', signal.symbol];
     let idx = 4;
 
