@@ -316,6 +316,18 @@ const router = createRouter({
       meta: { requiresAuth: true, requiresTier: 'pro' }
     },
     {
+      path: '/market-intelligence',
+      name: 'market-intelligence',
+      component: () => import('@/views/MarketIntelligenceView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/ai-history',
+      name: 'ai-history',
+      component: () => import('@/views/AIHistoryView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/watchlists',
       redirect: '/markets'
     },

@@ -6,11 +6,12 @@ const strat = require('./strat.normalizer');
 const trend = require('./trend.normalizer');
 const orb = require('./orb.normalizer');
 const signals = require('./signals.normalizer');
+const mtfBias = require('./mtf-bias.normalizer');
 const generic = require('./generic.normalizer');
 
 /**
  * @typedef {Object} NormalizedIndicatorSignal
- * @property {string} source           - Indicator source ID (SATY_PHASE, STRAT, TREND, ORB, SIGNALS, UNKNOWN)
+ * @property {string} source           - Indicator source ID (SATY_PHASE, STRAT, MTF_BIAS, TREND, ORB, SIGNALS, UNKNOWN)
  * @property {string} symbol           - Ticker symbol (uppercased)
  * @property {'long'|'short'|null} direction - Normalized direction
  * @property {'BUY'|'SELL'|'CLOSE'|null} action - Mapped from direction
@@ -28,6 +29,7 @@ const generic = require('./generic.normalizer');
 const NORMALIZERS = {
   SATY_PHASE: satyPhase,
   STRAT: strat,
+  MTF_BIAS: mtfBias,
   TREND: trend,
   ORB: orb,
   SIGNALS: signals,
@@ -46,8 +48,11 @@ function normalizePayload(payload, sourceOverride) {
   const handler = NORMALIZERS[source] || NORMALIZERS.UNKNOWN;
 
   const validation = handler.validate(payload);
-  const normalized = handler.normalize(payload);
+  if (!validation.valid) {
+    return { source, normalized: null, validation };
+  }
 
+  const normalized = handler.normalize(payload);
   return { source, normalized, validation };
 }
 

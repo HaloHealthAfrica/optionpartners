@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizePayload } = require('../webhooks/normalizers');
+const { normalizeDirection } = require('../webhooks/indicator-detector');
 
 /**
  * Internal signal contract -- normalized from any webhook source.
@@ -60,7 +61,7 @@ function mapToSignal(payload) {
     midPrice: parseFloat(payload.mid) || null,
     delta: parseFloat(payload.delta) || null,
     indicatorSource: null,
-    direction: null,
+    direction: normalizeDirection(payload.direction),
     score: null,
     confidence: null,
     meta: {
@@ -136,23 +137,30 @@ function resolveContractType(payload) {
     return payload.option_type?.toUpperCase() === 'PUT' ? 'PUT' : 'CALL';
   }
 
-  return 'STOCK';
+  // No explicit type and no strike/expiration — needs options construction.
+  // Returns null instead of silently defaulting to STOCK.
+  return null;
 }
 
 /**
  * Validate a mapped signal for completeness.
- * Indicator-sourced signals use relaxed rules (no options fields required for STOCK).
+ *
+ * contractType === null means the signal needs options construction;
+ * skip options-field validation in that case (constructor will fill them in).
  */
 function validateSignal(signal) {
   const errors = [];
 
   if (!signal.symbol) errors.push('Missing symbol');
   if (!['BUY', 'SELL', 'CLOSE'].includes(signal.action)) errors.push(`Invalid action: ${signal.action}`);
-  if (!['CALL', 'PUT', 'CREDIT_SPREAD', 'STOCK'].includes(signal.contractType)) {
+
+  // null contractType is valid — it means "pending construction"
+  if (signal.contractType !== null && !['CALL', 'PUT', 'CREDIT_SPREAD', 'STOCK'].includes(signal.contractType)) {
     errors.push(`Invalid contract type: ${signal.contractType}`);
   }
 
-  if (signal.contractType !== 'STOCK') {
+  // Only enforce options fields when contractType is already resolved
+  if (signal.contractType && signal.contractType !== 'STOCK') {
     if (!signal.expiration) errors.push('Options/spreads require expiration date');
     if (signal.contractType === 'CREDIT_SPREAD') {
       if (!signal.strikeShort || !signal.strikeLong) {

@@ -53,6 +53,7 @@ const tradeManagementRoutes = require('./routes/tradeManagement.routes');
 const aiRoutes = require('./routes/ai.routes');
 const symbolsRoutes = require('./routes/symbols.routes');
 const unsubscribeRoutes = require('./routes/unsubscribe.routes');
+const marketDataRoutes = require('./routes/marketData.routes');
 const webhookRoutes = require('./modules/webhooks/webhook.routes');
 const simRoutes = require('./modules/sim/sim.routes');
 const webhookProcessor = require('./modules/sim/webhook-processor');
@@ -205,8 +206,8 @@ app.use(cookieParser());
 app.use((req, res, next) => {
   if (req.originalUrl === '/api/billing/webhooks/stripe') {
     next();
-  } else if (req.originalUrl === '/api/webhooks/tradingview') {
-    // Capture raw body for HMAC signature verification
+  } else if (req.path.startsWith('/api/webhooks/')) {
+    // Capture raw body for HMAC signature verification on all webhook endpoints
     let data = '';
     req.setEncoding('utf8');
     req.on('data', (chunk) => { data += chunk; });
@@ -264,6 +265,9 @@ app.use('/api/trade-management', tradeManagementRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/symbols', symbolsRoutes);
 app.use('/api/unsubscribe', unsubscribeRoutes);
+
+// Market data proxy (data-service)
+app.use('/api/market-data', marketDataRoutes);
 
 // Simulation engine routes
 app.use('/api/webhooks', webhookRoutes);

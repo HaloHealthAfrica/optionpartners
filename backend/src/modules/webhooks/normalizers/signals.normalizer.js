@@ -14,7 +14,7 @@ function normalize(payload) {
   const timeframe = payload.timeframe || payload.signal?.timeframe || null;
   const timestamp = payload.timestamp || payload.signal?.timestamp || null;
 
-  const dirRaw = payload.direction ?? payload.signal?.type ?? payload.signal?.side ?? payload.trend ?? null;
+  const dirRaw = payload.direction ?? payload.signal?.type ?? payload.signal?.side ?? payload.trend ?? payload.trend_data?.alignment ?? null;
   const direction = normalizeDirection(dirRaw);
 
   const entryObj = payload.entry || {};
@@ -73,10 +73,15 @@ function validate(payload) {
   if (!symbol) errors.push('Missing ticker/symbol');
 
   if (!payload.signal || typeof payload.signal !== 'object') errors.push('Missing signal object');
-  if (payload.score === undefined || typeof payload.score !== 'number') errors.push('Missing or invalid score (must be number)');
-  if (!payload.trend) errors.push('Missing trend field');
 
-  const hasDirection = payload.direction || payload.signal?.type || payload.signal?.side || payload.trend;
+  const hasScore = (typeof payload.score === 'number') ||
+                   (typeof payload.score_breakdown?.total === 'number');
+  if (!hasScore) errors.push('Missing score (need top-level score or score_breakdown.total)');
+
+  const hasTrend = payload.trend || payload.trend_data;
+  if (!hasTrend) errors.push('Missing trend context (need trend or trend_data)');
+
+  const hasDirection = payload.direction || payload.signal?.type || payload.signal?.side || payload.trend || payload.trend_data?.alignment;
   if (!hasDirection) errors.push('No direction source');
 
   return { valid: errors.length === 0, errors };

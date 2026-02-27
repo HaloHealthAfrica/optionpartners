@@ -379,6 +379,85 @@ class NotificationService {
   }
 
 
+  // ── Sim Pipeline Notifications ──────────────────────────────────────
+
+  static async sendSimSignalNotification(userId, { symbol, action, indicatorSource, approved, reason, convictionScore }) {
+    try {
+      const message = {
+        type: 'sim_signal',
+        data: {
+          symbol,
+          action,
+          indicatorSource,
+          approved,
+          reason: reason || null,
+          convictionScore: convictionScore || null,
+          timestamp: new Date().toISOString(),
+        },
+      };
+      await this.sendSSENotification(userId, message);
+    } catch (error) {
+      console.error('Error sending sim signal notification:', error);
+    }
+  }
+
+  static async sendSimOrderFilledNotification(userId, { symbol, side, contractType, quantity, fillPrice, positionId }) {
+    try {
+      const message = {
+        type: 'sim_order_filled',
+        data: {
+          symbol,
+          side,
+          contractType,
+          quantity,
+          fillPrice,
+          positionId,
+          timestamp: new Date().toISOString(),
+        },
+      };
+      await this.sendSSENotification(userId, message);
+    } catch (error) {
+      console.error('Error sending sim order filled notification:', error);
+    }
+  }
+
+  static async sendSimTradeClosedNotification(userId, { symbol, contractType, pnl, pnlPercent, exitReason, tradeId }) {
+    try {
+      const message = {
+        type: 'sim_trade_closed',
+        data: {
+          symbol,
+          contractType,
+          pnl,
+          pnlPercent,
+          exitReason: exitReason || null,
+          tradeId,
+          timestamp: new Date().toISOString(),
+        },
+      };
+      await this.sendSSENotification(userId, message);
+    } catch (error) {
+      console.error('Error sending sim trade closed notification:', error);
+    }
+  }
+
+  static async sendSimKillSwitchNotification(userId, { dailyLoss, maxDailyLoss }) {
+    try {
+      const message = {
+        type: 'sim_kill_switch',
+        data: {
+          dailyLoss,
+          maxDailyLoss,
+          timestamp: new Date().toISOString(),
+        },
+      };
+      await this.sendSSENotification(userId, message);
+      await this.saveNotification(userId, 'sim_kill_switch', message.data);
+    } catch (error) {
+      console.error('Error sending kill switch notification:', error);
+    }
+  }
+
   // Send trade reminder notification
   static async sendTradeReminderNotification(userId, reminderData) {
     try {

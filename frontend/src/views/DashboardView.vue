@@ -1119,6 +1119,96 @@
                 </div>
               </div>
             </template>
+
+            <!-- Sim Trades Section -->
+            <template v-if="element.id === 'sim-trades'">
+              <div class="card">
+                <div class="card-body">
+                  <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-3">
+                      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Sim Trades</h3>
+                      <span v-if="simStore.accountState" class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/20 dark:text-blue-400">
+                        SIM
+                      </span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                      <span v-if="simStore.accountState" class="text-sm font-semibold" :class="simStore.totalPnL >= 0 ? 'text-green-600' : 'text-red-600'">
+                        {{ simStore.totalPnL >= 0 ? '+' : '' }}${{ simStore.totalPnL?.toFixed(2) ?? '0.00' }}
+                      </span>
+                      <router-link to="/sim/trades" class="text-sm text-primary-600 dark:text-primary-400 hover:underline font-medium">
+                        View All
+                      </router-link>
+                    </div>
+                  </div>
+
+                  <!-- Sim Account Summary -->
+                  <div v-if="simStore.accountState" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                      <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Equity</p>
+                      <p class="text-base font-bold text-gray-900 dark:text-white">${{ parseFloat(simStore.accountState.equity).toLocaleString() }}</p>
+                    </div>
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                      <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Cash</p>
+                      <p class="text-base font-bold text-gray-900 dark:text-white">${{ parseFloat(simStore.accountState.cash_balance).toLocaleString() }}</p>
+                    </div>
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                      <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Realized P&L</p>
+                      <p class="text-base font-bold" :class="parseFloat(simStore.accountState.realized_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                        ${{ parseFloat(simStore.accountState.realized_pnl).toLocaleString() }}
+                      </p>
+                    </div>
+                    <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                      <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Daily P&L</p>
+                      <p class="text-base font-bold" :class="parseFloat(simStore.accountState.daily_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                        ${{ parseFloat(simStore.accountState.daily_pnl).toLocaleString() }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <!-- Recent Sim Trades Table -->
+                  <div v-if="simStore.trades.length > 0" class="overflow-x-auto -mx-6 px-6">
+                    <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+                      <thead>
+                        <tr>
+                          <th class="pb-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Symbol</th>
+                          <th class="pb-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Strategy</th>
+                          <th class="pb-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Entry</th>
+                          <th class="pb-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Exit</th>
+                          <th class="pb-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">P&L</th>
+                          <th class="pb-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody class="divide-y divide-gray-100 dark:divide-gray-700/50">
+                        <tr v-for="trade in simStore.trades.slice(0, 5)" :key="trade.id">
+                          <td class="py-2 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                            {{ trade.symbol }}
+                            <span v-if="trade.strike" class="text-gray-400 text-xs ml-1">${{ trade.strike }}</span>
+                          </td>
+                          <td class="py-2 text-gray-600 dark:text-gray-400">{{ trade.strategy || '-' }}</td>
+                          <td class="py-2 text-gray-900 dark:text-gray-200">${{ parseFloat(trade.entry_price).toFixed(2) }}</td>
+                          <td class="py-2 text-gray-900 dark:text-gray-200">{{ trade.exit_price ? '$' + parseFloat(trade.exit_price).toFixed(2) : '-' }}</td>
+                          <td class="py-2 text-right font-medium" :class="parseFloat(trade.pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                            {{ parseFloat(trade.pnl) >= 0 ? '+' : '' }}${{ parseFloat(trade.pnl).toFixed(2) }}
+                          </td>
+                          <td class="py-2 text-gray-500 dark:text-gray-400 whitespace-nowrap text-xs">
+                            {{ trade.entry_time ? new Date(trade.entry_time).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '-' }}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-else-if="!simLoading" class="text-center py-6">
+                    <p class="text-sm text-gray-500 dark:text-gray-400">No sim trades yet. Trades appear when webhook signals are processed.</p>
+                    <router-link to="/sim/webhooks" class="text-sm text-primary-600 dark:text-primary-400 hover:underline mt-2 inline-block">
+                      Go to Webhook Inbox
+                    </router-link>
+                  </div>
+                  <div v-else class="flex justify-center py-6">
+                    <div class="animate-spin rounded-full h-6 w-6 border-b-2 border-primary-600"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
           </div>
         </template>
       </draggable>
@@ -1201,6 +1291,7 @@ import YearWrappedBanner from '@/components/yearWrapped/YearWrappedBanner.vue'
 import YearWrappedModal from '@/components/yearWrapped/YearWrappedModal.vue'
 import OnboardingCard from '@/components/onboarding/OnboardingCard.vue'
 import { useYearWrappedStore } from '@/stores/yearWrapped'
+import { useSimulationStore } from '@/stores/simulation'
 import { useGlobalAccountFilter } from '@/composables/useGlobalAccountFilter'
 import { useUserTimezone } from '@/composables/useUserTimezone'
 import draggable from 'vuedraggable'
@@ -1209,6 +1300,8 @@ const authStore = useAuthStore()
 const { formatTime: formatTimeTz } = useUserTimezone()
 const { selectedAccount } = useGlobalAccountFilter()
 const yearWrappedStore = useYearWrappedStore()
+const simStore = useSimulationStore()
+const simLoading = ref(false)
 const router = useRouter()
 
 const loading = computed(() => analyticsLoading.value || quotesLoading.value)
@@ -1324,7 +1417,8 @@ const sectionDefinitions = [
   { id: 'charts', title: 'P&L & Distribution Charts', category: 'charts' },
   { id: 'win-rate-chart', title: 'Daily Win Rate Chart', category: 'charts' },
   { id: 'performance-tables', title: 'Performance Tables', category: 'tables' },
-  { id: 'additional-stats', title: 'Additional Statistics', category: 'stats' }
+  { id: 'additional-stats', title: 'Additional Statistics', category: 'stats' },
+  { id: 'sim-trades', title: 'Sim Trades', category: 'content' }
 ]
 
 const defaultDashboardLayout = sectionDefinitions.map(section => ({
@@ -1618,6 +1712,20 @@ async function fetchOnboardingStatus() {
     onboardingStatus.value = response.data
   } catch (err) {
     console.warn('[Dashboard] Could not fetch onboarding status:', err?.message)
+  }
+}
+
+async function loadSimData() {
+  simLoading.value = true
+  try {
+    await Promise.allSettled([
+      simStore.fetchAccountState(),
+      simStore.fetchTrades({ limit: 5 }),
+    ])
+  } catch (err) {
+    console.warn('[Dashboard] Could not load sim data:', err?.message)
+  } finally {
+    simLoading.value = false
   }
 }
 
@@ -2390,6 +2498,9 @@ onMounted(async () => {
 
   // Billing/subscription for trial countdown and post-trial banner (non-blocking)
   fetchBillingAndSubscription()
+
+  // Sim trades data (non-blocking)
+  loadSimData()
 
   // Set initial refresh timestamp
   lastRefresh.value = new Date()

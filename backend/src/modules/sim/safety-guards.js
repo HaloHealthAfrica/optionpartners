@@ -6,7 +6,7 @@ const logger = require('../../utils/logger');
 /**
  * @typedef {Object} SafetyConfig
  * @property {number} maxDailyLoss          - Max daily loss in dollars (default: 2000)
- * @property {number} maxRiskPerTrade       - Max risk per trade in dollars (default: 500)
+ * @property {number} maxRiskPerTrade       - Max risk per trade in dollars (default: 1000)
  * @property {number} maxOpenPositions      - Max concurrent open positions (default: 5)
  * @property {number} maxDteBucketExposure  - Max positions per DTE bucket (default: 3)
  * @property {boolean} killSwitchActive     - Emergency stop flag
@@ -17,11 +17,11 @@ const logger = require('../../utils/logger');
 
 const DEFAULT_CONFIG = {
   maxDailyLoss: parseFloat(process.env.SIM_MAX_DAILY_LOSS || '2000'),
-  maxRiskPerTrade: parseFloat(process.env.SIM_MAX_RISK_PER_TRADE || '500'),
+  maxRiskPerTrade: parseFloat(process.env.SIM_MAX_RISK_PER_TRADE || '1000'),
   maxOpenPositions: parseInt(process.env.SIM_MAX_OPEN_POSITIONS || '5', 10),
   maxDteBucketExposure: parseInt(process.env.SIM_MAX_DTE_BUCKET || '3', 10),
   killSwitchActive: process.env.SIM_KILL_SWITCH === 'true',
-  tradingStartTime: process.env.SIM_TRADING_START || '09:30',
+  tradingStartTime: process.env.SIM_TRADING_START || '09:00',
   tradingEndTime: process.env.SIM_TRADING_END || '16:00',
   maxSignalAgeMs: parseInt(process.env.SIM_MAX_SIGNAL_AGE_MS || '300000', 10),
 };
@@ -86,8 +86,15 @@ class SafetyGuards {
     if (signal.meta?.originalPayload) {
       const ts = signal.meta.originalPayload.time || signal.meta.originalPayload.timestamp;
       if (ts) {
-        const age = Date.now() - new Date(ts).getTime();
-        if (age > this.config.maxSignalAgeMs) {
+        let payloadTimeMs;
+        const numericTs = typeof ts === 'string' && /^\d+$/.test(ts) ? Number(ts) : ts;
+        if (typeof numericTs === 'number') {
+          payloadTimeMs = numericTs < 1e10 ? numericTs * 1000 : numericTs;
+        } else {
+          payloadTimeMs = new Date(ts).getTime();
+        }
+        const age = Date.now() - payloadTimeMs;
+        if (!isNaN(age) && age > this.config.maxSignalAgeMs) {
           violations.push(`Signal is stale: ${Math.round(age / 1000)}s old (max ${this.config.maxSignalAgeMs / 1000}s)`);
         }
       }
@@ -101,14 +108,28 @@ class SafetyGuards {
 
   _estimateRisk(signal) {
     const multiplier = signal.contractType === 'STOCK' ? 1 : 100;
-    const price = signal.midPrice || signal.askPrice || signal.limitPrice || 0;
+    const optionPrice = signal.midPrice || signal.askPrice || null;
 
     if (signal.contractType === 'CREDIT_SPREAD') {
+      const price = optionPrice || signal.limitPrice || 0;
       const width = Math.abs((signal.strikeShort || 0) - (signal.strikeLong || 0));
       return (width - price) * multiplier * signal.quantity;
     }
 
-    return price * multiplier * signal.quantity;
+    // If we have an actual option price (from construction), use premium as risk
+    if (optionPrice) {
+      return optionPrice * multiplier * signal.quantity;
+    }
+
+    // Pre-construction: limitPrice is the underlying price, not option premium.
+    // Use stop-loss distance as risk proxy when available.
+    if (signal.stopLoss && signal.limitPrice) {
+      return Math.abs(signal.limitPrice - signal.stopLoss) * multiplier * signal.quantity;
+    }
+
+    // Fallback: 2% of underlying as rough risk estimate
+    const price = signal.limitPrice || 0;
+    return price * 0.02 * multiplier * signal.quantity;
   }
 
   async _getOpenPositionCount(userId) {
@@ -154,8 +175,32 @@ class SafetyGuards {
 
   _checkTradingHours() {
     const now = new Date();
-    const hours = now.getHours();
-    const minutes = now.getMinutes();
+
+    // Robust UTC → ET conversion (handles EST/EDT without relying on ICU)
+    const utcMonth = now.getUTCMonth(); // 0-11
+    const utcDay = now.getUTCDate();
+    const utcDow = now.getUTCDay(); // 0=Sun
+
+    // DST: second Sunday of March to first Sunday of November
+    let isDST = false;
+    if (utcMonth > 2 && utcMonth < 10) {
+      isDST = true; // Apr-Oct always DST
+    } else if (utcMonth === 2) {
+      // March: DST starts second Sunday at 2 AM ET (7 AM UTC)
+      const secondSunday = 14 - new Date(now.getUTCFullYear(), 2, 1).getDay();
+      isDST = utcDay > secondSunday || (utcDay === secondSunday && now.getUTCHours() >= 7);
+    } else if (utcMonth === 10) {
+      // November: DST ends first Sunday at 2 AM ET (6 AM UTC)
+      const firstSunday = 7 - new Date(now.getUTCFullYear(), 10, 1).getDay();
+      if (firstSunday === 7) isDST = utcDay < 7;
+      else isDST = utcDay < firstSunday || (utcDay === firstSunday && now.getUTCHours() < 6);
+    }
+
+    const offsetHours = isDST ? -4 : -5;
+    const etMs = now.getTime() + offsetHours * 3600000;
+    const etDate = new Date(etMs);
+    const hours = etDate.getUTCHours();
+    const minutes = etDate.getUTCMinutes();
     const currentMinutes = hours * 60 + minutes;
 
     const [startH, startM] = this.config.tradingStartTime.split(':').map(Number);
@@ -166,7 +211,7 @@ class SafetyGuards {
     if (currentMinutes < startMinutes || currentMinutes > endMinutes) {
       return {
         allowed: false,
-        reason: `Outside trading hours: current ${hours}:${String(minutes).padStart(2, '0')}, allowed ${this.config.tradingStartTime}-${this.config.tradingEndTime}`,
+        reason: `Outside trading hours (ET): current ${hours}:${String(minutes).padStart(2, '0')}, allowed ${this.config.tradingStartTime}-${this.config.tradingEndTime}`,
       };
     }
 

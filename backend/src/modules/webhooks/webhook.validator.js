@@ -11,7 +11,18 @@ const { detectIndicatorSource } = require('./indicator-detector');
  * @property {boolean} signatureValid
  */
 
-const MAX_PAYLOAD_AGE_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_PAYLOAD_AGE_MS = 5 * 60 * 1000; // 5 minutes (default for unknown sources)
+
+// Source-specific max ages — bar timestamps on longer timeframes are naturally older
+const MAX_AGE_BY_SOURCE = {
+  MARKET_CONTEXT: 8 * 24 * 60 * 60 * 1000, // 8 days (weekly bars)
+  TREND:          8 * 24 * 60 * 60 * 1000,
+  MTF_BIAS:       8 * 24 * 60 * 60 * 1000,
+  SATY_PHASE:     8 * 24 * 60 * 60 * 1000,
+  STRAT:          30 * 60 * 1000,            // 30 minutes
+  SIGNALS:        30 * 60 * 1000,
+  ORB:            30 * 60 * 1000,
+};
 
 /**
  * Verify HMAC-SHA256 signature from TradingView webhook
@@ -22,10 +33,10 @@ function verifySignature(payload, signature, secret) {
     .createHmac('sha256', secret)
     .update(typeof payload === 'string' ? payload : JSON.stringify(payload))
     .digest('hex');
-  return crypto.timingSafeEqual(
-    Buffer.from(signature, 'hex'),
-    Buffer.from(expected, 'hex')
-  );
+  const sigBuf = Buffer.from(signature, 'utf8');
+  const expBuf = Buffer.from(expected, 'utf8');
+  if (sigBuf.length !== expBuf.length) return false;
+  return crypto.timingSafeEqual(sigBuf, expBuf);
 }
 
 /**
@@ -34,8 +45,8 @@ function verifySignature(payload, signature, secret) {
  */
 function generateDedupeKey(payload) {
   const source = detectIndicatorSource(payload);
-  const symbol = payload.ticker || payload.symbol || '';
-  const ts = payload.time || payload.timestamp || '';
+  const symbol = payload.ticker || payload.symbol || payload.meta?.symbol || '';
+  const ts = payload.time || payload.timestamp || payload.event_ts_ms || payload.meta?.ts || '';
 
   let discriminator;
   switch (source) {
@@ -47,12 +58,16 @@ function generateDedupeKey(payload) {
       ].join(':');
       break;
     case 'STRAT':
-      discriminator = [
-        payload.signal?.side,
-        payload.setup || payload.setupType || payload.setup_type,
-        payload.timeframe,
-        payload.score,
-      ].join(':');
+      if (payload.plan_id) {
+        discriminator = [payload.plan_id, payload.event].join(':');
+      } else {
+        discriminator = [
+          payload.signal?.side,
+          payload.setup || payload.setupType || payload.setup_type,
+          payload.timeframe,
+          payload.score,
+        ].join(':');
+      }
       break;
     case 'TREND':
       discriminator = [
@@ -72,7 +87,22 @@ function generateDedupeKey(payload) {
       discriminator = payload.signal_id || [
         payload.direction,
         payload.pattern || payload.setup,
-        payload.score,
+        payload.score ?? payload.score_breakdown?.total,
+      ].join(':');
+      break;
+    case 'MTF_BIAS':
+      discriminator = payload.event_id_raw || [
+        payload.mtf?.consensus?.bias_consensus,
+        payload.trigger?.pattern,
+        payload.chart_tf,
+      ].join(':');
+      break;
+    case 'MARKET_CONTEXT':
+      discriminator = [
+        payload.event,
+        payload.timeframe,
+        payload.regime?.current,
+        payload.direction,
       ].join(':');
       break;
     default:
@@ -88,16 +118,19 @@ function generateDedupeKey(payload) {
 }
 
 /**
- * Validate timestamp freshness to prevent replay attacks
+ * Validate timestamp freshness to prevent replay attacks.
+ * @param {Object} payload
+ * @param {string} [source] - Detected indicator source for source-specific limits
  */
-function validateTimestamp(payload) {
-  const ts = payload.time || payload.timestamp || payload.fired_at;
+function validateTimestamp(payload, source) {
+  const ts = payload.time || payload.timestamp || payload.event_ts_ms || payload.fired_at || payload.meta?.ts;
   if (!ts) return { valid: true };
 
   let payloadTime;
-  if (typeof ts === 'number') {
+  const numericTs = typeof ts === 'string' && /^\d+$/.test(ts) ? Number(ts) : ts;
+  if (typeof numericTs === 'number') {
     // Unix seconds vs milliseconds: if < 10 billion, treat as seconds
-    payloadTime = ts < 1e10 ? ts * 1000 : ts;
+    payloadTime = numericTs < 1e10 ? numericTs * 1000 : numericTs;
   } else {
     payloadTime = new Date(ts).getTime();
   }
@@ -106,9 +139,10 @@ function validateTimestamp(payload) {
     return { valid: false, error: 'Invalid timestamp format' };
   }
 
+  const maxAge = (source && MAX_AGE_BY_SOURCE[source]) || MAX_PAYLOAD_AGE_MS;
   const age = Date.now() - payloadTime;
-  if (age > MAX_PAYLOAD_AGE_MS) {
-    return { valid: false, error: `Payload too old: ${Math.round(age / 1000)}s (max ${MAX_PAYLOAD_AGE_MS / 1000}s)` };
+  if (age > maxAge) {
+    return { valid: false, error: `Payload too old: ${Math.round(age / 1000)}s (max ${Math.round(maxAge / 1000)}s)` };
   }
   if (age < -60000) {
     return { valid: false, error: 'Payload timestamp is in the future' };
@@ -131,7 +165,7 @@ function validatePayload(payload) {
 
   // Known indicators carry their own direction semantics — symbol is sufficient
   if (source !== 'UNKNOWN') {
-    const symbol = payload.ticker || payload.symbol || payload.instrument?.ticker || payload.instrument?.symbol;
+    const symbol = payload.ticker || payload.symbol || payload.meta?.symbol || payload.instrument?.ticker || payload.instrument?.symbol;
     if (!symbol || typeof symbol !== 'string') {
       return { valid: false, error: `[${source}] Missing required field: ticker or symbol` };
     }

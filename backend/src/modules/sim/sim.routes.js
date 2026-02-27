@@ -40,6 +40,9 @@ router.get('/runs', simController.getSimRuns);
 // Status
 router.get('/status', simController.getStatus);
 
+// Warmup: seed symbol state with price + chain data from data service
+router.post('/warmup/:symbol', simController.warmupSymbol);
+
 // Intelligence layer (Phases 1-5)
 router.get('/intelligence/scorecard', intelligenceController.getScorecard);
 router.post('/intelligence/scorecard/recalculate', intelligenceController.recalculateScorecard);
@@ -51,5 +54,7 @@ router.get('/intelligence/config', intelligenceController.getConfig);
 router.put('/intelligence/config', intelligenceController.updateConfig);
 router.get('/intelligence/status', intelligenceController.getIntelligenceStatus);
 router.get('/intelligence/equity-by-strategy', intelligenceController.getEquityByStrategy);
+router.get('/intelligence/verdicts', intelligenceController.getVerdicts);
+router.get('/intelligence/snapshot/:symbol', intelligenceController.getSymbolSnapshot);
 
 module.exports = router;

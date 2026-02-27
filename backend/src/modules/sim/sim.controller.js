@@ -4,6 +4,8 @@ const ledgerService = require('./ledger.service');
 const webhookProcessor = require('./webhook-processor');
 const safetyGuards = require('./safety-guards');
 const replayService = require('./replay.service');
+const symbolStateService = require('./symbol-state.service');
+const dataServiceProxy = require('../../services/dataServiceProxy');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
 
@@ -305,6 +307,115 @@ async function getStatus(req, res) {
   });
 }
 
+/**
+ * POST /api/sim/warmup/:symbol
+ * Seed symbol state with live price + chain data from the data service.
+ * Must be called before the first trade for each symbol so that fail-closed
+ * checks (price data, chain data) pass.
+ */
+async function warmupSymbol(req, res) {
+  const symbol = (req.params.symbol || '').toUpperCase();
+  if (!symbol) return res.status(400).json({ error: 'Symbol is required' });
+
+  const userId = req.user.id;
+  const results = { symbol, seeded: [] , errors: [] };
+
+  // 1. Seed price data from a quote
+  try {
+    const quote = await dataServiceProxy.getQuote(symbol);
+    const price = quote?.data?.price ?? quote?.data?.last ?? quote?.data?.close;
+    if (price) {
+      await symbolStateService.update('PRICE_TICK', {
+        ticker: symbol,
+        price,
+        high: quote.data.high,
+        low: quote.data.low,
+        open: quote.data.open,
+        volume: quote.data.volume,
+      }, userId, symbol);
+
+      await db.query(
+        `INSERT INTO price_cache (symbol, price, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (symbol) DO UPDATE SET price = $2, updated_at = NOW()`,
+        [symbol, price]
+      );
+      results.seeded.push(`price: $${price}`);
+    } else {
+      results.errors.push('Quote returned no price data');
+    }
+  } catch (err) {
+    results.errors.push(`Quote fetch failed: ${err.message}`);
+  }
+
+  // 2. Seed chain data from options chain
+  try {
+    const chainData = await dataServiceProxy.getOptionsChain(symbol);
+    const contracts = chainData?.data?.contracts || [];
+    if (contracts.length > 0) {
+      await symbolStateService.update('CHAIN_SNAPSHOT', {
+        ticker: symbol,
+        contracts,
+        iv_percentile: chainData.data.iv_percentile || null,
+      }, userId, symbol);
+      results.seeded.push(`chain: ${contracts.length} contracts`);
+    } else {
+      results.errors.push('Options chain returned no contracts');
+    }
+  } catch (err) {
+    results.errors.push(`Chain fetch failed: ${err.message}`);
+  }
+
+  // 3. Seed macro data (VIX / regime) with neutral defaults
+  try {
+    const state = await symbolStateService.getState(userId, symbol);
+    if (!state.macro_updated_at) {
+      await symbolStateService.update('MTF_BIAS', {
+        ticker: symbol,
+        mtf: {
+          consensus: { bias_consensus: 'neutral', bias_score: 50 },
+          regime: { type: 'TREND', chop_score: 20 },
+        },
+        macro: { state: {} },
+        space: {},
+        bar: {},
+        risk_context: {},
+      }, userId, symbol);
+      results.seeded.push('macro: NEUTRAL default');
+    } else {
+      results.seeded.push('macro: already set');
+    }
+  } catch (err) {
+    results.errors.push(`Macro seed failed: ${err.message}`);
+  }
+
+  // 4. Ensure sim account exists
+  try {
+    await ledgerService.getAccountState(userId);
+    results.seeded.push('account: ready');
+  } catch (err) {
+    results.errors.push(`Account init failed: ${err.message}`);
+  }
+
+  const ready = results.errors.length === 0;
+  const finalState = await symbolStateService.getState(userId, symbol);
+
+  logger.info(`[WARMUP] ${symbol} for user ${userId}: ${results.seeded.join(', ')}`, 'sim');
+
+  res.json({
+    ready,
+    ...results,
+    state: {
+      last_price: finalState.last_price,
+      price_updated_at: finalState.price_updated_at,
+      chain_ok: finalState.chain_ok,
+      chain_updated_at: finalState.chain_updated_at,
+      macro_bias: finalState.macro_bias,
+      regime: finalState.regime,
+    },
+  });
+}
+
 module.exports = {
   getAccountState,
   resetAccount,
@@ -319,4 +430,5 @@ module.exports = {
   startReplay,
   getSimRuns,
   getStatus,
+  warmupSymbol,
 };

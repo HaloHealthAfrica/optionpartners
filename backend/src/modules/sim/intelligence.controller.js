@@ -2,6 +2,7 @@
 
 const strategyScorecardService = require('./strategy-scorecard.service');
 const adaptiveGuards = require('./adaptive-guards');
+const marketIntelligence = require('./market-intelligence');
 const exitMonitor = require('./exit-monitor');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
@@ -162,6 +163,13 @@ async function updateConfig(req, res) {
       'default_trailing_stop_pct', 'default_max_hold_hours', 'force_close_at_dte_zero',
       'enable_strategy_cooldown', 'cooldown_consecutive_losses', 'cooldown_duration_minutes',
       'max_correlated_positions', 'enable_drawdown_throttle', 'drawdown_throttle_pct',
+      'enable_options_constructor',
+      // Market intelligence settings
+      'enable_confluence', 'require_confluence', 'confluence_window_minutes', 'min_confluence_signals',
+      'enable_flow_alignment', 'require_flow_alignment', 'flow_lookback_minutes', 'flow_min_premium',
+      'enable_confidence_gate', 'min_signal_confidence',
+      'enable_price_validation', 'require_price_validation', 'price_max_entry_slippage_pct',
+      'min_intelligence_score',
     ];
 
     const updates = [];
@@ -211,12 +219,28 @@ async function getIntelligenceStatus(req, res) {
       Promise.resolve(exitMonitor.getStatus()),
     ]);
 
-    const rejectionsToday = await db.query(
-      `SELECT gate, COUNT(*) as count FROM signal_rejections
-       WHERE user_id = $1 AND created_at >= CURRENT_DATE
-       GROUP BY gate`,
-      [req.user.id]
-    );
+    const [rejectionsToday, verdictsToday] = await Promise.all([
+      db.query(
+        `SELECT gate, COUNT(*) as count FROM signal_rejections
+         WHERE user_id = $1 AND created_at >= CURRENT_DATE
+         GROUP BY gate`,
+        [req.user.id]
+      ),
+      db.query(
+        `SELECT
+           COUNT(*) as total,
+           COUNT(*) FILTER (WHERE allowed = TRUE) as approved,
+           COUNT(*) FILTER (WHERE allowed = FALSE) as rejected,
+           ROUND(AVG(intelligence_score)::numeric, 1) as avg_score,
+           ROUND(AVG(intelligence_score) FILTER (WHERE allowed = TRUE)::numeric, 1) as avg_approved_score,
+           COUNT(*) FILTER (WHERE flow_alignment = 'ALIGNED') as flow_aligned,
+           COUNT(*) FILTER (WHERE flow_alignment = 'CONTRADICTED') as flow_contradicted,
+           ROUND(AVG(confluence_count)::numeric, 1) as avg_confluence
+         FROM intelligence_verdicts
+         WHERE user_id = $1 AND created_at >= CURRENT_DATE`,
+        [req.user.id]
+      ),
+    ]);
 
     res.json({
       scorecards,
@@ -224,12 +248,65 @@ async function getIntelligenceStatus(req, res) {
       config: config.rows[0] || null,
       exitMonitor: exitStatus,
       rejectionsToday: rejectionsToday.rows,
+      marketIntelligenceToday: verdictsToday.rows[0] || null,
       activeStrategies: scorecards.filter(s => s.status === 'ACTIVE').length,
       underperformingStrategies: scorecards.filter(s => s.status === 'UNDERPERFORMING').length,
     });
   } catch (error) {
     logger.error(`Get intelligence status failed: ${error.message}`, 'intelligence');
     res.status(500).json({ error: 'Failed to get intelligence status' });
+  }
+}
+
+/**
+ * GET /api/sim/intelligence/verdicts
+ * Intelligence verdict history with filtering
+ */
+async function getVerdicts(req, res) {
+  try {
+    const { page = 1, limit = 50, symbol, allowed } = req.query;
+    const conditions = ['user_id = $1'];
+    const params = [req.user.id];
+    let idx = 2;
+
+    if (symbol) { conditions.push(`symbol = $${idx++}`); params.push(symbol.toUpperCase()); }
+    if (allowed !== undefined) { conditions.push(`allowed = $${idx++}`); params.push(allowed === 'true'); }
+
+    const where = conditions.join(' AND ');
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    const [dataResult, countResult] = await Promise.all([
+      db.query(
+        `SELECT * FROM intelligence_verdicts WHERE ${where} ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx}`,
+        [...params, parseInt(limit), offset]
+      ),
+      db.query(`SELECT COUNT(*) as total FROM intelligence_verdicts WHERE ${where}`, params),
+    ]);
+
+    res.json({
+      verdicts: dataResult.rows,
+      total: parseInt(countResult.rows[0].total, 10),
+      page: parseInt(page),
+      limit: parseInt(limit),
+    });
+  } catch (error) {
+    logger.error(`Get verdicts failed: ${error.message}`, 'intelligence');
+    res.status(500).json({ error: 'Failed to get intelligence verdicts' });
+  }
+}
+
+/**
+ * GET /api/sim/intelligence/snapshot/:symbol
+ * Real-time intelligence snapshot for a specific symbol
+ */
+async function getSymbolSnapshot(req, res) {
+  try {
+    const symbol = req.params.symbol.toUpperCase();
+    const snapshot = await marketIntelligence.getIntelligenceSnapshot(symbol, req.user.id);
+    res.json(snapshot);
+  } catch (error) {
+    logger.error(`Get symbol snapshot failed: ${error.message}`, 'intelligence');
+    res.status(500).json({ error: 'Failed to get symbol snapshot' });
   }
 }
 
@@ -280,4 +357,6 @@ module.exports = {
   updateConfig,
   getIntelligenceStatus,
   getEquityByStrategy,
+  getVerdicts,
+  getSymbolSnapshot,
 };

@@ -3,6 +3,7 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const NotificationService = require('../../services/notificationService');
 const { assertSimMode } = require('../../config/tradingMode');
 
 /**
@@ -41,8 +42,8 @@ class SimExecutor {
         throw new Error('Kill switch is active -- all orders rejected');
       }
 
-      // 2. Determine fill price
-      const fillPrice = this._determineFillPrice(intent);
+      // 2. Determine fill price (may fall back to price_cache)
+      const fillPrice = await this._determineFillPrice(intent);
       const multiplier = intent.contractType === 'STOCK' ? 1 : CONTRACT_MULTIPLIER;
       const notionalValue = fillPrice * intent.quantity * multiplier;
       const totalCommission = this.commission * intent.quantity * (intent.contractType === 'STOCK' ? 0 : 1);
@@ -88,9 +89,10 @@ class SimExecutor {
 
   /**
    * Fill price model: default mid price with configurable slippage.
+   * Falls back to price_cache if the intent carries no price fields.
    * Deterministic given same inputs.
    */
-  _determineFillPrice(intent) {
+  async _determineFillPrice(intent) {
     let basePrice;
 
     if (intent.midPrice) {
@@ -104,23 +106,40 @@ class SimExecutor {
     } else if (intent.bidPrice) {
       basePrice = intent.bidPrice;
     } else {
-      throw new Error('No price data available for fill calculation');
+      const cached = await db.query(
+        'SELECT price FROM price_cache WHERE symbol = $1',
+        [intent.symbol]
+      );
+      if (cached.rows.length > 0) {
+        basePrice = parseFloat(cached.rows[0].price);
+        logger.info(`Using cached price for ${intent.symbol}: $${basePrice}`, 'sim-executor');
+      } else {
+        throw new Error(`No price data available for ${intent.symbol} — send a price tick or include bid/ask/mid in the signal`);
+      }
     }
 
-    // Apply slippage: adverse direction
     const slippage = basePrice * this.slippagePct;
+    const isCreditSpread = intent.contractType === 'CREDIT_SPREAD';
+
     if (intent.side === 'BUY') {
-      return Math.round((basePrice + slippage) * 10000) / 10000;
+      // Debit trades: pay more (adverse). Credit spreads: receive less credit (adverse).
+      return isCreditSpread
+        ? Math.round((basePrice - slippage) * 10000) / 10000
+        : Math.round((basePrice + slippage) * 10000) / 10000;
     } else {
-      return Math.round((basePrice - slippage) * 10000) / 10000;
+      // Debit trades: receive less (adverse). Credit spreads: pay more to close (adverse).
+      return isCreditSpread
+        ? Math.round((basePrice + slippage) * 10000) / 10000
+        : Math.round((basePrice - slippage) * 10000) / 10000;
     }
   }
 
   _calculateRequiredCapital(intent, fillPrice, multiplier) {
     if (intent.contractType === 'CREDIT_SPREAD') {
-      // For credit spreads, max loss = spread width - credit received
+      // Margin requirement = max loss per contract * qty
+      // Max loss = (spread width - credit received) * multiplier
       const spreadWidth = Math.abs((intent.strikeShort || 0) - (intent.strikeLong || 0));
-      return (spreadWidth * multiplier - fillPrice * multiplier) * intent.quantity;
+      return (spreadWidth - fillPrice) * multiplier * intent.quantity;
     }
     return fillPrice * intent.quantity * multiplier;
   }
@@ -169,13 +188,13 @@ class SimExecutor {
         : null;
 
       const result = await client.query(
-        `INSERT INTO sim_positions (id, user_id, symbol, underlying_symbol, contract_type, strike, strike_short, strike_long, expiration, quantity, avg_price, delta_at_entry, strategy, webhook_event_id, status, stop_loss, take_profit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'OPEN', $15, $16)
+        `INSERT INTO sim_positions (id, user_id, symbol, underlying_symbol, contract_type, strike, strike_short, strike_long, expiration, quantity, avg_price, delta_at_entry, strategy, webhook_event_id, status, stop_loss, take_profit, stop_source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'OPEN', $15, $16, $17)
          RETURNING *`,
         [id, userId, intent.symbol, intent.symbol, intent.contractType,
          intent.strike, intent.strikeShort, intent.strikeLong, intent.expiration,
          intent.quantity, fillPrice, intent.delta, intent.strategy, intent.webhookEventId,
-         intent.stopLoss || null, intent.takeProfit || null]
+         intent.stopLoss || null, intent.takeProfit || null, intent.stopSource || null]
       );
       return result.rows[0];
     }
@@ -209,56 +228,86 @@ class SimExecutor {
 
   async _updateLedger(client, userId, intent, fillPrice, multiplier, commission, position) {
     const notional = fillPrice * intent.quantity * multiplier;
+    const isCreditSpread = intent.contractType === 'CREDIT_SPREAD';
 
     if (intent.side === 'BUY') {
-      // Debit: reduce cash, increase margin used
-      let marginRequired;
-      if (intent.contractType === 'CREDIT_SPREAD') {
+      if (isCreditSpread) {
+        // Credit spread ENTRY: receive premium, hold margin for max loss
         const spreadWidth = Math.abs((intent.strikeShort || 0) - (intent.strikeLong || 0));
-        marginRequired = (spreadWidth * multiplier - notional) * intent.quantity / intent.quantity;
-      } else {
-        marginRequired = notional;
-      }
+        const marginRequired = (spreadWidth - fillPrice) * multiplier * intent.quantity;
 
-      await client.query(
-        `UPDATE sim_account_state
-         SET cash_balance = cash_balance - $2 - $3,
-             buying_power = buying_power - $4,
-             margin_used = margin_used + $4,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [userId, notional, commission, marginRequired]
-      );
+        await client.query(
+          `UPDATE sim_account_state
+           SET cash_balance = cash_balance + $2 - $3,
+               buying_power = buying_power - $4,
+               margin_used = margin_used + $4,
+               updated_at = NOW()
+           WHERE user_id = $1`,
+          [userId, notional, commission, marginRequired]
+        );
+      } else {
+        // Debit trade ENTRY: pay premium
+        await client.query(
+          `UPDATE sim_account_state
+           SET cash_balance = cash_balance - $2 - $3,
+               buying_power = buying_power - $2,
+               margin_used = margin_used + $2,
+               updated_at = NOW()
+           WHERE user_id = $1`,
+          [userId, notional, commission]
+        );
+      }
     } else if (intent.side === 'SELL' && position) {
-      // Credit: calculate PnL and update balances
       const entryPrice = parseFloat(position.avg_price);
       const exitPrice = fillPrice;
       const qty = position.quantity;
-      const pnl = (exitPrice - entryPrice) * qty * multiplier;
 
-      // For short positions (credit spreads), PnL is inverted
-      const adjustedPnl = position.contract_type === 'CREDIT_SPREAD'
-        ? (entryPrice - exitPrice) * qty * multiplier
-        : pnl;
+      if (position.contract_type === 'CREDIT_SPREAD') {
+        // Credit spread EXIT: pay to buy back the spread, release margin
+        const pnl = (entryPrice - exitPrice) * qty * multiplier;
+        const spreadWidth = Math.abs(
+          (parseFloat(position.strike_short) || 0) - (parseFloat(position.strike_long) || 0)
+        );
+        const marginHeld = (spreadWidth - entryPrice) * multiplier * qty;
 
-      const entryNotional = entryPrice * qty * multiplier;
+        await client.query(
+          `UPDATE sim_account_state
+           SET cash_balance = cash_balance - $2 - $3,
+               buying_power = buying_power + $4,
+               margin_used = GREATEST(0, margin_used - $4),
+               realized_pnl = realized_pnl + $5,
+               daily_pnl = CASE
+                 WHEN daily_pnl_reset_at < CURRENT_DATE THEN $5
+                 ELSE daily_pnl + $5
+               END,
+               daily_pnl_reset_at = CURRENT_DATE,
+               equity = cash_balance - $2 - $3 + unrealized_pnl,
+               updated_at = NOW()
+           WHERE user_id = $1`,
+          [userId, exitPrice * qty * multiplier, commission, marginHeld, pnl]
+        );
+      } else {
+        // Debit trade EXIT: receive proceeds from selling the option
+        const pnl = (exitPrice - entryPrice) * qty * multiplier;
+        const entryNotional = entryPrice * qty * multiplier;
 
-      await client.query(
-        `UPDATE sim_account_state
-         SET cash_balance = cash_balance + $2 - $3,
-             buying_power = buying_power + $4,
-             margin_used = GREATEST(0, margin_used - $4),
-             realized_pnl = realized_pnl + $5,
-             daily_pnl = CASE
-               WHEN daily_pnl_reset_at < CURRENT_DATE THEN $5
-               ELSE daily_pnl + $5
-             END,
-             daily_pnl_reset_at = CURRENT_DATE,
-             equity = cash_balance + $2 - $3 + unrealized_pnl,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [userId, exitPrice * qty * multiplier, commission, entryNotional, adjustedPnl]
-      );
+        await client.query(
+          `UPDATE sim_account_state
+           SET cash_balance = cash_balance + $2 - $3,
+               buying_power = buying_power + $4,
+               margin_used = GREATEST(0, margin_used - $4),
+               realized_pnl = realized_pnl + $5,
+               daily_pnl = CASE
+                 WHEN daily_pnl_reset_at < CURRENT_DATE THEN $5
+                 ELSE daily_pnl + $5
+               END,
+               daily_pnl_reset_at = CURRENT_DATE,
+               equity = cash_balance + $2 - $3 + unrealized_pnl,
+               updated_at = NOW()
+           WHERE user_id = $1`,
+          [userId, exitPrice * qty * multiplier, commission, entryNotional, pnl]
+        );
+      }
 
       // Update peak equity and max drawdown
       await client.query(
@@ -282,6 +331,7 @@ class SimExecutor {
           [userId]
         );
         logger.warn(`Auto kill switch: daily loss $${dailyLoss} >= $${maxDailyLoss} for user ${userId}`, 'sim-executor');
+        NotificationService.sendSimKillSwitchNotification(userId, { dailyLoss, maxDailyLoss }).catch(() => {});
       }
     }
   }

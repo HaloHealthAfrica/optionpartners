@@ -95,26 +95,26 @@
           <div class="grid grid-cols-3 gap-3 text-sm">
             <div>
               <p class="text-gray-500 dark:text-gray-400">Win Rate</p>
-              <p class="font-bold text-lg" :class="parseFloat(card.win_rate) >= 0.5 ? 'text-green-600' : 'text-red-600'">
-                {{ (parseFloat(card.win_rate) * 100).toFixed(1) }}%
+              <p class="font-bold text-lg" :class="Number(card.win_rate) >= 0.5 ? 'text-green-600' : 'text-red-600'">
+                {{ formatNum(Number(card.win_rate) * 100, 1) }}%
               </p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Profit Factor</p>
-              <p class="font-bold text-lg" :class="parseFloat(card.profit_factor) >= 1 ? 'text-green-600' : 'text-red-600'">
-                {{ parseFloat(card.profit_factor).toFixed(2) }}
+              <p class="font-bold text-lg" :class="Number(card.profit_factor) >= 1 ? 'text-green-600' : 'text-red-600'">
+                {{ formatNum(card.profit_factor, 2) }}
               </p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Sharpe</p>
               <p class="font-bold text-lg text-gray-900 dark:text-white">
-                {{ parseFloat(card.sharpe_ratio).toFixed(2) }}
+                {{ formatNum(card.sharpe_ratio, 2) }}
               </p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Avg R</p>
-              <p class="font-semibold" :class="card.avg_r_multiple && parseFloat(card.avg_r_multiple) > 0 ? 'text-green-600' : 'text-gray-900 dark:text-white'">
-                {{ card.avg_r_multiple ? parseFloat(card.avg_r_multiple).toFixed(2) + 'R' : '-' }}
+              <p class="font-semibold" :class="card.avg_r_multiple && Number(card.avg_r_multiple) > 0 ? 'text-green-600' : 'text-gray-900 dark:text-white'">
+                {{ card.avg_r_multiple ? formatNum(card.avg_r_multiple, 2) + 'R' : '-' }}
               </p>
             </div>
             <div>
@@ -132,12 +132,12 @@
           <!-- Win/loss bar -->
           <div class="mt-3">
             <div class="flex h-2 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700">
-              <div class="bg-green-500 transition-all" :style="{ width: (parseFloat(card.win_rate) * 100) + '%' }"></div>
-              <div class="bg-red-500 transition-all" :style="{ width: ((1 - parseFloat(card.win_rate)) * 100) + '%' }"></div>
+              <div class="bg-green-500 transition-all" :style="{ width: (Number(card.win_rate) * 100) + '%' }"></div>
+              <div class="bg-red-500 transition-all" :style="{ width: ((1 - Number(card.win_rate)) * 100) + '%' }"></div>
             </div>
             <div class="flex justify-between text-xs text-gray-500 mt-1">
-              <span>${{ parseFloat(card.gross_wins).toFixed(0) }} won</span>
-              <span>${{ parseFloat(card.gross_losses).toFixed(0) }} lost</span>
+              <span>${{ formatNum(card.gross_wins, 0) }} won</span>
+              <span>${{ formatNum(card.gross_losses, 0) }} lost</span>
             </div>
           </div>
         </div>
@@ -173,20 +173,20 @@
                 <span class="text-xs text-gray-500 ml-1">{{ pos.contract_type }}</span>
               </td>
               <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">{{ pos.strategy || '-' }}</td>
-              <td class="px-4 py-3 text-sm text-right text-gray-900 dark:text-white">${{ parseFloat(pos.avg_price).toFixed(2) }}</td>
+              <td class="px-4 py-3 text-sm text-right text-gray-900 dark:text-white">${{ formatNum(pos.avg_price, 2) }}</td>
               <td class="px-4 py-3 text-sm text-right font-medium text-gray-900 dark:text-white">
-                {{ pos.current_price ? '$' + parseFloat(pos.current_price).toFixed(2) : '-' }}
+                {{ pos.current_price ? '$' + formatNum(pos.current_price, 2) : '-' }}
               </td>
-              <td class="px-4 py-3 text-sm text-right font-bold" :class="parseFloat(pos.pnl_pct) >= 0 ? 'text-green-600' : 'text-red-600'">
-                {{ parseFloat(pos.pnl_pct) >= 0 ? '+' : '' }}{{ parseFloat(pos.pnl_pct).toFixed(2) }}%
+              <td class="px-4 py-3 text-sm text-right font-bold" :class="Number(pos.pnl_pct) >= 0 ? 'text-green-600' : 'text-red-600'">
+                {{ Number(pos.pnl_pct) >= 0 ? '+' : '' }}{{ formatNum(pos.pnl_pct, 2) }}%
               </td>
-              <td class="px-4 py-3 text-sm text-right text-red-600">{{ pos.stop_loss ? '$' + parseFloat(pos.stop_loss).toFixed(2) : '-' }}</td>
-              <td class="px-4 py-3 text-sm text-right text-green-600">{{ pos.take_profit ? '$' + parseFloat(pos.take_profit).toFixed(2) : '-' }}</td>
+              <td class="px-4 py-3 text-sm text-right text-red-600">{{ pos.stop_loss ? '$' + formatNum(pos.stop_loss, 2) : '-' }}</td>
+              <td class="px-4 py-3 text-sm text-right text-green-600">{{ pos.take_profit ? '$' + formatNum(pos.take_profit, 2) : '-' }}</td>
               <td class="px-4 py-3 text-sm text-right" :class="pos.current_dte !== null && pos.current_dte <= 1 ? 'text-red-600 font-bold' : 'text-gray-600 dark:text-gray-400'">
                 {{ pos.current_dte !== null ? pos.current_dte + 'd' : '-' }}
               </td>
               <td class="px-4 py-3 text-sm text-right text-gray-600 dark:text-gray-400">
-                {{ parseFloat(pos.hours_open).toFixed(1) }}h
+                {{ formatNum(pos.hours_open, 1) }}h
               </td>
             </tr>
           </tbody>
@@ -317,7 +317,7 @@
                 <div class="flex items-center gap-2">
                   <input type="number" v-model.number="configForm.min_win_rate" step="0.05" min="0" max="1"
                     class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-sm" />
-                  <span class="text-sm text-gray-500">{{ (configForm.min_win_rate * 100).toFixed(0) }}%</span>
+                  <span class="text-sm text-gray-500">{{ formatNum(configForm.min_win_rate * 100, 0) }}%</span>
                 </div>
               </div>
               <div>
@@ -348,7 +348,7 @@
                 <div class="flex items-center gap-2">
                   <input type="number" v-model.number="configForm.default_trailing_stop_pct" step="0.01" min="0" max="1"
                     class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-sm" />
-                  <span class="text-sm text-gray-500">{{ (configForm.default_trailing_stop_pct * 100).toFixed(0) }}%</span>
+                  <span class="text-sm text-gray-500">{{ formatNum(configForm.default_trailing_stop_pct * 100, 0) }}%</span>
                 </div>
               </div>
               <div>
@@ -401,7 +401,7 @@
                 <div class="flex items-center gap-2">
                   <input type="number" v-model.number="configForm.drawdown_throttle_pct" step="0.05" min="0.1" max="1"
                     class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white text-sm" />
-                  <span class="text-sm text-gray-500">{{ (configForm.drawdown_throttle_pct * 100).toFixed(0) }}% of max daily loss</span>
+                  <span class="text-sm text-gray-500">{{ formatNum(configForm.drawdown_throttle_pct * 100, 0) }}% of max daily loss</span>
                 </div>
               </div>
             </div>
@@ -438,6 +438,16 @@ import {
   ArrowPathIcon, CalculatorIcon, ChartBarSquareIcon,
   EyeIcon, ShieldCheckIcon, ShieldExclamationIcon, ClockIcon,
 } from '@heroicons/vue/24/outline'
+
+function formatNum(v, decimals = 2) {
+  const n = Number(v)
+  return isNaN(n) ? '0.00' : n.toFixed(decimals)
+}
+
+function safeLocale(v) {
+  const n = Number(v)
+  return isNaN(n) ? '0' : n.toLocaleString()
+}
 
 const store = useSimulationStore()
 const loading = ref(true)

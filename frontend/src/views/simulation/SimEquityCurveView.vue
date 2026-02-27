@@ -8,7 +8,7 @@
       <div class="flex items-center gap-4">
         <div v-if="store.accountState" class="text-right">
           <p class="text-sm text-gray-500 dark:text-gray-400">Current Equity</p>
-          <p class="text-2xl font-bold text-gray-900 dark:text-white">${{ parseFloat(store.accountState.equity).toLocaleString() }}</p>
+          <p class="text-2xl font-bold text-gray-900 dark:text-white">${{ safeLocale(store.accountState.equity) }}</p>
         </div>
       </div>
     </div>
@@ -18,19 +18,19 @@
       <div class="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
         <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Buying Power</p>
         <p class="text-lg font-bold text-gray-900 dark:text-white">
-          ${{ store.accountState ? parseFloat(store.accountState.buying_power).toLocaleString() : '0' }}
+          ${{ store.accountState ? safeLocale(store.accountState.buying_power) : '0' }}
         </p>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
         <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Margin Used</p>
         <p class="text-lg font-bold text-gray-900 dark:text-white">
-          ${{ store.accountState ? parseFloat(store.accountState.margin_used).toLocaleString() : '0' }}
+          ${{ store.accountState ? safeLocale(store.accountState.margin_used) : '0' }}
         </p>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg p-4 shadow">
         <p class="text-xs text-gray-500 dark:text-gray-400 uppercase">Peak Equity</p>
         <p class="text-lg font-bold text-green-600 dark:text-green-400">
-          ${{ store.accountState ? parseFloat(store.accountState.peak_equity).toLocaleString() : '0' }}
+          ${{ store.accountState ? safeLocale(store.accountState.peak_equity) : '0' }}
         </p>
       </div>
       <div class="bg-white dark:bg-gray-800 rounded-lg p-4 shadow flex items-center justify-between">
@@ -90,7 +90,7 @@
             <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">{{ pos.contract_type }}</td>
             <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">{{ pos.strategy || '-' }}</td>
             <td class="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-200">{{ pos.quantity }}</td>
-            <td class="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-200">${{ parseFloat(pos.avg_price).toFixed(2) }}</td>
+            <td class="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-200">${{ formatNum(pos.avg_price, 2) }}</td>
             <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">{{ pos.expiration ? new Date(pos.expiration).toLocaleDateString() : '-' }}</td>
             <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400">{{ new Date(pos.opened_at).toLocaleString() }}</td>
           </tr>
@@ -114,6 +114,16 @@
 import { ref, onMounted, watch, nextTick } from 'vue'
 import { useSimulationStore } from '@/stores/simulation'
 import { ChartBarIcon } from '@heroicons/vue/24/outline'
+
+function formatNum(v, decimals = 2) {
+  const n = Number(v)
+  return isNaN(n) ? '0.00' : n.toFixed(decimals)
+}
+
+function safeLocale(v) {
+  const n = Number(v)
+  return isNaN(n) ? '0' : n.toLocaleString()
+}
 
 const store = useSimulationStore()
 const chartCanvas = ref(null)

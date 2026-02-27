@@ -23,9 +23,9 @@
             <h3 class="text-lg font-bold text-gray-900 dark:text-white">{{ strat.strategy || 'Unknown' }}</h3>
             <span
               class="text-lg font-bold"
-              :class="parseFloat(strat.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
+              :class="Number(strat.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
             >
-              {{ parseFloat(strat.total_pnl) >= 0 ? '+' : '' }}${{ parseFloat(strat.total_pnl).toLocaleString() }}
+              {{ Number(strat.total_pnl) >= 0 ? '+' : '' }}${{ safeLocale(strat.total_pnl) }}
             </span>
           </div>
 
@@ -36,29 +36,29 @@
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Win Rate</p>
-              <p class="font-semibold" :class="parseFloat(strat.win_rate) >= 50 ? 'text-green-600' : 'text-red-600'">
-                {{ parseFloat(strat.win_rate).toFixed(1) }}%
+              <p class="font-semibold" :class="Number(strat.win_rate) >= 50 ? 'text-green-600' : 'text-red-600'">
+                {{ formatNum(strat.win_rate, 1) }}%
               </p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Avg P&L</p>
-              <p class="font-semibold" :class="parseFloat(strat.avg_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
-                ${{ parseFloat(strat.avg_pnl).toFixed(2) }}
+              <p class="font-semibold" :class="Number(strat.avg_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                ${{ formatNum(strat.avg_pnl, 2) }}
               </p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Avg R</p>
               <p class="font-semibold text-gray-900 dark:text-white">
-                {{ strat.avg_r_multiple ? parseFloat(strat.avg_r_multiple).toFixed(2) + 'R' : '-' }}
+                {{ strat.avg_r_multiple ? formatNum(strat.avg_r_multiple, 2) + 'R' : '-' }}
               </p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Best Trade</p>
-              <p class="font-semibold text-green-600">${{ parseFloat(strat.best_trade).toFixed(2) }}</p>
+              <p class="font-semibold text-green-600">${{ formatNum(strat.best_trade, 2) }}</p>
             </div>
             <div>
               <p class="text-gray-500 dark:text-gray-400">Worst Trade</p>
-              <p class="font-semibold text-red-600">${{ parseFloat(strat.worst_trade).toFixed(2) }}</p>
+              <p class="font-semibold text-red-600">${{ formatNum(strat.worst_trade, 2) }}</p>
             </div>
           </div>
 
@@ -67,11 +67,11 @@
             <div class="flex h-2 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700">
               <div
                 class="bg-green-500 transition-all"
-                :style="{ width: parseFloat(strat.win_rate) + '%' }"
+                :style="{ width: Number(strat.win_rate) + '%' }"
               ></div>
               <div
                 class="bg-red-500 transition-all"
-                :style="{ width: (100 - parseFloat(strat.win_rate)) + '%' }"
+                :style="{ width: (100 - Number(strat.win_rate)) + '%' }"
               ></div>
             </div>
             <div class="flex justify-between text-xs text-gray-500 mt-1">
@@ -106,14 +106,14 @@
               <td class="px-6 py-4 text-sm font-medium text-gray-900 dark:text-white">{{ bucket.dte_bucket }}</td>
               <td class="px-6 py-4 text-sm text-right text-gray-600 dark:text-gray-400">{{ bucket.total_trades }}</td>
               <td class="px-6 py-4 text-sm text-right text-gray-600 dark:text-gray-400">{{ bucket.winners }}</td>
-              <td class="px-6 py-4 text-sm text-right font-medium" :class="parseFloat(bucket.win_rate) >= 50 ? 'text-green-600' : 'text-red-600'">
-                {{ parseFloat(bucket.win_rate).toFixed(1) }}%
+              <td class="px-6 py-4 text-sm text-right font-medium" :class="Number(bucket.win_rate) >= 50 ? 'text-green-600' : 'text-red-600'">
+                {{ formatNum(bucket.win_rate, 1) }}%
               </td>
-              <td class="px-6 py-4 text-sm text-right font-medium" :class="parseFloat(bucket.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
-                ${{ parseFloat(bucket.total_pnl).toLocaleString() }}
+              <td class="px-6 py-4 text-sm text-right font-medium" :class="Number(bucket.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                ${{ safeLocale(bucket.total_pnl) }}
               </td>
-              <td class="px-6 py-4 text-sm text-right" :class="parseFloat(bucket.avg_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
-                ${{ parseFloat(bucket.avg_pnl).toFixed(2) }}
+              <td class="px-6 py-4 text-sm text-right" :class="Number(bucket.avg_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                ${{ formatNum(bucket.avg_pnl, 2) }}
               </td>
             </tr>
           </tbody>
@@ -148,11 +148,11 @@
                 {{ new Date(run.start_date).toLocaleDateString() }} - {{ new Date(run.end_date).toLocaleDateString() }}
               </td>
               <td class="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-200">{{ run.total_trades }}</td>
-              <td class="px-4 py-3 text-sm text-right" :class="parseFloat(run.win_rate) >= 0.5 ? 'text-green-600' : 'text-red-600'">
-                {{ (parseFloat(run.win_rate) * 100).toFixed(1) }}%
+              <td class="px-4 py-3 text-sm text-right" :class="Number(run.win_rate) >= 0.5 ? 'text-green-600' : 'text-red-600'">
+                {{ formatNum(Number(run.win_rate) * 100, 1) }}%
               </td>
-              <td class="px-4 py-3 text-sm text-right font-medium" :class="parseFloat(run.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
-                ${{ parseFloat(run.total_pnl).toLocaleString() }}
+              <td class="px-4 py-3 text-sm text-right font-medium" :class="Number(run.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                ${{ safeLocale(run.total_pnl) }}
               </td>
               <td class="px-4 py-3">
                 <span
@@ -176,6 +176,16 @@
 import { ref, onMounted } from 'vue'
 import { useSimulationStore } from '@/stores/simulation'
 import { ChartBarSquareIcon } from '@heroicons/vue/24/outline'
+
+function formatNum(v, decimals = 2) {
+  const n = Number(v)
+  return isNaN(n) ? '0.00' : n.toFixed(decimals)
+}
+
+function safeLocale(v) {
+  const n = Number(v)
+  return isNaN(n) ? '0' : n.toLocaleString()
+}
 
 const store = useSimulationStore()
 const loading = ref(true)

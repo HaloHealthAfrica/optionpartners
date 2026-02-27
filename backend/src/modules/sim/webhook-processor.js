@@ -1,11 +1,14 @@
 'use strict';
 
 const webhookService = require('../webhooks/webhook.service');
+const { detectIndicatorSource } = require('../webhooks/indicator-detector');
 const decisionRouter = require('./decision-router');
 const executor = require('./executor');
 const tradeFinalizer = require('./trade-finalizer');
 const ledgerService = require('./ledger.service');
 const signalPrioritizer = require('./signal-prioritizer');
+const { maybeCreateStratAlertFromWebhook } = require('./strat-alert.service');
+const NotificationService = require('../../services/notificationService');
 const logger = require('../../utils/logger');
 const { assertSimMode } = require('../../config/tradingMode');
 
@@ -29,7 +32,7 @@ class WebhookProcessor {
   async processEvent(event) {
     assertSimMode();
 
-    if (event.status !== 'RECEIVED') {
+    if (event.status !== 'RECEIVED' && event.status !== 'REJECTED') {
       return { skipped: true, reason: `Event status is ${event.status}` };
     }
 
@@ -43,39 +46,93 @@ class WebhookProcessor {
         ? JSON.parse(event.raw_payload)
         : event.raw_payload;
 
+      // STRAT alert creation — runs before decision routing to persist the alert
+      // regardless of whether the trade is approved
+      const source = detectIndicatorSource(payload);
+      if (source === 'STRAT') {
+        maybeCreateStratAlertFromWebhook(payload, event.user_id, event.id)
+          .catch(err => logger.error(`STRAT alert creation failed: ${err.message}`, 'webhook-processor'));
+      }
+
       // Step 1: Decision router
       const decision = await decisionRouter.evaluate(payload, event.id, event.user_id);
 
+      if (decision.contextUpdateOnly) {
+        await webhookService.markProcessed(event.id);
+        return { contextUpdate: true, indicatorSource: decision.indicatorSource };
+      }
+
       if (!decision.approved) {
         await webhookService.markRejected(event.id, decision.reason);
+        NotificationService.sendSimSignalNotification(event.user_id, {
+          symbol: decision.signal?.symbol, action: decision.signal?.action,
+          indicatorSource: decision.indicatorSource, approved: false,
+          reason: decision.reason, convictionScore: decision.convictionScore,
+        }).catch(() => {});
         return { approved: false, reason: decision.reason };
       }
 
-      // Step 2: Execute via sim executor
-      const { order, fill, position } = await executor.simulateOrder(decision.orderIntent, event.user_id);
+      // Step 2: Execute via sim executor (handle multi-position exits)
+      const intents = decision.orderIntents || [decision.orderIntent];
+      const execResults = [];
 
-      if (order.status === 'REJECTED') {
-        await webhookService.markRejected(event.id, order.rejection_reason);
-        return { approved: true, executed: false, reason: order.rejection_reason };
+      NotificationService.sendSimSignalNotification(event.user_id, {
+        symbol: decision.signal?.symbol, action: decision.signal?.action,
+        indicatorSource: decision.indicatorSource, approved: true,
+        convictionScore: decision.convictionScore,
+      }).catch(() => {});
+
+      for (const intent of intents) {
+        const { order, fill, position } = await executor.simulateOrder(intent, event.user_id);
+
+        if (order.status === 'REJECTED') {
+          execResults.push({ orderId: order.id, executed: false, reason: order.rejection_reason });
+          continue;
+        }
+
+        NotificationService.sendSimOrderFilledNotification(event.user_id, {
+          symbol: intent.symbol, side: intent.side, contractType: intent.contractType,
+          quantity: intent.quantity, fillPrice: fill?.fill_price, positionId: position?.id,
+        }).catch(() => {});
+
+        let trade = null;
+        if (position && position.status === 'CLOSED') {
+          trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), event.user_id);
+          NotificationService.sendSimTradeClosedNotification(event.user_id, {
+            symbol: position.symbol, contractType: position.contract_type,
+            pnl: trade?.pnl, pnlPercent: trade?.pnl_percent,
+            tradeId: trade?.id,
+          }).catch(() => {});
+        }
+
+        execResults.push({
+          executed: true,
+          orderId: order.id,
+          fillPrice: fill?.fill_price,
+          positionId: position?.id,
+          tradeId: trade?.id,
+        });
       }
 
-      // Step 3: If position was closed, finalize trade
-      let trade = null;
-      if (position && position.status === 'CLOSED') {
-        trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), event.user_id);
+      const anyExecuted = execResults.some(r => r.executed);
+      if (!anyExecuted) {
+        const reasons = execResults.map(r => r.reason).filter(Boolean).join('; ');
+        await webhookService.markRejected(event.id, reasons);
+        return { approved: true, executed: false, reason: reasons };
       }
 
-      // Step 4: Mark webhook as processed
+      // Step 3: Mark webhook as processed
       await webhookService.markProcessed(event.id);
       this._processedCount++;
 
       return {
         approved: true,
         executed: true,
-        orderId: order.id,
-        fillPrice: fill?.fill_price,
-        positionId: position?.id,
-        tradeId: trade?.id,
+        results: execResults,
+        orderId: execResults[0]?.orderId,
+        fillPrice: execResults[0]?.fillPrice,
+        positionId: execResults[0]?.positionId,
+        tradeId: execResults[0]?.tradeId,
       };
     } catch (error) {
       logger.error(`Processing event ${event.id} failed: ${error.message}`, 'webhook-processor');
@@ -97,7 +154,7 @@ class WebhookProcessor {
     const rejected = [];
 
     for (const event of pending) {
-      if (event.status !== 'RECEIVED' || !event.user_id) {
+      if ((event.status !== 'RECEIVED' && event.status !== 'REJECTED') || !event.user_id) {
         const result = await this.processEvent(event);
         rejected.push({ eventId: event.id, ...result });
         continue;
@@ -108,9 +165,18 @@ class WebhookProcessor {
           ? JSON.parse(event.raw_payload)
           : event.raw_payload;
 
+        const batchSource = detectIndicatorSource(payload);
+        if (batchSource === 'STRAT') {
+          maybeCreateStratAlertFromWebhook(payload, event.user_id, event.id)
+            .catch(err => logger.error(`STRAT alert creation failed: ${err.message}`, 'webhook-processor'));
+        }
+
         const decision = await decisionRouter.evaluate(payload, event.id, event.user_id);
 
-        if (decision.approved) {
+        if (decision.contextUpdateOnly) {
+          await webhookService.markProcessed(event.id);
+          rejected.push({ eventId: event.id, contextUpdate: true, indicatorSource: decision.indicatorSource });
+        } else if (decision.approved) {
           evaluated.push({ event, decision });
         } else {
           await webhookService.markRejected(event.id, decision.reason);
@@ -144,16 +210,52 @@ class WebhookProcessor {
    */
   async _executeApprovedDecision(event, decision, score) {
     try {
-      const { order, fill, position } = await executor.simulateOrder(decision.orderIntent, event.user_id);
+      const intents = decision.orderIntents || [decision.orderIntent];
+      const execResults = [];
 
-      if (order.status === 'REJECTED') {
-        await webhookService.markRejected(event.id, order.rejection_reason);
-        return { approved: true, executed: false, reason: order.rejection_reason };
+      NotificationService.sendSimSignalNotification(event.user_id, {
+        symbol: decision.signal?.symbol, action: decision.signal?.action,
+        indicatorSource: decision.indicatorSource, approved: true,
+        convictionScore: decision.convictionScore,
+      }).catch(() => {});
+
+      for (const intent of intents) {
+        const { order, fill, position } = await executor.simulateOrder(intent, event.user_id);
+
+        if (order.status === 'REJECTED') {
+          execResults.push({ orderId: order.id, executed: false, reason: order.rejection_reason });
+          continue;
+        }
+
+        NotificationService.sendSimOrderFilledNotification(event.user_id, {
+          symbol: intent.symbol, side: intent.side, contractType: intent.contractType,
+          quantity: intent.quantity, fillPrice: fill?.fill_price, positionId: position?.id,
+        }).catch(() => {});
+
+        let trade = null;
+        if (position && position.status === 'CLOSED') {
+          trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), event.user_id);
+          NotificationService.sendSimTradeClosedNotification(event.user_id, {
+            symbol: position.symbol, contractType: position.contract_type,
+            pnl: trade?.pnl, pnlPercent: trade?.pnl_percent,
+            tradeId: trade?.id,
+          }).catch(() => {});
+        }
+
+        execResults.push({
+          executed: true,
+          orderId: order.id,
+          fillPrice: fill?.fill_price,
+          positionId: position?.id,
+          tradeId: trade?.id,
+        });
       }
 
-      let trade = null;
-      if (position && position.status === 'CLOSED') {
-        trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), event.user_id);
+      const anyExecuted = execResults.some(r => r.executed);
+      if (!anyExecuted) {
+        const reasons = execResults.map(r => r.reason).filter(Boolean).join('; ');
+        await webhookService.markRejected(event.id, reasons);
+        return { approved: true, executed: false, reason: reasons };
       }
 
       await webhookService.markProcessed(event.id);
@@ -162,10 +264,11 @@ class WebhookProcessor {
       return {
         approved: true,
         executed: true,
-        orderId: order.id,
-        fillPrice: fill?.fill_price,
-        positionId: position?.id,
-        tradeId: trade?.id,
+        results: execResults,
+        orderId: execResults[0]?.orderId,
+        fillPrice: execResults[0]?.fillPrice,
+        positionId: execResults[0]?.positionId,
+        tradeId: execResults[0]?.tradeId,
       };
     } catch (error) {
       logger.error(`Execution failed for ${event.id}: ${error.message}`, 'webhook-processor');

@@ -32,9 +32,17 @@ class TradeFinalizerService {
       pnl = (exitPrice - entryPrice) * quantity * multiplier;
     }
 
-    // P&L percent based on entry cost
-    const entryCost = entryPrice * quantity * multiplier;
-    const pnlPercent = entryCost !== 0 ? (pnl / entryCost) * 100 : 0;
+    // P&L percent: for credit spreads use margin (capital at risk), not credit received
+    let capitalBase;
+    if (position.contract_type === 'CREDIT_SPREAD') {
+      const spreadWidth = Math.abs(
+        (parseFloat(position.strike_short) || 0) - (parseFloat(position.strike_long) || 0)
+      );
+      capitalBase = (spreadWidth - entryPrice) * quantity * multiplier;
+    } else {
+      capitalBase = entryPrice * quantity * multiplier;
+    }
+    const pnlPercent = capitalBase !== 0 ? (pnl / capitalBase) * 100 : 0;
 
     // R-multiple (if stop loss is available from the order intent)
     const rMultiple = await this._calculateRMultiple(position, pnl);
@@ -44,13 +52,15 @@ class TradeFinalizerService {
       ? Math.ceil((new Date(position.expiration) - new Date(position.opened_at)) / (1000 * 60 * 60 * 24))
       : null;
 
-    // Commission total from fills
+    // Commission total from fills: match by the position's webhook_event_id (entry)
+    // and any order whose intent_payload references this position_id (exit)
     const commissionResult = await db.query(
       `SELECT COALESCE(SUM(f.commission), 0) as total_commission
        FROM sim_fills f
        JOIN sim_orders o ON f.order_id = o.id
-       WHERE o.position_id = $1 OR o.webhook_event_id = $2`,
-      [position.id, position.webhook_event_id]
+       WHERE o.webhook_event_id = $1
+          OR o.intent_payload->>'positionId' = $2`,
+      [position.webhook_event_id, position.id]
     );
     const commissionTotal = parseFloat(commissionResult.rows[0].total_commission);
 
@@ -65,10 +75,10 @@ class TradeFinalizerService {
         entry_price, exit_price, quantity, contract_multiplier,
         entry_time, exit_time, pnl, pnl_percent, r_multiple,
         commission_total, dte_at_entry, delta_at_entry,
-        is_sim, webhook_event_id
+        is_sim, webhook_event_id, stop_source, exit_reason
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, TRUE, $25
+        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, TRUE, $25, $26, $27
       ) RETURNING *`,
       [
         id, userId, position.id, position.symbol, position.underlying_symbol,
@@ -78,7 +88,7 @@ class TradeFinalizerService {
         position.opened_at, position.closed_at || new Date(),
         pnl, pnlPercent, rMultiple,
         commissionTotal, dteAtEntry, position.delta_at_entry,
-        position.webhook_event_id,
+        position.webhook_event_id, position.stop_source || null, position.exit_reason || null,
       ]
     );
 
@@ -107,10 +117,28 @@ class TradeFinalizerService {
   }
 
   async _calculateRMultiple(position, pnl) {
-    // Try to get stop loss from the original order intent
+    const multiplier = position.contract_type === 'STOCK' ? 1 : CONTRACT_MULTIPLIER;
+
+    // Credit spreads: risk = max loss = (spreadWidth - credit) * multiplier * qty
+    if (position.contract_type === 'CREDIT_SPREAD') {
+      const spreadWidth = Math.abs(
+        (parseFloat(position.strike_short) || 0) - (parseFloat(position.strike_long) || 0)
+      );
+      const creditReceived = parseFloat(position.avg_price);
+      const maxLossPerContract = (spreadWidth - creditReceived) * multiplier;
+      const totalRisk = maxLossPerContract * position.quantity;
+      if (totalRisk > 0) {
+        return Math.round((pnl / totalRisk) * 10000) / 10000;
+      }
+      return null;
+    }
+
+    // Debit trades: risk = |entryPrice - stopLoss| * multiplier * qty
     const orderResult = await db.query(
-      `SELECT intent_payload FROM sim_orders WHERE position_id = $1 OR webhook_event_id = $2 ORDER BY created_at ASC LIMIT 1`,
-      [position.id, position.webhook_event_id]
+      `SELECT intent_payload FROM sim_orders
+       WHERE webhook_event_id = $1 AND side = 'BUY'
+       ORDER BY created_at ASC LIMIT 1`,
+      [position.webhook_event_id]
     );
 
     if (orderResult.rows.length > 0) {
@@ -119,7 +147,6 @@ class TradeFinalizerService {
         : orderResult.rows[0].intent_payload;
 
       if (intent.stopLoss) {
-        const multiplier = position.contract_type === 'STOCK' ? 1 : CONTRACT_MULTIPLIER;
         const riskPerUnit = Math.abs(parseFloat(position.avg_price) - intent.stopLoss);
         const totalRisk = riskPerUnit * position.quantity * multiplier;
         if (totalRisk > 0) {

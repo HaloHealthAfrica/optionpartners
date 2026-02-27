@@ -27,14 +27,15 @@ class SignalPrioritizer {
       })
     );
 
-    scored.sort((a, b) => b.score - a.score);
+    const withIntel = this.incorporateIntelligence(scored);
+    withIntel.sort((a, b) => b.score - a.score);
 
     logger.info(
-      `Signal priority queue: ${scored.map(s => `${s.decision.signal.symbol}:${s.score.toFixed(2)}`).join(', ')}`,
+      `Signal priority queue: ${withIntel.map(s => `${s.decision.signal.symbol}:${s.score.toFixed(2)}(intel=${s.intelligenceScore})`).join(', ')}`,
       'signal-prioritizer'
     );
 
-    return scored;
+    return withIntel;
   }
 
   async _scoreSignal(signal, userId) {
@@ -81,6 +82,22 @@ class SignalPrioritizer {
     }
 
     return Math.round(score * 100) / 100;
+  }
+
+  /**
+   * Merge the conviction score from the trade decision engine into prioritization.
+   * Higher conviction trades get priority when position slots are limited.
+   */
+  incorporateIntelligence(scoredDecisions) {
+    return scoredDecisions.map((item) => {
+      const conviction = item.decision?.convictionScore ?? item.decision?.intelligenceScore ?? 0;
+      const convictionBonus = (conviction - 70) * 0.2; // 0 at 70, +4 at 90, +6 at 100
+      return {
+        ...item,
+        score: (item.score || 0) + convictionBonus,
+        intelligenceScore: conviction,
+      };
+    });
   }
 
   async _getConfig(userId) {

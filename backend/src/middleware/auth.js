@@ -44,10 +44,10 @@ const authenticate = async (req, res, next) => {
 
 const optionalAuth = async (req, res, next) => {
   try {
-    // Try to get token from Authorization header first
+    // Try JWT from Authorization header
     let token = req.header('Authorization')?.replace('Bearer ', '');
 
-    // If no Authorization header, try to get token from cookie
+    // Fall back to cookie
     if (!token && req.cookies && req.cookies.token) {
       token = req.cookies.token;
     }
@@ -59,8 +59,28 @@ const optionalAuth = async (req, res, next) => {
       if (user && user.is_active) {
         req.user = user;
         req.token = token;
+        return next();
       }
     }
+
+    // Fall back to x-api-key header
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey) {
+      try {
+        const ApiKey = require('../models/ApiKey');
+        const keyData = await ApiKey.verifyKey(apiKey);
+        if (keyData && keyData.is_active && (!keyData.expires_at || new Date(keyData.expires_at) > new Date())) {
+          req.user = {
+            id: keyData.user_id,
+            username: keyData.username,
+            email: keyData.email,
+            role: keyData.role,
+          };
+          req.apiKey = { id: keyData.id, name: keyData.name, permissions: keyData.permissions };
+        }
+      } catch (_) { /* swallow — optional auth */ }
+    }
+
     next();
   } catch (error) {
     next();

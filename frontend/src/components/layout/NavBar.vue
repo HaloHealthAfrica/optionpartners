@@ -358,6 +358,12 @@ const baseNavigation = [
         badge: { type: 'pro', text: 'Pro' }
       },
       {
+        name: 'Market Intelligence',
+        to: '/market-intelligence',
+        route: 'market-intelligence',
+        description: 'Real-time market regime, GEX, options flow, and volatility'
+      },
+      {
         name: 'Watchlists',
         to: '/markets',
         route: 'markets',
@@ -370,6 +376,12 @@ const baseNavigation = [
         route: 'trade-management',
         description: 'Analyze trade execution with R-Multiple performance metrics',
         badge: { type: 'pro', text: 'Pro' }
+      },
+      {
+        name: 'AI Sessions',
+        to: '/ai-history',
+        route: 'ai-history',
+        description: 'Browse past AI trading analyses and credit usage'
       }
     ]
   },

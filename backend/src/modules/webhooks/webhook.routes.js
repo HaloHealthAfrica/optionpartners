@@ -1,30 +1,29 @@
 'use strict';
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const { authenticate, optionalAuth } = require('../../middleware/auth');
 const webhookController = require('./webhook.controller');
 
-// Capture raw body for signature verification
-const captureRawBody = (req, res, next) => {
-  let data = '';
-  req.setEncoding('utf8');
-  req.on('data', (chunk) => { data += chunk; });
-  req.on('end', () => {
-    req.rawBody = data;
-    try {
-      req.body = JSON.parse(data);
-    } catch (e) {
-      req.body = {};
-    }
-    next();
-  });
-};
+const webhookRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: parseInt(process.env.WEBHOOK_RATE_LIMIT_MAX || '120', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Webhook rate limit exceeded. Max 120 requests per minute.' },
+});
 
-// Public webhook endpoint (authenticated via HMAC or optional API key)
-router.post('/tradingview', optionalAuth, webhookController.receiveTradingViewWebhook);
+// Public webhook endpoints (authenticated via HMAC or API key)
+router.post('/tradingview', webhookRateLimit, optionalAuth, webhookController.receiveTradingViewWebhook);
+
+// Market data webhook endpoints
+router.post('/flow', webhookRateLimit, optionalAuth, webhookController.receiveOptionsFlow);
+router.post('/price', webhookRateLimit, optionalAuth, webhookController.receivePriceTick);
+router.post('/chain', webhookRateLimit, optionalAuth, webhookController.receiveChainSnapshot);
 
 // Authenticated endpoints for viewing webhook history
+router.get('/stats', authenticate, webhookController.getWebhookStats);
 router.get('/', authenticate, webhookController.listWebhooks);
 router.get('/:id', authenticate, webhookController.getWebhook);
 

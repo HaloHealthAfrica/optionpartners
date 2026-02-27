@@ -38,11 +38,13 @@ export const useSimulationStore = defineStore('simulation', () => {
   })
 
   const totalPnL = computed(() => {
-    return accountState.value?.realized_pnl ?? 0
+    const v = Number(accountState.value?.realized_pnl)
+    return isNaN(v) ? 0 : v
   })
 
   const equity = computed(() => {
-    return accountState.value?.equity ?? 0
+    const v = Number(accountState.value?.equity)
+    return isNaN(v) ? 0 : v
   })
 
   const killSwitchActive = computed(() => {
@@ -53,10 +55,11 @@ export const useSimulationStore = defineStore('simulation', () => {
     try {
       const { data } = await api.get('/sim/account')
       accountState.value = data
+      error.value = null
       return data
     } catch (err) {
       error.value = err.response?.data?.error || err.message
-      throw err
+      return null
     }
   }
 
@@ -113,12 +116,13 @@ export const useSimulationStore = defineStore('simulation', () => {
         ...params,
       }
       const { data } = await api.get('/sim/trades', { params: queryParams })
-      trades.value = data.trades
-      pagination.value.total = data.total
+      trades.value = data.trades || []
+      pagination.value.total = data.total || 0
+      error.value = null
       return data
     } catch (err) {
       error.value = err.response?.data?.error || err.message
-      throw err
+      return null
     } finally {
       loading.value = false
     }

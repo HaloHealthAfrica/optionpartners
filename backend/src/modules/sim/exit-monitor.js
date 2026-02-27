@@ -4,6 +4,8 @@ const db = require('../../config/database');
 const executor = require('./executor');
 const tradeFinalizer = require('./trade-finalizer');
 const ledgerService = require('./ledger.service');
+const NotificationService = require('../../services/notificationService');
+const dataServiceProxy = require('../../services/dataServiceProxy');
 const logger = require('../../utils/logger');
 
 /**
@@ -62,61 +64,98 @@ class ExitMonitor {
 
     this._checksRun++;
 
+    const userIds = new Set();
     for (const pos of positions.rows) {
       if (pos.enable_exit_monitor === false) continue;
 
       try {
         await this._evaluatePosition(pos);
+        userIds.add(pos.user_id);
       } catch (error) {
         logger.error(`Exit check failed for position ${pos.id}: ${error.message}`, 'exit-monitor');
       }
     }
+
+    for (const uid of userIds) {
+      await this._refreshUnrealizedPnl(uid);
+    }
   }
 
   async _evaluatePosition(position) {
-    const currentPrice = await this._getLatestPrice(position);
-    if (!currentPrice) return;
+    const underlyingPrice = await this._getLatestPrice(position);
+    if (!underlyingPrice) return;
 
+    const isOption = position.contract_type !== 'STOCK';
+    const optionPrice = isOption
+      ? await this._estimateOptionPrice(position, underlyingPrice)
+      : underlyingPrice;
+
+    // Store option price (not underlying) so unrealized PnL is correct
     await db.query(
       'UPDATE sim_positions SET current_price = $2 WHERE id = $1',
-      [position.id, currentPrice]
+      [position.id, optionPrice]
     );
 
-    const entryPrice = parseFloat(position.avg_price);
     const isCreditSpread = position.contract_type === 'CREDIT_SPREAD';
+    const isPut = position.contract_type === 'PUT';
+    const profitsWhenDown = isPut;
 
-    // Track highest price for trailing stops
-    const prevHighest = parseFloat(position.highest_price || entryPrice);
-    const newHighest = Math.max(prevHighest, currentPrice);
+    // Watermarks track the underlying for stop/TP comparison
+    const prevHighest = parseFloat(position.highest_price || underlyingPrice);
+    const prevLowest = parseFloat(position.lowest_price || underlyingPrice);
+    const newHighest = Math.max(prevHighest, underlyingPrice);
+    const newLowest = Math.min(prevLowest, underlyingPrice);
+
+    const updates = [];
+    const updateParams = [position.id];
+    let paramIdx = 2;
     if (newHighest > prevHighest) {
+      updates.push(`highest_price = $${paramIdx++}`);
+      updateParams.push(newHighest);
+    }
+    if (newLowest < prevLowest) {
+      updates.push(`lowest_price = $${paramIdx++}`);
+      updateParams.push(newLowest);
+    }
+    if (updates.length > 0) {
       await db.query(
-        'UPDATE sim_positions SET highest_price = $2 WHERE id = $1',
-        [position.id, newHighest]
+        `UPDATE sim_positions SET ${updates.join(', ')} WHERE id = $1`,
+        updateParams
       );
     }
 
-    // 1. Stop-loss check
+    // 1. Stop-loss check (compare underlying price against underlying-based stop levels)
     if (position.stop_loss) {
       const stopLoss = parseFloat(position.stop_loss);
-      const breached = isCreditSpread
-        ? currentPrice >= stopLoss
-        : currentPrice <= stopLoss;
+      let breached;
+      if (isCreditSpread) {
+        breached = underlyingPrice >= stopLoss;
+      } else if (profitsWhenDown) {
+        breached = underlyingPrice >= stopLoss;
+      } else {
+        breached = underlyingPrice <= stopLoss;
+      }
 
       if (breached) {
-        await this._triggerExit(position, currentPrice, 'STOP_LOSS', `Price ${currentPrice} breached stop-loss ${stopLoss}`);
+        await this._triggerExit(position, optionPrice, 'STOP_LOSS', `Underlying ${underlyingPrice} breached stop-loss ${stopLoss}`);
         return;
       }
     }
 
-    // 2. Take-profit check
+    // 2. Take-profit check (compare underlying price against underlying-based TP levels)
     if (position.take_profit) {
       const takeProfit = parseFloat(position.take_profit);
-      const reached = isCreditSpread
-        ? currentPrice <= takeProfit
-        : currentPrice >= takeProfit;
+      let reached;
+      if (isCreditSpread) {
+        reached = underlyingPrice <= takeProfit;
+      } else if (profitsWhenDown) {
+        reached = underlyingPrice <= takeProfit;
+      } else {
+        reached = underlyingPrice >= takeProfit;
+      }
 
       if (reached) {
-        await this._triggerExit(position, currentPrice, 'TAKE_PROFIT', `Price ${currentPrice} reached take-profit ${takeProfit}`);
+        await this._triggerExit(position, optionPrice, 'TAKE_PROFIT', `Underlying ${underlyingPrice} reached take-profit ${takeProfit}`);
         return;
       }
     }
@@ -125,21 +164,32 @@ class ExitMonitor {
     if (position.expiration && (position.force_close_at_dte_zero !== false)) {
       const dte = Math.ceil((new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24));
       if (dte <= 0) {
-        await this._triggerExit(position, currentPrice, 'DTE_EXPIRY', `Position expired (DTE=${dte})`);
+        await this._triggerExit(position, optionPrice, 'DTE_EXPIRY', `Position expired (DTE=${dte})`);
         return;
       }
     }
 
-    // 4. Trailing stop check
+    // 4. Trailing stop check (tracks underlying price movement)
     const trailingPct = parseFloat(position.trailing_stop_pct || position.default_trailing_stop_pct || 0);
     if (trailingPct > 0 && !isCreditSpread) {
-      const trailingStop = newHighest * (1 - trailingPct);
-      if (currentPrice <= trailingStop && currentPrice < newHighest) {
-        await this._triggerExit(
-          position, currentPrice, 'TRAILING_STOP',
-          `Price ${currentPrice} fell below trailing stop ${trailingStop.toFixed(4)} (${(trailingPct * 100).toFixed(1)}% from high ${newHighest})`
-        );
-        return;
+      if (profitsWhenDown) {
+        const trailingStop = newLowest * (1 + trailingPct);
+        if (underlyingPrice >= trailingStop && underlyingPrice > newLowest) {
+          await this._triggerExit(
+            position, optionPrice, 'TRAILING_STOP',
+            `Underlying ${underlyingPrice} rose above trailing stop ${trailingStop.toFixed(4)} (${(trailingPct * 100).toFixed(1)}% from low ${newLowest})`
+          );
+          return;
+        }
+      } else {
+        const trailingStop = newHighest * (1 - trailingPct);
+        if (underlyingPrice <= trailingStop && underlyingPrice < newHighest) {
+          await this._triggerExit(
+            position, optionPrice, 'TRAILING_STOP',
+            `Underlying ${underlyingPrice} fell below trailing stop ${trailingStop.toFixed(4)} (${(trailingPct * 100).toFixed(1)}% from high ${newHighest})`
+          );
+          return;
+        }
       }
     }
 
@@ -149,7 +199,7 @@ class ExitMonitor {
       const hoursOpen = (Date.now() - new Date(position.opened_at).getTime()) / (1000 * 60 * 60);
       if (hoursOpen >= maxHoldHours) {
         await this._triggerExit(
-          position, currentPrice, 'MAX_HOLD_DURATION',
+          position, optionPrice, 'MAX_HOLD_DURATION',
           `Position open ${hoursOpen.toFixed(1)}h exceeds max ${maxHoldHours}h`
         );
         return;
@@ -163,11 +213,21 @@ class ExitMonitor {
    * 2. Falls back to the position's current_price or avg_price
    */
   async _getLatestPrice(position) {
+    // Check price_cache first for the most reliable/recent price
+    const cached = await db.query(
+      'SELECT price, updated_at FROM price_cache WHERE symbol = $1',
+      [position.symbol]
+    );
+    if (cached.rows.length > 0) {
+      return parseFloat(cached.rows[0].price);
+    }
+
+    // Fall back to most recent webhook payload (check both symbol and ticker fields)
     const result = await db.query(
       `SELECT raw_payload FROM webhook_events
        WHERE user_id = $1
          AND status IN ('PROCESSED', 'RECEIVED')
-         AND raw_payload->>'symbol' = $2
+         AND (raw_payload->>'symbol' = $2 OR raw_payload->>'ticker' = $2)
        ORDER BY received_at DESC LIMIT 1`,
       [position.user_id, position.symbol]
     );
@@ -182,14 +242,70 @@ class ExitMonitor {
       if (price) return parseFloat(price);
     }
 
-    return position.current_price ? parseFloat(position.current_price) : null;
+    // No fallback to position.current_price — it stores the option price (not
+    // the underlying) after our price separation fix, so using it here would
+    // produce incorrect stop/TP comparisons and garbled option estimates.
+    return null;
+  }
+
+  /**
+   * Estimate the current option price for a position.
+   * Tries live chain data first, falls back to intrinsic value.
+   */
+  async _estimateOptionPrice(position, underlyingPrice) {
+    // Try live chain data from the data service
+    try {
+      const chainData = await dataServiceProxy.getOptionsChain(
+        position.underlying_symbol || position.symbol,
+        position.expiration
+      );
+      if (chainData?.data?.contracts) {
+        const targetType = position.contract_type === 'PUT' ? 'put' : 'call';
+        const match = chainData.data.contracts.find(c =>
+          parseFloat(c.strike) === parseFloat(position.strike)
+          && c.type?.toLowerCase() === targetType
+        );
+        if (match?.mid && match.mid > 0) return match.mid;
+        if (match?.last && match.last > 0) return match.last;
+      }
+    } catch (_) {
+      // Data service unavailable — fall back to intrinsic estimation
+    }
+
+    const strike = parseFloat(position.strike);
+    if (!strike || isNaN(strike)) return parseFloat(position.avg_price);
+
+    if (position.contract_type === 'CALL') {
+      return Math.max(0.01, underlyingPrice - strike);
+    }
+    if (position.contract_type === 'PUT') {
+      return Math.max(0.01, strike - underlyingPrice);
+    }
+    if (position.contract_type === 'CREDIT_SPREAD') {
+      const shortStrike = parseFloat(position.strike_short || position.strike);
+      const longStrike = parseFloat(position.strike_long);
+      if (!isNaN(shortStrike) && !isNaN(longStrike)) {
+        const shortIntrinsic = Math.max(0, shortStrike - underlyingPrice);
+        const longIntrinsic = Math.max(0, longStrike - underlyingPrice);
+        return Math.max(0.01, shortIntrinsic - longIntrinsic);
+      }
+    }
+
+    return parseFloat(position.avg_price);
   }
 
   async _triggerExit(position, exitPrice, reason, message) {
-    const client = await db.connect();
-    try {
-      await client.query('BEGIN');
+    // Idempotency: verify position is still OPEN before attempting exit
+    const check = await db.query(
+      'SELECT status FROM sim_positions WHERE id = $1',
+      [position.id]
+    );
+    if (check.rows.length === 0 || check.rows[0].status !== 'OPEN') {
+      logger.info(`Exit skipped for ${position.id}: position is no longer OPEN`, 'exit-monitor');
+      return;
+    }
 
+    try {
       const intent = {
         symbol: position.symbol,
         side: 'SELL',
@@ -206,8 +322,6 @@ class ExitMonitor {
         positionId: position.id,
       };
 
-      await client.query('COMMIT');
-
       const { order, fill, position: closedPos } = await executor.simulateOrder(intent, position.user_id);
 
       if (closedPos && closedPos.status === 'CLOSED') {
@@ -215,16 +329,54 @@ class ExitMonitor {
           'UPDATE sim_positions SET exit_reason = $2 WHERE id = $1',
           [position.id, reason]
         );
-        await tradeFinalizer.finalize(closedPos, parseFloat(fill.fill_price), position.user_id);
+        closedPos.exit_reason = reason;
+        const trade = await tradeFinalizer.finalize(closedPos, parseFloat(fill.fill_price), position.user_id);
+        NotificationService.sendSimTradeClosedNotification(position.user_id, {
+          symbol: position.symbol, contractType: position.contract_type,
+          pnl: trade?.pnl, pnlPercent: trade?.pnl_percent,
+          exitReason: reason, tradeId: trade?.id,
+        }).catch(() => {});
       }
 
       this._exitsTriggered++;
       logger.info(`EXIT TRIGGERED [${reason}]: ${position.symbol} @ ${exitPrice} — ${message}`, 'exit-monitor');
     } catch (error) {
-      await client.query('ROLLBACK');
       logger.error(`Exit trigger failed for ${position.id}: ${error.message}`, 'exit-monitor');
-    } finally {
-      client.release();
+    }
+  }
+
+  async _refreshUnrealizedPnl(userId) {
+    try {
+      const result = await db.query(
+        `SELECT COALESCE(SUM(
+          CASE
+            WHEN contract_type = 'CREDIT_SPREAD'
+              THEN (avg_price - COALESCE(current_price, avg_price)) * quantity * 100
+            WHEN contract_type = 'STOCK'
+              THEN (COALESCE(current_price, avg_price) - avg_price) * quantity
+            ELSE
+              (COALESCE(current_price, avg_price) - avg_price) * quantity * 100
+          END
+        ), 0) as unrealized
+        FROM sim_positions
+        WHERE user_id = $1 AND status = 'OPEN'`,
+        [userId]
+      );
+
+      const unrealized = parseFloat(result.rows[0].unrealized) || 0;
+
+      await db.query(
+        `UPDATE sim_account_state
+         SET unrealized_pnl = $2,
+             equity = cash_balance + $2,
+             peak_equity = GREATEST(peak_equity, cash_balance + $2),
+             max_drawdown = GREATEST(max_drawdown, peak_equity - (cash_balance + $2)),
+             updated_at = NOW()
+         WHERE user_id = $1`,
+        [userId, unrealized]
+      );
+    } catch (err) {
+      logger.error(`Failed to refresh unrealized PnL for user ${userId}: ${err.message}`, 'exit-monitor');
     }
   }
 }
