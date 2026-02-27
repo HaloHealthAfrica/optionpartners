@@ -19,17 +19,24 @@ const TTL_MAP: Record<DataType, number> = {
 export class RedisCache {
   private client: Redis | null = null;
   private connected = false;
+  private errorLogged = false;
 
   async connect(): Promise<boolean> {
     try {
       this.client = new Redis(config.redis.url, {
         maxRetriesPerRequest: 3,
-        retryStrategy: (times) => Math.min(times * 200, 5000),
+        retryStrategy: (times) => {
+          if (times > 3) return null;
+          return Math.min(times * 500, 5000);
+        },
         lazyConnect: true,
       });
 
-      this.client.on('error', (err) => {
-        log.warn({ error: err.message }, 'Redis connection error');
+      this.client.on('error', () => {
+        if (!this.errorLogged) {
+          log.warn('Redis unavailable — falling back to memory cache');
+          this.errorLogged = true;
+        }
         this.connected = false;
       });
 

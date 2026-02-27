@@ -9,13 +9,13 @@ const configSchema = z.object({
   apiKey: z.string().min(1),
 
   twelveData: z.object({
-    apiKey: z.string().min(1),
+    apiKey: z.string().default(''),
     baseUrl: z.string().default('https://api.twelvedata.com'),
     rateLimit: z.coerce.number().default(800),
   }),
 
   unusualWhales: z.object({
-    apiKey: z.string().min(1),
+    apiKey: z.string().default(''),
     baseUrl: z.string().default('https://api.unusualwhales.com'),
     rateLimit: z.coerce.number().default(120),
   }),

@@ -88,6 +88,9 @@ services:
       ENABLE_BACKUP_SCHEDULER: ${ENABLE_BACKUP_SCHEDULER:-true}
       ENABLE_ENRICHMENT_CACHE_CLEANUP: ${ENABLE_ENRICHMENT_CACHE_CLEANUP:-true}
       FEATURES_BEHAVIORAL_ANALYTICS_ENABLED: ${FEATURES_BEHAVIORAL_ANALYTICS_ENABLED:-true}
+      # Data Service (Market Intelligence)
+      DATA_SERVICE_URL: http://data-service:4000
+      DATA_SERVICE_API_KEY: ${DATA_SERVICE_API_KEY:-dev-key}
       # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Timezone Configuration (affects admin metrics "today" calculations)
@@ -102,6 +105,28 @@ services:
       - ./backend/src/logs:/app/backend/src/logs
       - ./backend/src/data:/app/backend/src/data
       - ./backend/uploads:/app/backend/uploads
+    networks:
+      - trader-network
+    restart: unless-stopped
+
+  # Data Service (Market Intelligence)
+  data-service:
+    build:
+      context: ./data-service
+      dockerfile: Dockerfile
+    container_name: tradetally-data
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 4000
+      API_KEY: ${DATA_SERVICE_API_KEY:-dev-key}
+      TWELVE_DATA_API_KEY: ${TWELVE_DATA_API_KEY:-}
+      TWELVE_DATA_RATE_LIMIT: ${TWELVE_DATA_RATE_LIMIT:-800}
+      UNUSUAL_WHALES_API_KEY: ${UNUSUAL_WHALES_API_KEY:-}
+      UNUSUAL_WHALES_RATE_LIMIT: ${UNUSUAL_WHALES_RATE_LIMIT:-120}
+      POLYGON_API_KEY: ${POLYGON_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      CBOE_RATE_LIMIT: ${CBOE_RATE_LIMIT:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     networks:
       - trader-network
     restart: unless-stopped

@@ -204,7 +204,7 @@ class SimExecutor {
       const positionId = intent.positionId;
       if (!positionId) {
         const existing = await client.query(
-          `SELECT id FROM sim_positions WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' ORDER BY opened_at DESC LIMIT 1`,
+          `SELECT id FROM sim_positions WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' ORDER BY opened_at ASC LIMIT 1`,
           [userId, intent.symbol]
         );
         if (existing.rows.length === 0) {

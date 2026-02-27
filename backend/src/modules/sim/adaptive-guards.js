@@ -24,12 +24,17 @@ class AdaptiveGuards {
       if (!cooldownResult.allowed) return cooldownResult;
     }
 
-    // 2. Correlation guard
+    // 2. Signal deduplication — block near-duplicate signals for the same symbol/direction
+    const cooldownMs = parseInt(config.signal_dedup_cooldown_ms || process.env.SIM_SIGNAL_DEDUP_COOLDOWN_MS || '300000', 10); // 5 min default
+    const dedupResult = await this._checkSignalDedup(userId, signal, cooldownMs);
+    if (!dedupResult.allowed) return dedupResult;
+
+    // 3. Correlation guard
     const maxCorrelated = config.max_correlated_positions || 3;
     const correlationResult = await this._checkCorrelation(userId, signal, maxCorrelated);
     if (!correlationResult.allowed) return correlationResult;
 
-    // 3. Drawdown throttle
+    // 4. Drawdown throttle
     if (config.enable_drawdown_throttle !== false && accountState) {
       const throttleResult = this._checkDrawdownThrottle(signal, accountState, config);
       if (!throttleResult.allowed) return throttleResult;
@@ -124,6 +129,35 @@ class AdaptiveGuards {
           reason: `STRATEGY_COOLDOWN: ${strategy} has ${maxLosses} consecutive losses — auto-paused`,
         };
       }
+    }
+
+    return { allowed: true };
+  }
+
+  async _checkSignalDedup(userId, signal, cooldownMs) {
+    const underlying = signal.underlyingSymbol || signal.symbol?.replace(/\d{6}[CP]\d+/, '') || signal.symbol;
+    const direction = signal.direction || (signal.action === 'BUY' ? 'long' : 'short');
+
+    const result = await db.query(
+      `SELECT iv.created_at
+       FROM intelligence_verdicts iv
+       WHERE iv.user_id = $1
+         AND iv.symbol = $2
+         AND iv.direction = $3
+         AND iv.allowed = TRUE
+         AND iv.created_at > NOW() - ($4 || ' milliseconds')::interval
+       ORDER BY iv.created_at DESC
+       LIMIT 1`,
+      [userId, underlying, direction, cooldownMs]
+    );
+
+    if (result.rows.length > 0) {
+      const lastAt = result.rows[0].created_at;
+      const agoSec = Math.round((Date.now() - new Date(lastAt).getTime()) / 1000);
+      return {
+        allowed: false,
+        reason: `SIGNAL_DEDUP: ${underlying} ${direction} already approved ${agoSec}s ago (cooldown ${Math.round(cooldownMs / 1000)}s)`,
+      };
     }
 
     return { allowed: true };

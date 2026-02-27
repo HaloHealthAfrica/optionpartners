@@ -309,6 +309,13 @@ class OptionsConstructor {
         openInterest: strike.openInterest,
         volume: strike.volume,
         impliedVolatility: strike.impliedVolatility,
+        greeks: {
+          delta: strike.delta,
+          gamma: strike.gamma,
+          theta: strike.theta,
+          vega: strike.vega,
+        },
+        riskScore: strike._riskScore || null,
       },
     };
 
@@ -391,8 +398,21 @@ class OptionsConstructor {
           spread_width: recipe.spread_width,
         },
         spreadType: isBullish ? 'BULL_PUT_SPREAD' : 'BEAR_CALL_SPREAD',
-        shortLeg: { strike: shortLeg.strike, delta: shortLeg.delta, mid: shortLeg.mid },
-        longLeg: { strike: longLeg.strike, delta: longLeg.delta, mid: longLeg.mid },
+        shortLeg: {
+          strike: shortLeg.strike, delta: shortLeg.delta, mid: shortLeg.mid,
+          gamma: shortLeg.gamma, theta: shortLeg.theta, vega: shortLeg.vega,
+          riskScore: shortLeg._riskScore || null,
+        },
+        longLeg: {
+          strike: longLeg.strike, delta: longLeg.delta, mid: longLeg.mid,
+          gamma: longLeg.gamma, theta: longLeg.theta, vega: longLeg.vega,
+        },
+        netGreeks: {
+          delta: (shortLeg.delta || 0) - (longLeg.delta || 0),
+          gamma: (shortLeg.gamma || 0) - (longLeg.gamma || 0),
+          theta: (shortLeg.theta || 0) - (longLeg.theta || 0),
+          vega: (shortLeg.vega || 0) - (longLeg.vega || 0),
+        },
         actualWidth: actualWidth,
         creditReceived,
         maxLossPerContract,
@@ -403,8 +423,21 @@ class OptionsConstructor {
     return { success: true, signal: enrichedSignal };
   }
 
-  // --- Delta-based strike selection ---
+  // --- Multi-factor strike selection (Greeks + risk + liquidity) ---
 
+  /**
+   * Rank and select the best strike using a weighted composite score
+   * across delta accuracy, theta efficiency, gamma exposure, IV value,
+   * and liquidity quality. Returns the top-ranked contract with its
+   * full scorecard attached.
+   *
+   * Weight profiles:
+   *   deltaWeight  (0.30) — proximity to target delta
+   *   thetaWeight  (0.15) — theta/premium ratio (time-decay efficiency)
+   *   gammaWeight  (0.10) — gamma bang-for-buck
+   *   ivWeight     (0.15) — prefer lower IV relative to peers (cheaper)
+   *   liquidWeight (0.30) — OI, volume, tight spread
+   */
   _selectStrikeByDelta(contracts, recipe) {
     const targetDelta = parseFloat(recipe.target_delta);
     const minDelta = parseFloat(recipe.min_delta);
@@ -416,13 +449,106 @@ class OptionsConstructor {
     });
 
     if (eligible.length === 0) return null;
+    if (eligible.length === 1) {
+      eligible[0]._riskScore = this._scoreContract(eligible[0], targetDelta, eligible);
+      return eligible[0];
+    }
 
-    // Sort by proximity to target delta
-    eligible.sort((a, b) =>
-      Math.abs(Math.abs(a.delta) - targetDelta) - Math.abs(Math.abs(b.delta) - targetDelta)
+    const scored = eligible.map((c) => ({
+      ...c,
+      _riskScore: this._scoreContract(c, targetDelta, eligible),
+    }));
+
+    scored.sort((a, b) => b._riskScore.composite - a._riskScore.composite);
+
+    logger.info(
+      `[STRIKE_RANK] Top 3: ${scored.slice(0, 3).map((c) =>
+        `$${c.strike} Δ=${Math.abs(c.delta).toFixed(2)} score=${c._riskScore.composite.toFixed(1)}`
+      ).join(' | ')}`,
+      'options-constructor'
     );
 
-    return eligible[0];
+    return scored[0];
+  }
+
+  /**
+   * Compute a 0-100 composite risk/quality score for a contract.
+   */
+  _scoreContract(contract, targetDelta, peers) {
+    const W = { delta: 0.30, theta: 0.15, gamma: 0.10, iv: 0.15, liquidity: 0.30 };
+
+    // Delta accuracy: 100 when exactly on target, 0 at boundary
+    const deltaError = Math.abs(Math.abs(contract.delta) - targetDelta);
+    const maxDeltaError = Math.max(0.20, targetDelta);
+    const deltaScore = Math.max(0, 100 * (1 - deltaError / maxDeltaError));
+
+    // Theta efficiency: |theta| / premium — higher = more decay per $ risked
+    let thetaScore = 50;
+    if (contract.theta != null && contract.mid > 0) {
+      const thetaRatio = Math.abs(contract.theta) / contract.mid;
+      const peerRatios = peers
+        .filter((p) => p.theta != null && p.mid > 0)
+        .map((p) => Math.abs(p.theta) / p.mid);
+      if (peerRatios.length > 1) {
+        thetaScore = this._percentileRank(thetaRatio, peerRatios);
+      }
+    }
+
+    // Gamma score: higher gamma = more convexity (good for debit, bad for credit)
+    let gammaScore = 50;
+    if (contract.gamma != null) {
+      const peerGammas = peers.filter((p) => p.gamma != null).map((p) => p.gamma);
+      if (peerGammas.length > 1) {
+        gammaScore = this._percentileRank(contract.gamma, peerGammas);
+      }
+    }
+
+    // IV value: prefer lower IV among peers (cheaper relative premium)
+    let ivScore = 50;
+    if (contract.impliedVolatility != null) {
+      const peerIVs = peers
+        .filter((p) => p.impliedVolatility != null)
+        .map((p) => p.impliedVolatility);
+      if (peerIVs.length > 1) {
+        ivScore = 100 - this._percentileRank(contract.impliedVolatility, peerIVs);
+      }
+    }
+
+    // Liquidity: composite of OI, volume, and spread tightness
+    const oiScore = Math.min(100, (contract.openInterest || 0) / 50);
+    const volScore = Math.min(100, (contract.volume || 0) / 10);
+    let spreadScore = 100;
+    if (contract.mid > 0 && contract.ask > 0 && contract.bid >= 0) {
+      const spreadPct = (contract.ask - contract.bid) / contract.mid;
+      spreadScore = Math.max(0, 100 * (1 - spreadPct / 0.15));
+    }
+    const liquidityScore = oiScore * 0.35 + volScore * 0.30 + spreadScore * 0.35;
+
+    const composite =
+      W.delta * deltaScore +
+      W.theta * thetaScore +
+      W.gamma * gammaScore +
+      W.iv * ivScore +
+      W.liquidity * liquidityScore;
+
+    return {
+      composite: Math.round(composite * 10) / 10,
+      delta: Math.round(deltaScore),
+      theta: Math.round(thetaScore),
+      gamma: Math.round(gammaScore),
+      iv: Math.round(ivScore),
+      liquidity: Math.round(liquidityScore),
+    };
+  }
+
+  /**
+   * Percentile rank of a value within a peer array (0-100).
+   */
+  _percentileRank(value, peers) {
+    const sorted = [...peers].sort((a, b) => a - b);
+    const idx = sorted.findIndex((v) => v >= value);
+    if (idx === -1) return 100;
+    return Math.round((idx / sorted.length) * 100);
   }
 
   _findClosestStrike(contracts, targetStrike) {

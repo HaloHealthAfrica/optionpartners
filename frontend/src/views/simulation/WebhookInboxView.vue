@@ -66,100 +66,232 @@
       </button>
     </div>
 
-    <!-- Events table -->
-    <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
-      <div v-if="store.loading && !refreshing" class="p-8 text-center text-gray-500">
-        <ArrowPathIcon class="h-8 w-8 animate-spin mx-auto mb-2" />
-        Loading webhook events...
+    <!-- ==================== TRADED SIGNALS VIEW ==================== -->
+    <template v-if="activeStatus === 'TRADED_SIGNALS'">
+      <!-- Sub-filter pills -->
+      <div class="flex gap-2 mb-4">
+        <button
+          v-for="f in tradedSubFilters"
+          :key="f.value"
+          @click="setTradedOutcome(f.value)"
+          class="px-3 py-1.5 rounded-full text-xs font-medium transition-all"
+          :class="tradedOutcome === f.value
+            ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900'
+            : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'"
+        >
+          {{ f.label }}
+          <span v-if="f.count > 0" class="ml-1 opacity-70">{{ f.count }}</span>
+        </button>
       </div>
-      <div v-else-if="store.webhookEvents.length === 0" class="p-8 text-center text-gray-500 dark:text-gray-400">
-        <InboxIcon class="h-12 w-12 mx-auto mb-3 opacity-40" />
-        <p class="font-medium">No webhook events found</p>
-        <p class="text-sm mt-1">Configure your TradingView alerts to send webhooks to:</p>
-        <code class="text-xs mt-2 inline-block bg-gray-100 dark:bg-gray-700 px-3 py-1.5 rounded">{{ webhookUrl }}</code>
-      </div>
-      <table v-else class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead class="bg-gray-50 dark:bg-gray-700">
-          <tr>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Time</th>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Indicator</th>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Symbol</th>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Direction</th>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Status</th>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Processed</th>
-            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Details</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
-          <tr
-            v-for="event in store.webhookEvents"
-            :key="event.id"
-            @click="selectedEvent = event"
-            class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors"
-          >
-            <td class="px-4 py-3 text-sm text-gray-900 dark:text-gray-200 whitespace-nowrap">
-              {{ formatTime(event.received_at) }}
-            </td>
-            <td class="px-4 py-3">
-              <span class="inline-flex items-center gap-1.5 text-xs font-medium" :class="indicatorClass(detectSource(event.raw_payload))">
-                <span class="w-1.5 h-1.5 rounded-full" :class="indicatorDotClass(detectSource(event.raw_payload))"></span>
-                {{ formatSource(detectSource(event.raw_payload)) }}
-              </span>
-            </td>
-            <td class="px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-200">
-              {{ event.raw_payload?.ticker || event.raw_payload?.symbol || '-' }}
-            </td>
-            <td class="px-4 py-3">
-              <span v-if="getDirection(event.raw_payload)" class="text-xs font-medium" :class="directionClass(getDirection(event.raw_payload))">
-                {{ getDirection(event.raw_payload) }}
-              </span>
-              <span v-else class="text-xs text-gray-400">-</span>
-            </td>
-            <td class="px-4 py-3">
-              <span
-                class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium"
-                :class="statusClass(event.status)"
-              >
-                {{ event.status }}
-              </span>
-            </td>
-            <td class="px-4 py-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
-              <template v-if="event.processed_at">
-                {{ formatTime(event.processed_at) }}
-                <span class="text-gray-400 ml-1">({{ processingDelay(event) }})</span>
-              </template>
-              <span v-else class="text-gray-400">-</span>
-            </td>
-            <td class="px-4 py-3 text-sm max-w-xs truncate" :class="event.error_message ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'">
-              {{ getDetailSummary(event) }}
-            </td>
-          </tr>
-        </tbody>
-      </table>
 
-      <!-- Pagination -->
-      <div v-if="store.webhookPagination.total > store.webhookPagination.limit" class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
-        <p class="text-sm text-gray-500 dark:text-gray-400">
-          Showing {{ (store.webhookPagination.page - 1) * store.webhookPagination.limit + 1 }} -
-          {{ Math.min(store.webhookPagination.page * store.webhookPagination.limit, store.webhookPagination.total) }}
-          of {{ store.webhookPagination.total }}
-        </p>
-        <div class="flex gap-2">
-          <button
-            @click="changePage(-1)"
-            :disabled="store.webhookPagination.page <= 1"
-            class="px-3 py-1 rounded text-sm border border-gray-300 dark:border-gray-600 disabled:opacity-50"
-          >Previous</button>
-          <button
-            @click="changePage(1)"
-            :disabled="store.webhookPagination.page * store.webhookPagination.limit >= store.webhookPagination.total"
-            class="px-3 py-1 rounded text-sm border border-gray-300 dark:border-gray-600 disabled:opacity-50"
-          >Next</button>
+      <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
+        <div v-if="store.loading && !refreshing" class="p-8 text-center text-gray-500">
+          <ArrowPathIcon class="h-8 w-8 animate-spin mx-auto mb-2" />
+          Loading traded signals...
+        </div>
+        <div v-else-if="store.tradedSignals.length === 0" class="p-8 text-center text-gray-500 dark:text-gray-400">
+          <InboxIcon class="h-12 w-12 mx-auto mb-3 opacity-40" />
+          <p class="font-medium">No trade decisions found</p>
+          <p class="text-sm mt-1">Signals that reach the trade decision engine will appear here</p>
+        </div>
+        <table v-else class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+          <thead class="bg-gray-50 dark:bg-gray-700">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Time</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Symbol</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Direction</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Strategy</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Verdict</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Conviction</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Confidence</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">P&L</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Reason</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+            <tr
+              v-for="sig in store.tradedSignals"
+              :key="sig.id"
+              @click="selectedTradedSignal = sig"
+              class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors"
+            >
+              <td class="px-4 py-3 text-sm text-gray-900 dark:text-gray-200 whitespace-nowrap">
+                {{ formatTime(sig.created_at) }}
+              </td>
+              <td class="px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-200">
+                {{ sig.symbol }}
+              </td>
+              <td class="px-4 py-3">
+                <span v-if="sig.direction" class="text-xs font-medium" :class="directionClass(sig.direction)">
+                  {{ sig.direction }}
+                </span>
+                <span v-else class="text-xs text-gray-400">-</span>
+              </td>
+              <td class="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 font-medium">
+                {{ sig.strategy || '-' }}
+              </td>
+              <td class="px-4 py-3">
+                <span
+                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium"
+                  :class="sig.traded
+                    ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+                    : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'"
+                >
+                  {{ sig.traded ? 'TRADED' : 'BLOCKED' }}
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-1.5">
+                  <div class="w-12 h-1.5 rounded-full bg-gray-200 dark:bg-gray-600 overflow-hidden">
+                    <div
+                      class="h-full rounded-full transition-all"
+                      :class="convictionBarColor(sig.conviction_score)"
+                      :style="{ width: Math.min(100, sig.conviction_score || 0) + '%' }"
+                    ></div>
+                  </div>
+                  <span class="text-xs font-mono text-gray-700 dark:text-gray-300">{{ formatNum(sig.conviction_score) }}</span>
+                </div>
+              </td>
+              <td class="px-4 py-3 text-xs font-mono text-gray-600 dark:text-gray-300">
+                {{ sig.signal_confidence != null ? formatNum(sig.signal_confidence) : '-' }}
+              </td>
+              <td class="px-4 py-3 text-sm font-medium whitespace-nowrap">
+                <template v-if="sig.trade_id && sig.pnl != null">
+                  <span :class="Number(sig.pnl) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+                    {{ Number(sig.pnl) >= 0 ? '+' : '' }}${{ Number(sig.pnl).toFixed(2) }}
+                  </span>
+                </template>
+                <template v-else-if="sig.traded && !sig.trade_id">
+                  <span class="text-amber-500 text-xs">Open</span>
+                </template>
+                <span v-else class="text-gray-400 text-xs">-</span>
+              </td>
+              <td class="px-4 py-3 text-xs max-w-xs truncate" :class="sig.traded ? 'text-gray-500 dark:text-gray-400' : 'text-red-600 dark:text-red-400'">
+                {{ getTradedSignalSummary(sig) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Traded signals pagination -->
+        <div v-if="store.tradedSignalsPagination.total > store.tradedSignalsPagination.limit" class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+          <p class="text-sm text-gray-500 dark:text-gray-400">
+            Showing {{ (store.tradedSignalsPagination.page - 1) * store.tradedSignalsPagination.limit + 1 }} -
+            {{ Math.min(store.tradedSignalsPagination.page * store.tradedSignalsPagination.limit, store.tradedSignalsPagination.total) }}
+            of {{ store.tradedSignalsPagination.total }}
+          </p>
+          <div class="flex gap-2">
+            <button
+              @click="changeTradedPage(-1)"
+              :disabled="store.tradedSignalsPagination.page <= 1"
+              class="px-3 py-1 rounded text-sm border border-gray-300 dark:border-gray-600 disabled:opacity-50"
+            >Previous</button>
+            <button
+              @click="changeTradedPage(1)"
+              :disabled="store.tradedSignalsPagination.page * store.tradedSignalsPagination.limit >= store.tradedSignalsPagination.total"
+              class="px-3 py-1 rounded text-sm border border-gray-300 dark:border-gray-600 disabled:opacity-50"
+            >Next</button>
+          </div>
         </div>
       </div>
-    </div>
+    </template>
 
-    <!-- Event detail modal -->
+    <!-- ==================== STANDARD WEBHOOK TABLE ==================== -->
+    <template v-else>
+      <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
+        <div v-if="store.loading && !refreshing" class="p-8 text-center text-gray-500">
+          <ArrowPathIcon class="h-8 w-8 animate-spin mx-auto mb-2" />
+          Loading webhook events...
+        </div>
+        <div v-else-if="store.webhookEvents.length === 0" class="p-8 text-center text-gray-500 dark:text-gray-400">
+          <InboxIcon class="h-12 w-12 mx-auto mb-3 opacity-40" />
+          <p class="font-medium">No webhook events found</p>
+          <p class="text-sm mt-1">Configure your TradingView alerts to send webhooks to:</p>
+          <code class="text-xs mt-2 inline-block bg-gray-100 dark:bg-gray-700 px-3 py-1.5 rounded">{{ webhookUrl }}</code>
+        </div>
+        <table v-else class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+          <thead class="bg-gray-50 dark:bg-gray-700">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Time</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Indicator</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Symbol</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Direction</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Status</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Processed</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Details</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+            <tr
+              v-for="event in store.webhookEvents"
+              :key="event.id"
+              @click="selectedEvent = event"
+              class="hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer transition-colors"
+            >
+              <td class="px-4 py-3 text-sm text-gray-900 dark:text-gray-200 whitespace-nowrap">
+                {{ formatTime(event.received_at) }}
+              </td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center gap-1.5 text-xs font-medium" :class="indicatorClass(detectSource(event.raw_payload))">
+                  <span class="w-1.5 h-1.5 rounded-full" :class="indicatorDotClass(detectSource(event.raw_payload))"></span>
+                  {{ formatSource(detectSource(event.raw_payload)) }}
+                </span>
+              </td>
+              <td class="px-4 py-3 text-sm font-semibold text-gray-900 dark:text-gray-200">
+                {{ event.raw_payload?.ticker || event.raw_payload?.symbol || '-' }}
+              </td>
+              <td class="px-4 py-3">
+                <span v-if="getDirection(event.raw_payload)" class="text-xs font-medium" :class="directionClass(getDirection(event.raw_payload))">
+                  {{ getDirection(event.raw_payload) }}
+                </span>
+                <span v-else class="text-xs text-gray-400">-</span>
+              </td>
+              <td class="px-4 py-3">
+                <span
+                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium"
+                  :class="statusClass(event.status)"
+                >
+                  {{ event.status }}
+                </span>
+              </td>
+              <td class="px-4 py-3 text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                <template v-if="event.processed_at">
+                  {{ formatTime(event.processed_at) }}
+                  <span class="text-gray-400 ml-1">({{ processingDelay(event) }})</span>
+                </template>
+                <span v-else class="text-gray-400">-</span>
+              </td>
+              <td class="px-4 py-3 text-sm max-w-xs truncate" :class="event.error_message ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'">
+                {{ getDetailSummary(event) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Pagination -->
+        <div v-if="store.webhookPagination.total > store.webhookPagination.limit" class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+          <p class="text-sm text-gray-500 dark:text-gray-400">
+            Showing {{ (store.webhookPagination.page - 1) * store.webhookPagination.limit + 1 }} -
+            {{ Math.min(store.webhookPagination.page * store.webhookPagination.limit, store.webhookPagination.total) }}
+            of {{ store.webhookPagination.total }}
+          </p>
+          <div class="flex gap-2">
+            <button
+              @click="changePage(-1)"
+              :disabled="store.webhookPagination.page <= 1"
+              class="px-3 py-1 rounded text-sm border border-gray-300 dark:border-gray-600 disabled:opacity-50"
+            >Previous</button>
+            <button
+              @click="changePage(1)"
+              :disabled="store.webhookPagination.page * store.webhookPagination.limit >= store.webhookPagination.total"
+              class="px-3 py-1 rounded text-sm border border-gray-300 dark:border-gray-600 disabled:opacity-50"
+            >Next</button>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Event detail modal (standard webhooks) -->
     <div v-if="selectedEvent" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="selectedEvent = null">
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-3xl w-full mx-4 max-h-[85vh] overflow-y-auto">
         <div class="p-6">
@@ -228,6 +360,163 @@
         </div>
       </div>
     </div>
+
+    <!-- Traded Signal detail modal -->
+    <div v-if="selectedTradedSignal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="selectedTradedSignal = null">
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[85vh] overflow-y-auto">
+        <div class="p-6">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
+                Signal Decision — {{ selectedTradedSignal.symbol }}
+              </h3>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{{ formatTime(selectedTradedSignal.created_at) }}</p>
+            </div>
+            <button @click="selectedTradedSignal = null" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+              <XMarkIcon class="h-5 w-5" />
+            </button>
+          </div>
+
+          <!-- Verdict banner -->
+          <div
+            class="rounded-lg p-4 mb-5 border"
+            :class="selectedTradedSignal.traded
+              ? 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800'
+              : 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800'"
+          >
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <span
+                  class="inline-flex px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wide"
+                  :class="selectedTradedSignal.traded
+                    ? 'bg-green-200 text-green-800 dark:bg-green-800 dark:text-green-200'
+                    : 'bg-red-200 text-red-800 dark:bg-red-800 dark:text-red-200'"
+                >{{ selectedTradedSignal.traded ? 'TRADED' : 'BLOCKED' }}</span>
+                <span class="text-sm font-medium" :class="directionClass(selectedTradedSignal.direction)">
+                  {{ selectedTradedSignal.direction }} {{ selectedTradedSignal.symbol }}
+                </span>
+              </div>
+              <div v-if="selectedTradedSignal.trade_id && selectedTradedSignal.pnl != null" class="text-right">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Trade P&L</div>
+                <div class="text-lg font-bold" :class="Number(selectedTradedSignal.pnl) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+                  {{ Number(selectedTradedSignal.pnl) >= 0 ? '+' : '' }}${{ Number(selectedTradedSignal.pnl).toFixed(2) }}
+                </div>
+              </div>
+            </div>
+            <p v-if="!selectedTradedSignal.traded && selectedTradedSignal.rejection_reason" class="mt-2 text-sm text-red-700 dark:text-red-300">
+              {{ selectedTradedSignal.rejection_reason }}
+            </p>
+          </div>
+
+          <!-- Decision metrics -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+            <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Conviction</div>
+              <div class="flex items-center gap-2 mt-1">
+                <div class="w-16 h-2 rounded-full bg-gray-200 dark:bg-gray-600 overflow-hidden">
+                  <div class="h-full rounded-full" :class="convictionBarColor(selectedTradedSignal.conviction_score)" :style="{ width: Math.min(100, selectedTradedSignal.conviction_score || 0) + '%' }"></div>
+                </div>
+                <span class="text-sm font-bold text-gray-900 dark:text-gray-200">{{ formatNum(selectedTradedSignal.conviction_score) }}</span>
+              </div>
+            </div>
+            <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Signal Confidence</div>
+              <div class="text-sm font-bold text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.signal_confidence != null ? formatNum(selectedTradedSignal.signal_confidence) : '-' }}</div>
+            </div>
+            <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Strategy</div>
+              <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.strategy || '-' }}</div>
+            </div>
+            <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Gate</div>
+              <div class="text-sm font-medium mt-1" :class="selectedTradedSignal.rejection_gate ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'">
+                {{ selectedTradedSignal.rejection_gate || 'PASSED' }}
+              </div>
+            </div>
+          </div>
+
+          <!-- Trade details (if traded) -->
+          <div v-if="selectedTradedSignal.trade_id" class="mb-5">
+            <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Trade Execution</h4>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Contract</div>
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.contract_type }} {{ selectedTradedSignal.side }}</div>
+              </div>
+              <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Strike / DTE</div>
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.strike || '-' }} / {{ selectedTradedSignal.dte_at_entry ?? '-' }}d</div>
+              </div>
+              <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Entry / Exit</div>
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">
+                  ${{ Number(selectedTradedSignal.entry_price).toFixed(2) }}
+                  <span v-if="selectedTradedSignal.exit_price">/ ${{ Number(selectedTradedSignal.exit_price).toFixed(2) }}</span>
+                </div>
+              </div>
+              <div v-if="selectedTradedSignal.exit_reason" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Exit Reason</div>
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.exit_reason }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Decision rationale -->
+          <div v-if="selectedTradedSignal.checks_detail" class="mb-5">
+            <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Decision Rationale</h4>
+            <div class="space-y-1.5">
+              <div
+                v-for="(line, i) in parsedRationale(selectedTradedSignal.checks_detail)"
+                :key="i"
+                class="flex items-start gap-2 text-sm"
+              >
+                <span class="mt-0.5 flex-shrink-0 text-xs" :class="line.startsWith('+') ? 'text-green-500' : line.startsWith('-') ? 'text-red-500' : 'text-gray-400'">
+                  {{ line.startsWith('+') ? '+' : line.startsWith('-') ? '-' : '~' }}
+                </span>
+                <span class="text-gray-700 dark:text-gray-300">{{ line.replace(/^[+\-~]\s*/, '') }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Engine params -->
+          <div v-if="selectedTradedSignal.checks_detail" class="mb-5">
+            <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Engine Parameters</h4>
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <div v-if="parsedChecks(selectedTradedSignal.checks_detail).delta_target" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Delta Target</div>
+                <div class="text-sm font-mono text-gray-900 dark:text-gray-200 mt-1">{{ parsedChecks(selectedTradedSignal.checks_detail).delta_target }}</div>
+              </div>
+              <div v-if="parsedChecks(selectedTradedSignal.checks_detail).dte_target" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">DTE Target</div>
+                <div class="text-sm font-mono text-gray-900 dark:text-gray-200 mt-1">{{ parsedChecks(selectedTradedSignal.checks_detail).dte_target }}d</div>
+              </div>
+              <div v-if="parsedChecks(selectedTradedSignal.checks_detail).size_multiplier" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Size Multiplier</div>
+                <div class="text-sm font-mono text-gray-900 dark:text-gray-200 mt-1">{{ parsedChecks(selectedTradedSignal.checks_detail).size_multiplier }}x</div>
+              </div>
+              <div v-if="parsedChecks(selectedTradedSignal.checks_detail).risk_parameters?.stop_source" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Stop Source</div>
+                <div class="text-sm font-mono text-gray-900 dark:text-gray-200 mt-1">{{ parsedChecks(selectedTradedSignal.checks_detail).risk_parameters.stop_source }}</div>
+              </div>
+              <div v-if="parsedChecks(selectedTradedSignal.checks_detail).risk_parameters?.stop_level" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Stop Level</div>
+                <div class="text-sm font-mono text-gray-900 dark:text-gray-200 mt-1">${{ parsedChecks(selectedTradedSignal.checks_detail).risk_parameters.stop_level }}</div>
+              </div>
+              <div v-if="parsedChecks(selectedTradedSignal.checks_detail).action" class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
+                <div class="text-xs text-gray-500 dark:text-gray-400">Action</div>
+                <div class="text-sm font-mono text-gray-900 dark:text-gray-200 mt-1">{{ parsedChecks(selectedTradedSignal.checks_detail).action }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Raw payload -->
+          <div v-if="selectedTradedSignal.raw_payload">
+            <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Original Webhook Payload</h4>
+            <pre class="p-3 bg-gray-100 dark:bg-gray-900 rounded-lg text-xs overflow-x-auto text-gray-800 dark:text-gray-300 max-h-60">{{ JSON.stringify(selectedTradedSignal.raw_payload, null, 2) }}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -239,9 +528,11 @@ import api from '@/services/api'
 
 const store = useSimulationStore()
 const selectedEvent = ref(null)
+const selectedTradedSignal = ref(null)
 const processing = ref(false)
 const refreshing = ref(false)
 const activeStatus = ref('')
+const tradedOutcome = ref('')
 const autoRefresh = ref(true)
 const stats = ref({ total: 0, RECEIVED: 0, PROCESSED: 0, REJECTED: 0 })
 let refreshTimer = null
@@ -256,6 +547,13 @@ const statusTabs = computed(() => [
   { label: 'Received', value: 'RECEIVED', count: stats.value.RECEIVED },
   { label: 'Processed', value: 'PROCESSED', count: stats.value.PROCESSED },
   { label: 'Rejected', value: 'REJECTED', count: stats.value.REJECTED },
+  { label: 'Traded Signals', value: 'TRADED_SIGNALS', count: store.tradedSignalsCounts.total },
+])
+
+const tradedSubFilters = computed(() => [
+  { label: 'All', value: '', count: store.tradedSignalsCounts.total },
+  { label: 'Traded', value: 'traded', count: store.tradedSignalsCounts.traded_count },
+  { label: 'Blocked', value: 'blocked', count: store.tradedSignalsCounts.blocked_count },
 ])
 
 function detectSource(payload) {
@@ -381,8 +679,60 @@ async function fetchStats() {
   } catch { /* ignore */ }
 }
 
+function convictionBarColor(score) {
+  if (score >= 70) return 'bg-green-500'
+  if (score >= 40) return 'bg-amber-500'
+  return 'bg-red-500'
+}
+
+function formatNum(v) {
+  if (v == null) return '-'
+  return Number(v).toFixed(1)
+}
+
+function getTradedSignalSummary(sig) {
+  if (!sig.traded) {
+    return sig.rejection_reason || sig.rejection_detail || 'Blocked by engine'
+  }
+  const detail = parsedChecks(sig.checks_detail)
+  const parts = []
+  if (detail.action) parts.push(detail.action)
+  if (detail.rationale?.length) parts.push(detail.rationale[0])
+  return parts.join(' — ') || 'Approved'
+}
+
+function parsedChecks(checksDetail) {
+  if (!checksDetail) return {}
+  if (typeof checksDetail === 'string') {
+    try { return JSON.parse(checksDetail) } catch { return {} }
+  }
+  return checksDetail
+}
+
+function parsedRationale(checksDetail) {
+  const detail = parsedChecks(checksDetail)
+  return detail.rationale || []
+}
+
+function setTradedOutcome(outcome) {
+  tradedOutcome.value = outcome
+  store.tradedSignalsPagination.page = 1
+  store.fetchTradedSignals({ outcome: outcome || undefined })
+}
+
+function changeTradedPage(delta) {
+  store.tradedSignalsPagination.page += delta
+  store.fetchTradedSignals({ outcome: tradedOutcome.value || undefined })
+}
+
 function filterByStatus(status) {
   activeStatus.value = status
+  if (status === 'TRADED_SIGNALS') {
+    store.tradedSignalsPagination.page = 1
+    tradedOutcome.value = ''
+    store.fetchTradedSignals()
+    return
+  }
   store.filters.webhookStatus = status
   store.webhookPagination.page = 1
   store.fetchWebhookEvents()
@@ -396,7 +746,13 @@ function changePage(delta) {
 async function refresh() {
   refreshing.value = true
   try {
-    await Promise.all([store.fetchWebhookEvents(), fetchStats()])
+    const fetches = [fetchStats()]
+    if (activeStatus.value === 'TRADED_SIGNALS') {
+      fetches.push(store.fetchTradedSignals({ outcome: tradedOutcome.value || undefined }))
+    } else {
+      fetches.push(store.fetchWebhookEvents())
+    }
+    await Promise.all(fetches)
   } finally {
     refreshing.value = false
   }
@@ -434,7 +790,11 @@ watch(autoRefresh, (val) => {
 })
 
 onMounted(async () => {
-  await Promise.all([store.fetchWebhookEvents(), fetchStats()])
+  await Promise.all([
+    store.fetchWebhookEvents(),
+    fetchStats(),
+    store.fetchTradedSignals(),
+  ])
   if (autoRefresh.value) startAutoRefresh()
 })
 

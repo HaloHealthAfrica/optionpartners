@@ -178,8 +178,11 @@ class DecisionRouter {
         return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
       }
 
-      // ── Phase 3: Trade Decision Engine (deterministic, replaces fuzzy scoring) ──
+      // ── Phase 2.5: Refresh chain data from data-service before evaluation ──
       const effectiveSymbol = signal.symbol || symbol;
+      await this._refreshChainData(effectiveSymbol, userId);
+
+      // ── Phase 3: Trade Decision Engine (deterministic, replaces fuzzy scoring) ──
       const symState = await symbolStateService.getState(userId, effectiveSymbol);
       const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId);
 
@@ -484,6 +487,40 @@ class DecisionRouter {
     }
   }
 
+  /**
+   * Fetch fresh chain data from the data-service and update symbol_state
+   * so the trade decision engine has current options liquidity info.
+   * Skips refresh if chain data is still fresh (< 5 min old).
+   */
+  async _refreshChainData(symbol, userId) {
+    const CHAIN_REFRESH_TTL_MS = parseInt(process.env.SIM_CHAIN_REFRESH_TTL_MS || '300000', 10); // 5 min
+    try {
+      const currentState = await symbolStateService.getState(userId, symbol);
+      if (currentState.chain_updated_at) {
+        const ageMs = Date.now() - new Date(currentState.chain_updated_at).getTime();
+        if (ageMs < CHAIN_REFRESH_TTL_MS) {
+          logger.info(`[CHAIN_REFRESH] ${symbol}: chain data fresh (${Math.round(ageMs / 1000)}s old), skipping`, 'decision-router');
+          return;
+        }
+      }
+
+      const chainData = await dataServiceProxy.getOptionsChain(symbol);
+      const contracts = chainData?.data?.contracts || [];
+      if (contracts.length > 0) {
+        await symbolStateService.update('CHAIN_SNAPSHOT', {
+          ticker: symbol,
+          contracts,
+          iv_percentile: chainData.data.iv_percentile || null,
+        }, userId, symbol);
+        logger.info(`[CHAIN_REFRESH] ${symbol}: refreshed ${contracts.length} contracts from data-service`, 'decision-router');
+      } else {
+        logger.warn(`[CHAIN_REFRESH] ${symbol}: data-service returned no contracts`, 'decision-router');
+      }
+    } catch (err) {
+      logger.warn(`[CHAIN_REFRESH] ${symbol}: data-service unavailable (${err.message}) — using cached state`, 'decision-router');
+    }
+  }
+
   async _findOpenPosition(userId, signal) {
     const conditions = ['user_id = $1', 'status = $2', 'symbol = $3'];
     const params = [userId, 'OPEN', signal.symbol];
@@ -503,7 +540,7 @@ class DecisionRouter {
     }
 
     const result = await db.query(
-      `SELECT * FROM sim_positions WHERE ${conditions.join(' AND ')} ORDER BY opened_at DESC LIMIT 1`,
+      `SELECT * FROM sim_positions WHERE ${conditions.join(' AND ')} ORDER BY opened_at ASC LIMIT 1`,
       params
     );
 

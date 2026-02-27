@@ -64,6 +64,16 @@ async function main() {
   workerManager.start();
   logger.info('Polling workers started');
 
+  // --- Public health endpoint (no auth — used by Fly.io health checks) ---
+  app.get('/api/health', async (_req, res) => {
+    try {
+      const providers = orchestrator.getProviderHealths();
+      res.json({ status: 'ok', providers });
+    } catch {
+      res.status(503).json({ status: 'degraded' });
+    }
+  });
+
   // --- Mount routes ---
   app.get('/', (_req, res) => {
     res.json({

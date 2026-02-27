@@ -235,7 +235,7 @@ export class DataOrchestrator {
     this.inflightRequests.set(coalescingKey, promise);
     promise.finally(() => {
       this.inflightRequests.delete(coalescingKey);
-    });
+    }).catch(() => {});
 
     return promise;
   }
