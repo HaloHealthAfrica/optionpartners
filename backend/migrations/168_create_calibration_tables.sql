@@ -1,7 +1,7 @@
 -- Stores the currently active calibrated conviction weights
 CREATE TABLE IF NOT EXISTS calibration_weights (
   id            SERIAL PRIMARY KEY,
-  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   component_key VARCHAR(50) NOT NULL,
   static_weight INTEGER NOT NULL,
   calibrated_weight INTEGER NOT NULL,
@@ -16,9 +16,9 @@ CREATE TABLE IF NOT EXISTS calibration_weights (
 -- Audit trail of every calibration event
 CREATE TABLE IF NOT EXISTS calibration_log (
   id              SERIAL PRIMARY KEY,
-  user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  action          VARCHAR(30) NOT NULL, -- APPLIED, AUTO_APPLIED, REVERTED, TOGGLED
-  trigger_type    VARCHAR(30) NOT NULL, -- MANUAL, AUTO, TRADE_THRESHOLD
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  action          VARCHAR(30) NOT NULL,
+  trigger_type    VARCHAR(30) NOT NULL,
   trade_count     INTEGER NOT NULL DEFAULT 0,
   weights_before  JSONB,
   weights_after   JSONB,
