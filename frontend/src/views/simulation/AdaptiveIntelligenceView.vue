@@ -53,6 +53,41 @@
       </div>
     </div>
 
+    <!-- Recalibration prompt banner -->
+    <div
+      v-if="store.calibrationStatus?.recalibrationDue && !store.calibrationStatus?.autoCalibrationEnabled && !bannerDismissed"
+      class="mb-6 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-indigo-50 dark:bg-indigo-900/20 p-4 flex items-center justify-between"
+    >
+      <div class="flex items-center gap-3">
+        <div class="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-100 dark:bg-indigo-800 flex items-center justify-center">
+          <AdjustmentsHorizontalIcon class="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
+        </div>
+        <div>
+          <p class="text-sm font-semibold text-indigo-900 dark:text-indigo-200">Recalibration Available</p>
+          <p class="text-xs text-indigo-700 dark:text-indigo-400">
+            {{ store.calibrationStatus.tradesSinceLastCalibration }} trades since last calibration
+            (threshold: {{ store.calibrationStatus.calibrationThreshold }}).
+            Review updated weight recommendations on the Calibration tab.
+          </p>
+        </div>
+      </div>
+      <div class="flex gap-2 flex-shrink-0">
+        <button
+          @click="handleApplyCalibration"
+          :disabled="store.adaptiveLoading"
+          class="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+        >
+          Apply Weights
+        </button>
+        <button
+          @click="dismissBanner"
+          class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-lg text-indigo-700 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/30"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+
     <!-- Tabs -->
     <div class="border-b border-gray-200 dark:border-gray-700 mb-6">
       <nav class="flex space-x-6 overflow-x-auto">
@@ -359,6 +394,145 @@
       </div>
     </div>
 
+    <!-- ═══ Calibration Management Panel (inside calibration tab) ═══ -->
+    <div v-if="activeTab === 'calibration' && !store.adaptiveLoading" class="mt-6 space-y-4">
+      <!-- Active weights status -->
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Weight Management</h3>
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer">
+              <input
+                type="checkbox"
+                :checked="store.calibrationStatus?.autoCalibrationEnabled"
+                @change="handleToggleAuto($event.target.checked)"
+                class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+              />
+              Auto-calibrate
+            </label>
+            <span class="text-xs text-gray-400">|</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400">
+              Threshold:
+              <select
+                :value="store.calibrationStatus?.calibrationThreshold || 25"
+                @change="handleSetThreshold(parseInt($event.target.value))"
+                class="ml-1 text-xs rounded border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 py-0.5 px-1"
+              >
+                <option :value="10">10</option>
+                <option :value="15">15</option>
+                <option :value="25">25</option>
+                <option :value="50">50</option>
+                <option :value="100">100</option>
+              </select>
+              trades
+            </span>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-900/30">
+          <div class="flex items-center gap-4">
+            <div>
+              <span class="text-xs text-gray-500 dark:text-gray-400">Status</span>
+              <p class="text-sm font-semibold" :class="store.activeWeights?.hasActiveWeights ? 'text-indigo-600' : 'text-gray-500'">
+                {{ store.activeWeights?.hasActiveWeights ? `${store.activeWeights.weights.length} calibrated weights active` : 'Using static weights' }}
+              </p>
+            </div>
+            <div>
+              <span class="text-xs text-gray-500 dark:text-gray-400">Trades Since Cal</span>
+              <p class="text-sm font-semibold text-gray-900 dark:text-white">
+                {{ store.calibrationStatus?.tradesSinceLastCalibration || 0 }} / {{ store.calibrationStatus?.calibrationThreshold || 25 }}
+              </p>
+            </div>
+            <div v-if="store.calibrationStatus?.lastCalibratedAt">
+              <span class="text-xs text-gray-500 dark:text-gray-400">Last Calibrated</span>
+              <p class="text-sm font-semibold text-gray-900 dark:text-white">{{ formatDate(store.calibrationStatus.lastCalibratedAt) }}</p>
+            </div>
+          </div>
+          <div class="flex gap-2">
+            <button
+              @click="handleApplyCalibration"
+              :disabled="store.adaptiveLoading || !store.calibrationData?.totalTrades"
+              class="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              Apply Recommended Weights
+            </button>
+            <button
+              v-if="store.activeWeights?.hasActiveWeights"
+              @click="handleRevert"
+              :disabled="store.adaptiveLoading"
+              class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-lg text-red-700 dark:text-red-400 border border-red-300 dark:border-red-700 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-50"
+            >
+              Revert to Static
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active weights detail -->
+      <div v-if="store.activeWeights?.hasActiveWeights" class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Active Calibrated Weights</h3>
+        </div>
+        <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+          <thead class="bg-gray-50 dark:bg-gray-900/50">
+            <tr>
+              <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">Component</th>
+              <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Static</th>
+              <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Calibrated</th>
+              <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Drift</th>
+              <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Sample</th>
+              <th class="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase">Applied</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+            <tr v-for="w in store.activeWeights.weights" :key="w.component_key">
+              <td class="px-4 py-2 text-sm text-gray-900 dark:text-white">{{ formatComponentKey(w.component_key) }}</td>
+              <td class="px-4 py-2 text-sm text-center text-gray-500">{{ w.static_weight }}</td>
+              <td class="px-4 py-2 text-sm text-center font-semibold text-indigo-600">{{ w.calibrated_weight }}</td>
+              <td class="px-4 py-2 text-sm text-center" :class="w.weight_drift > 0 ? 'text-green-600' : w.weight_drift < 0 ? 'text-red-600' : 'text-gray-500'">
+                {{ w.weight_drift > 0 ? '+' : '' }}{{ w.weight_drift }}
+              </td>
+              <td class="px-4 py-2 text-sm text-center text-gray-500">{{ w.sample_size }}</td>
+              <td class="px-4 py-2 text-xs text-right text-gray-400">{{ formatDate(w.calibrated_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Audit log -->
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Calibration Audit Log</h3>
+          <button @click="store.fetchCalibrationLog()" class="text-xs text-indigo-600 hover:text-indigo-500">Refresh</button>
+        </div>
+        <div v-if="store.calibrationLog.length === 0" class="p-6 text-center text-xs text-gray-400">No calibration events yet.</div>
+        <div v-else class="max-h-64 overflow-y-auto">
+          <div
+            v-for="entry in store.calibrationLog"
+            :key="entry.id"
+            class="px-4 py-2.5 border-b border-gray-100 dark:border-gray-700/50 last:border-0"
+          >
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span
+                  class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase"
+                  :class="{
+                    'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400': entry.action === 'APPLIED' || entry.action === 'AUTO_APPLIED',
+                    'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400': entry.action === 'REVERTED',
+                    'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400': entry.action === 'TOGGLED',
+                  }"
+                >
+                  {{ entry.action }}
+                </span>
+                <span class="text-xs text-gray-600 dark:text-gray-300">{{ entry.summary }}</span>
+              </div>
+              <span class="text-[10px] text-gray-400">{{ formatDate(entry.created_at) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ Tab: Exit Tuning (placeholder) ═══ -->
     <div v-else-if="activeTab === 'exits'">
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
@@ -404,6 +578,7 @@ const store = useSimulationStore()
 
 const activeTab = ref('calibration')
 const lookbackDays = ref(90)
+const bannerDismissed = ref(false)
 
 const tabs = [
   { id: 'calibration', label: 'Calibration' },
@@ -500,7 +675,6 @@ async function loadTabData(tabId) {
 
 async function refreshActiveTab() {
   const days = lookbackDays.value
-  // Clear cached data to force re-fetch
   store.calibrationData = null
   store.regimeEdgeData = null
   store.temporalEdgeData = null
@@ -508,14 +682,66 @@ async function refreshActiveTab() {
 
   await Promise.all([
     store.fetchAdaptiveSummary(days),
+    store.fetchCalibrationStatus(),
+    store.fetchActiveWeights(),
     loadTabData(activeTab.value),
   ])
+}
+
+async function handleApplyCalibration() {
+  try {
+    await store.applyCalibration(lookbackDays.value)
+    bannerDismissed.value = true
+    store.calibrationData = null
+    await store.fetchCalibration(lookbackDays.value)
+    await store.fetchCalibrationLog()
+  } catch {
+    // error captured in store
+  }
+}
+
+async function handleRevert() {
+  try {
+    await store.revertCalibration()
+    store.calibrationData = null
+    await store.fetchCalibration(lookbackDays.value)
+    await store.fetchCalibrationLog()
+  } catch {
+    // error captured in store
+  }
+}
+
+async function handleToggleAuto(enabled) {
+  await store.toggleAutoCalibration(enabled)
+}
+
+async function handleSetThreshold(val) {
+  try {
+    const { default: api } = await import('@/services/api')
+    await api.put('/sim/adaptive/calibration/threshold', { threshold: val })
+    await store.fetchCalibrationStatus()
+  } catch {
+    // error in store
+  }
+}
+
+function dismissBanner() {
+  bannerDismissed.value = true
+}
+
+function formatDate(iso) {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 onMounted(async () => {
   await Promise.all([
     store.fetchAdaptiveSummary(lookbackDays.value),
     store.fetchCalibration(lookbackDays.value),
+    store.fetchCalibrationStatus(),
+    store.fetchActiveWeights(),
+    store.fetchCalibrationLog(),
   ])
 })
 </script>

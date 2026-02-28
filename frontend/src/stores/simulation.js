@@ -392,6 +392,9 @@ export const useSimulationStore = defineStore('simulation', () => {
   const regimeEdgeData = ref(null)
   const temporalEdgeData = ref(null)
   const adaptiveLoading = ref(false)
+  const calibrationStatus = ref(null)
+  const activeWeights = ref(null)
+  const calibrationLog = ref([])
 
   async function fetchAdaptiveSummary(lookbackDays = 90) {
     try {
@@ -449,6 +452,77 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  async function fetchCalibrationStatus() {
+    try {
+      const { data } = await api.get('/sim/adaptive/calibration/status')
+      calibrationStatus.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+    }
+  }
+
+  async function fetchActiveWeights() {
+    try {
+      const { data } = await api.get('/sim/adaptive/calibration/weights')
+      activeWeights.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+    }
+  }
+
+  async function applyCalibration(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.post('/sim/adaptive/calibration/apply', { lookbackDays })
+      await fetchCalibrationStatus()
+      await fetchActiveWeights()
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
+  async function revertCalibration() {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.post('/sim/adaptive/calibration/revert')
+      await fetchCalibrationStatus()
+      await fetchActiveWeights()
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
+  async function toggleAutoCalibration(enabled) {
+    try {
+      const { data } = await api.post('/sim/adaptive/calibration/auto-toggle', { enabled })
+      await fetchCalibrationStatus()
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    }
+  }
+
+  async function fetchCalibrationLog(limit = 50) {
+    try {
+      const { data } = await api.get('/sim/adaptive/calibration/log', { params: { limit } })
+      calibrationLog.value = data.log
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+    }
+  }
+
   return {
     accountState, positions, orders, trades, equityCurve,
     strategyBreakdown, dteBreakdown, webhookEvents, simRuns,
@@ -468,7 +542,9 @@ export const useSimulationStore = defineStore('simulation', () => {
     updateIntelligenceConfig, fetchIntelligenceStatus, fetchEquityByStrategy,
     // Adaptive Intelligence
     adaptiveSummary, calibrationData, regimeEdgeData, temporalEdgeData,
-    adaptiveLoading,
+    adaptiveLoading, calibrationStatus, activeWeights, calibrationLog,
     fetchAdaptiveSummary, fetchCalibration, fetchRegimeEdge, fetchTemporalEdge,
+    fetchCalibrationStatus, fetchActiveWeights, applyCalibration,
+    revertCalibration, toggleAutoCalibration, fetchCalibrationLog,
   }
 })

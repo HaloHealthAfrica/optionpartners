@@ -6,6 +6,8 @@ const logger = require('../../utils/logger');
 const ledgerService = require('./ledger.service');
 const strategyScorecardService = require('./strategy-scorecard.service');
 const adaptiveGuards = require('./adaptive-guards');
+const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
+const convictionCalibrator = require('./adaptive-intelligence/conviction-calibrator.service');
 
 const CONTRACT_MULTIPLIER = 100;
 
@@ -106,6 +108,20 @@ class TradeFinalizerService {
       } catch (err) {
         logger.error(`Intelligence layer post-trade update failed: ${err.message}`, 'sim-finalizer');
       }
+    }
+
+    // Increment calibration trade counter and auto-calibrate if enabled + threshold met
+    try {
+      const calStatus = await calibrationStore.incrementTradeCount(userId);
+      if (calStatus.thresholdReached && calStatus.autoEnabled) {
+        const calResult = await convictionCalibrator.calibrate(userId, { lookbackDays: 90, minSampleSize: 10 });
+        if (calResult.totalTrades >= 25) {
+          await calibrationStore.applyCalibration(userId, calResult.components, 'AUTO');
+          logger.info(`[AUTO_CALIBRATION] Applied after ${calStatus.count} trades for user ${userId}`, 'sim-finalizer');
+        }
+      }
+    } catch (err) {
+      logger.error(`Calibration counter update failed: ${err.message}`, 'sim-finalizer');
     }
 
     logger.info(

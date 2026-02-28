@@ -2,6 +2,7 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
 
 /**
  * Deterministic Trade Decision Engine.
@@ -85,8 +86,12 @@ class TradeDecisionEngine {
     // ── Part 2: TREND alignment check (penalty-based, not a hard gate) ──
     const trendCheck = this._applyTrendRules(symbolState, rationale);
 
-    // ── Part 3: Conviction calculation ──
-    let conviction = this._computeConviction(signal, symbolState, rationale);
+    // ── Part 3: Conviction calculation (with optional calibrated weights) ──
+    let calibratedWeights = null;
+    try {
+      calibratedWeights = await calibrationStore.getWeightMap(userId);
+    } catch (_) { /* proceed with static weights */ }
+    let conviction = this._computeConviction(signal, symbolState, rationale, calibratedWeights);
 
     // Apply trend penalty after conviction is computed
     if (trendCheck.penalty > 0) {
@@ -503,91 +508,105 @@ class TradeDecisionEngine {
   //  Part 3 — CONVICTION MODEL
   // ═══════════════════════════════════════════════════════════════════
 
-  _computeConviction(signal, state, rationale) {
+  _computeConviction(signal, state, rationale, calibratedWeights = null) {
     const entry = state.latest_entry_signal;
     const dir = signal.direction || entry?.direction;
+    const w = (key, staticVal) => calibratedWeights?.get(key) ?? staticVal;
+    const usingCal = !!calibratedWeights;
 
     // Base: SIGNALS confidence
     let conviction = entry?.confidence || 0;
-    rationale.push(`CONVICTION_BASE: ${conviction} (SIGNALS confidence)`);
+    rationale.push(`CONVICTION_BASE: ${conviction} (SIGNALS confidence${usingCal ? ', calibrated weights active' : ''})`);
 
-    // +STRAT alignment (0 or +10)
+    // +STRAT alignment
     if (state.latest_strat_signal && state.strat_signal_at) {
       const stratDir = state.latest_strat_signal.direction;
       if (stratDir === dir) {
-        conviction += 10;
-        rationale.push('CONVICTION +10: STRAT direction aligns');
+        const wt = w('strat_align', 10);
+        conviction += wt;
+        rationale.push(`CONVICTION +${wt}: STRAT direction aligns`);
       } else if (stratDir && stratDir !== dir) {
         if ((entry?.confidence || 0) < 70) {
           rationale.push(`STRAT_CONFLICT_BLOCK: STRAT=${stratDir} conflicts, confidence=${entry?.confidence} < 70`);
           return 0;
         }
-        conviction -= 10;
-        rationale.push('CONVICTION -10: STRAT direction conflicts (confidence >= 70, proceeding)');
+        const wt = w('strat_conflict', -10);
+        conviction += wt;
+        rationale.push(`CONVICTION ${wt}: STRAT direction conflicts (confidence >= 70, proceeding)`);
       }
 
-      // V2 pattern quality modifiers (continuity + pattern kind)
       const stratSignal = state.latest_strat_signal;
       if (stratSignal.pattern_kind) {
         if (stratSignal.continuity === true) {
-          conviction += 10;
-          rationale.push('CONVICTION +10: STRAT continuity (weekly aligns with daily setup)');
+          const wt = w('strat_continuity', 10);
+          conviction += wt;
+          rationale.push(`CONVICTION +${wt}: STRAT continuity (weekly aligns with daily setup)`);
         } else if (stratSignal.continuity === false && stratSignal.pattern_kind === 'REVERSAL') {
-          conviction -= 15;
-          rationale.push('CONVICTION -15: STRAT no continuity + REVERSAL (fighting HTF)');
+          const wt = w('strat_no_cont', -15);
+          conviction += wt;
+          rationale.push(`CONVICTION ${wt}: STRAT no continuity + REVERSAL (fighting HTF)`);
         }
 
         const kind = stratSignal.pattern_kind.toUpperCase();
         if (kind === 'CONTINUATION') {
-          conviction += 10;
-          rationale.push('CONVICTION +10: CONTINUATION pattern (highest win rate)');
+          const wt = w('continuation', 10);
+          conviction += wt;
+          rationale.push(`CONVICTION +${wt}: CONTINUATION pattern (highest win rate)`);
         } else if (kind === 'REVSTRAT') {
-          conviction -= 5;
-          rationale.push('CONVICTION -5: REVSTRAT pattern (high R:R but low win rate — size down)');
+          const wt = w('revstrat', -5);
+          conviction += wt;
+          rationale.push(`CONVICTION ${wt}: REVSTRAT pattern (high R:R but low win rate — size down)`);
         }
       }
     }
 
-    // +TREND alignment boost (0 to +15)
+    // +TREND alignment boost
     if (state.alignment_score >= 75) {
-      conviction += 15;
-      rationale.push(`CONVICTION +15: TREND alignment=${state.alignment_score} ≥ 75`);
+      const wt = w('trend_high', 15);
+      conviction += wt;
+      rationale.push(`CONVICTION +${wt}: TREND alignment=${state.alignment_score} ≥ 75`);
     } else if (state.alignment_score >= 65) {
-      conviction += 10;
-      rationale.push(`CONVICTION +10: TREND alignment=${state.alignment_score} ≥ 65`);
+      const wt = w('trend_mid', 10);
+      conviction += wt;
+      rationale.push(`CONVICTION +${wt}: TREND alignment=${state.alignment_score} ≥ 65`);
     }
 
-    // +FLOW boost (0 to +15)
+    // +FLOW boost
     if (state.latest_flow_signal && state.flow_signal_at) {
       const flow = state.latest_flow_signal;
       const flowAligns = flow.direction === dir;
       const flowConflicts = flow.direction && flow.direction !== dir;
 
       if (flowAligns && flow.unusual) {
-        conviction += 15;
-        rationale.push('CONVICTION +15: Unusual options flow aligns with signal');
+        const wt = w('flow_unusual', 15);
+        conviction += wt;
+        rationale.push(`CONVICTION +${wt}: Unusual options flow aligns with signal`);
       } else if (flowAligns) {
-        conviction += 8;
-        rationale.push('CONVICTION +8: Options flow aligns with signal');
+        const wt = w('flow_aligns', 8);
+        conviction += wt;
+        rationale.push(`CONVICTION +${wt}: Options flow aligns with signal`);
       } else if (flowConflicts && flow.unusual) {
         if (state.macro_strength < 75) {
           rationale.push(`FLOW_CONFLICT_BLOCK: Large opposing flow, macro_strength=${state.macro_strength} < 75`);
           return 0;
         }
-        conviction -= 5;
-        rationale.push('CONVICTION -5: Large opposing flow (macro_strength ≥ 75, proceeding)');
+        const wt = w('flow_conflict', -5);
+        conviction += wt;
+        rationale.push(`CONVICTION ${wt}: Large opposing flow (macro_strength ≥ 75, proceeding)`);
       }
     }
 
-    // +SATY_PHASE alignment (0 or +8)
+    // +SATY_PHASE alignment
     if (state.latest_saty_signal && state.saty_signal_at) {
       const satyDir = state.latest_saty_signal.direction;
       if (satyDir === dir) {
-        conviction += 8;
-        rationale.push('CONVICTION +8: SATY_PHASE direction aligns');
+        const wt = w('saty_aligns', 8);
+        conviction += wt;
+        rationale.push(`CONVICTION +${wt}: SATY_PHASE direction aligns`);
       } else if (satyDir && satyDir !== dir) {
-        conviction -= 5;
-        rationale.push('CONVICTION -5: SATY_PHASE direction conflicts');
+        const wt = w('saty_conflict', -5);
+        conviction += wt;
+        rationale.push(`CONVICTION ${wt}: SATY_PHASE direction conflicts`);
       }
     }
 

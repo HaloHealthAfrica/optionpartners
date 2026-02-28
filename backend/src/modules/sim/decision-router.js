@@ -8,6 +8,7 @@ const adaptiveGuards = require('./adaptive-guards');
 const symbolStateService = require('./symbol-state.service');
 const tradeDecisionEngine = require('./trade-decision-engine');
 const optionsConstructor = require('./options-constructor.service');
+const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const regimeIntegration = require('../portfolio/regime-integration');
 const adaptiveParams = require('../strategy/adaptive-params');
@@ -256,7 +257,7 @@ class DecisionRouter {
         adjustedSizeMultiplier,
         adjustedDTE: adaptedConfig.dte_target,
         adjustedDelta: adaptedConfig.delta_target,
-        adjustedWeights: null,
+        adjustedWeights: await this._getCalWeightsForAudit(userId),
       };
 
       await this._logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision, regimeAuditContext);
@@ -547,6 +548,14 @@ class DecisionRouter {
     }
 
     return result.rows[0];
+  }
+
+  async _getCalWeightsForAudit(userId) {
+    try {
+      const weights = await calibrationStore.getActiveWeights(userId);
+      if (!weights) return null;
+      return Object.fromEntries(weights.map(w => [w.component_key, w.calibrated_weight]));
+    } catch { return null; }
   }
 
   async _logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision, regimeContext = null) {

@@ -64,4 +64,13 @@ router.get('/adaptive/calibration', adaptiveIntelligence.getCalibration);
 router.get('/adaptive/regime-edge', adaptiveIntelligence.getRegimeEdge);
 router.get('/adaptive/temporal-edge', adaptiveIntelligence.getTemporalEdge);
 
+// Calibration weights management
+router.get('/adaptive/calibration/status', adaptiveIntelligence.getCalibrationStatus);
+router.get('/adaptive/calibration/weights', adaptiveIntelligence.getActiveWeights);
+router.post('/adaptive/calibration/apply', adaptiveIntelligence.applyCalibration);
+router.post('/adaptive/calibration/revert', adaptiveIntelligence.revertCalibration);
+router.post('/adaptive/calibration/auto-toggle', adaptiveIntelligence.toggleAutoCalibration);
+router.put('/adaptive/calibration/threshold', adaptiveIntelligence.setCalibrationThreshold);
+router.get('/adaptive/calibration/log', adaptiveIntelligence.getCalibrationLog);
+
 module.exports = router;
