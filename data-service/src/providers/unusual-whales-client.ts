@@ -23,75 +23,74 @@ interface UWOptionsChainResponse {
     option_symbol: string;
     underlying_symbol: string;
     option_type: string;
-    strike: number;
+    strike: number | string;
     expiry: string;
-    bid: number;
-    ask: number;
-    mid_price: number;
-    last_price: number;
+    bid: number | string;
+    ask: number | string;
+    mid_price: number | string;
+    last_price: number | string;
     volume: number;
     open_interest: number;
-    implied_volatility: number;
-    delta: number;
-    gamma: number;
-    theta: number;
-    vega: number;
+    implied_volatility: number | string;
+    delta: number | string;
+    gamma: number | string;
+    theta: number | string;
+    vega: number | string;
   }>;
 }
 
-interface UWGexResponse {
-  data: {
-    total_gex: number;
-    call_gex: number;
-    put_gex: number;
-    net_gex: number;
-    flip_price: number | null;
-    levels: Array<{
-      strike: number;
-      gex: number;
-      call_gex: number;
-      put_gex: number;
-    }>;
-  };
+interface UWGreeksResponse {
+  data: Array<{
+    date: string;
+    expiry: string;
+    strike: string;
+    call_delta: string;
+    put_delta: string;
+    call_gamma: string;
+    put_gamma: string;
+    call_volatility: string;
+    put_volatility: string;
+    call_vega: string;
+    put_vega: string;
+    call_theta: string;
+    put_theta: string;
+    call_charm: string;
+    call_vanna: string;
+    put_charm: string;
+    put_vanna: string;
+    call_rho: string;
+    put_rho: string;
+    call_option_symbol: string;
+    put_option_symbol: string;
+  }>;
 }
 
-interface UWFlowResponse {
-  data: {
-    total_premium: number;
-    call_premium: number;
-    put_premium: number;
-    net_premium: number;
+interface UWNetPremTicksResponse {
+  data: Array<{
+    date: string;
     call_volume: number;
     put_volume: number;
-    put_call_ratio: number;
-    sentiment: string;
-    trades: Array<{
-      option_symbol: string;
-      underlying_symbol: string;
-      option_type: string;
-      strike: number;
-      expiry: string;
-      side: string;
-      sentiment: string;
-      premium: number;
-      size: number;
-      open_interest: number;
-      volume: number;
-      implied_volatility: number;
-      executed_at: string;
-    }>;
-  };
+    call_volume_ask_side: number;
+    call_volume_bid_side: number;
+    put_volume_ask_side: number;
+    put_volume_bid_side: number;
+    tape_time: string;
+    net_call_volume: number;
+    net_call_premium: string;
+    net_put_volume: number;
+    net_put_premium: string;
+    net_delta: string;
+  }>;
 }
 
-interface UWIVResponse {
-  data: {
-    current_iv: number;
-    iv_rank: number;
-    iv_percentile: number;
-    hv_30: number;
-    hv_60: number;
-    hv_90: number;
-  };
+interface UWInterpolatedIVResponse {
+  data: Array<{
+    date: string;
+    days: number;
+    percentile: string;
+    volatility: string;
+    implied_move_perc: string;
+  }>;
 }
 
 export class UnusualWhalesClient extends BaseProvider implements MarketDataProvider {
@@ -169,138 +168,176 @@ export class UnusualWhalesClient extends BaseProvider implements MarketDataProvi
       symbol: c.option_symbol,
       underlyingSymbol: c.underlying_symbol,
       type: c.option_type.toLowerCase() as 'call' | 'put',
-      strike: c.strike,
+      strike: Number(c.strike),
       expiration: c.expiry,
-      bid: c.bid,
-      ask: c.ask,
-      mid: c.mid_price,
-      last: c.last_price,
-      volume: c.volume,
-      openInterest: c.open_interest,
-      impliedVolatility: c.implied_volatility,
-      delta: c.delta,
-      gamma: c.gamma,
-      theta: c.theta,
-      vega: c.vega,
+      bid: Number(c.bid),
+      ask: Number(c.ask),
+      mid: Number(c.mid_price),
+      last: Number(c.last_price),
+      volume: Number(c.volume),
+      openInterest: Number(c.open_interest),
+      impliedVolatility: Number(c.implied_volatility),
+      delta: Number(c.delta),
+      gamma: Number(c.gamma),
+      theta: Number(c.theta),
+      vega: Number(c.vega),
     }));
 
     return { symbol, expirations, contracts, timestamp: Date.now() };
   }
 
   async getGEX(symbol: string): Promise<GexData> {
-    const response = await this.request<UWGexResponse>(
+    const response = await this.request<UWGreeksResponse>(
       'GET',
-      `/api/stock/${symbol}/gamma-exposure`,
+      `/api/stock/${symbol}/greeks`,
       {},
       this.authHeaders,
     );
 
-    if (!response?.data) {
+    if (!response?.data?.length) {
       throw new ProviderError(this.name, 'PARSE_ERROR', `Empty GEX response for ${symbol}`);
     }
 
-    const { data } = response;
+    const strikeMap = new Map<number, { callGamma: number; putGamma: number }>();
+    let totalCallGex = 0;
+    let totalPutGex = 0;
 
-    const majorLevels: GexLevel[] = (data.levels || [])
-      .sort((a, b) => Math.abs(b.gex) - Math.abs(a.gex))
-      .slice(0, 20)
-      .map((level) => ({
-        strike: level.strike,
-        gex: level.gex,
-        callGex: level.call_gex,
-        putGex: level.put_gex,
-        type: this.classifyGexLevel(level, data.flip_price),
-      }));
+    for (const row of response.data) {
+      const strike = parseFloat(row.strike);
+      const callGamma = parseFloat(row.call_gamma) || 0;
+      const putGamma = parseFloat(row.put_gamma) || 0;
+      const existing = strikeMap.get(strike) || { callGamma: 0, putGamma: 0 };
+      existing.callGamma += callGamma;
+      existing.putGamma += putGamma;
+      strikeMap.set(strike, existing);
+      totalCallGex += callGamma;
+      totalPutGex += putGamma;
+    }
+
+    const netGex = totalCallGex - Math.abs(totalPutGex);
+
+    const levels = Array.from(strikeMap.entries()).map(([strike, { callGamma, putGamma }]) => ({
+      strike,
+      gex: callGamma - Math.abs(putGamma),
+      callGex: callGamma,
+      putGex: putGamma,
+    }));
+
+    levels.sort((a, b) => Math.abs(b.gex) - Math.abs(a.gex));
+
+    let flipPrice: number | null = null;
+    const sortedByStrike = [...levels].sort((a, b) => a.strike - b.strike);
+    for (let i = 1; i < sortedByStrike.length; i++) {
+      if (sortedByStrike[i - 1].gex * sortedByStrike[i].gex < 0) {
+        flipPrice = (sortedByStrike[i - 1].strike + sortedByStrike[i].strike) / 2;
+        break;
+      }
+    }
+
+    const majorLevels: GexLevel[] = levels.slice(0, 20).map((level) => ({
+      strike: level.strike,
+      gex: level.gex,
+      callGex: level.callGex,
+      putGex: level.putGex,
+      type: this.classifyGexLevel(
+        { strike: level.strike, gex: level.gex, call_gex: level.callGex, put_gex: level.putGex },
+        flipPrice,
+      ),
+    }));
 
     return {
       symbol,
-      totalGex: data.total_gex,
-      callGex: data.call_gex,
-      putGex: data.put_gex,
-      netGex: data.net_gex,
-      flipPrice: data.flip_price,
+      totalGex: totalCallGex + totalPutGex,
+      callGex: totalCallGex,
+      putGex: totalPutGex,
+      netGex,
+      flipPrice,
       majorLevels,
       timestamp: Date.now(),
     };
   }
 
   async getFlow(symbol: string): Promise<OptionsFlowSummary> {
-    const response = await this.request<UWFlowResponse>(
+    const response = await this.request<UWNetPremTicksResponse>(
       'GET',
-      `/api/stock/${symbol}/flow`,
+      `/api/stock/${symbol}/net-prem-ticks`,
       {},
       this.authHeaders,
     );
 
-    if (!response?.data) {
+    if (!response?.data?.length) {
       throw new ProviderError(this.name, 'PARSE_ERROR', `Empty flow response for ${symbol}`);
     }
 
-    const { data } = response;
+    let totalCallVol = 0;
+    let totalPutVol = 0;
+    let totalCallPrem = 0;
+    let totalPutPrem = 0;
 
-    const largestTrades: OptionsFlowTick[] = (data.trades || [])
-      .sort((a, b) => b.premium - a.premium)
-      .slice(0, 10)
-      .map((t) => ({
-        symbol: t.underlying_symbol,
-        contractSymbol: t.option_symbol,
-        type: t.option_type.toLowerCase() as 'call' | 'put',
-        strike: t.strike,
-        expiration: t.expiry,
-        side: this.normalizeSide(t.side),
-        sentiment: this.normalizeSentiment(t.sentiment),
-        premium: t.premium,
-        size: t.size,
-        openInterest: t.open_interest,
-        volume: t.volume,
-        impliedVolatility: t.implied_volatility,
-        timestamp: new Date(t.executed_at).getTime(),
-      }));
+    for (const tick of response.data) {
+      totalCallVol += tick.call_volume;
+      totalPutVol += tick.put_volume;
+      totalCallPrem += parseFloat(tick.net_call_premium) || 0;
+      totalPutPrem += parseFloat(tick.net_put_premium) || 0;
+    }
+
+    const totalPremium = Math.abs(totalCallPrem) + Math.abs(totalPutPrem);
+    const netPremium = totalCallPrem + totalPutPrem;
+    const putCallRatio = totalCallVol > 0 ? totalPutVol / totalCallVol : 0;
+    const sentiment: 'bullish' | 'bearish' | 'neutral' =
+      netPremium > 0 ? 'bullish' : netPremium < 0 ? 'bearish' : 'neutral';
 
     return {
       symbol,
-      totalPremium: data.total_premium,
-      callPremium: data.call_premium,
-      putPremium: data.put_premium,
-      netPremium: data.net_premium,
-      callVolume: data.call_volume,
-      putVolume: data.put_volume,
-      putCallRatio: data.put_call_ratio,
-      largestTrades,
-      sentiment: this.normalizeSentiment(data.sentiment),
+      totalPremium,
+      callPremium: totalCallPrem,
+      putPremium: totalPutPrem,
+      netPremium,
+      callVolume: totalCallVol,
+      putVolume: totalPutVol,
+      putCallRatio,
+      largestTrades: [],
+      sentiment,
       timestamp: Date.now(),
     };
   }
 
   async getIV(symbol: string): Promise<IVData> {
-    const response = await this.request<UWIVResponse>(
+    const response = await this.request<UWInterpolatedIVResponse>(
       'GET',
-      `/api/stock/${symbol}/volatility`,
+      `/api/stock/${symbol}/interpolated-iv`,
       {},
       this.authHeaders,
     );
 
-    if (!response?.data) {
+    if (!response?.data?.length) {
       throw new ProviderError(this.name, 'PARSE_ERROR', `Empty IV response for ${symbol}`);
     }
 
-    const { data } = response;
+    const byDays = new Map(response.data.map((d) => [d.days, d]));
+    const iv30 = byDays.get(30);
+    const iv60 = byDays.get(60);
+    const iv90 = byDays.get(90);
+
+    const currentIV = iv30 ? parseFloat(iv30.volatility) : parseFloat(response.data[0].volatility);
+    const ivPercentile = iv30 ? parseFloat(iv30.percentile) : parseFloat(response.data[0].percentile);
+    const ivRank = ivPercentile;
 
     return {
       symbol,
-      currentIV: data.current_iv,
-      ivRank: data.iv_rank,
-      ivPercentile: data.iv_percentile,
-      historicalIV30: data.hv_30,
-      historicalIV60: data.hv_60,
-      historicalIV90: data.hv_90,
+      currentIV,
+      ivRank,
+      ivPercentile,
+      historicalIV30: iv30 ? parseFloat(iv30.volatility) : 0,
+      historicalIV60: iv60 ? parseFloat(iv60.volatility) : 0,
+      historicalIV90: iv90 ? parseFloat(iv90.volatility) : 0,
       timestamp: Date.now(),
     };
   }
 
   async healthCheck(): Promise<boolean> {
     try {
-      await this.request('GET', '/api/stock/SPY/option-contracts', { limit: 1 }, this.authHeaders);
+      await this.request('GET', '/api/stock/SPY/interpolated-iv', {}, this.authHeaders);
       return true;
     } catch {
       return false;
