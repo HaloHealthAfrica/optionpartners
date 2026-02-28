@@ -140,4 +140,31 @@ export interface MarketHours {
 
 export type Timeframe = '1min' | '5min' | '15min' | '30min' | '1h' | '4h' | '1day' | '1week';
 
-export type DataType = 'quote' | 'candles' | 'options_chain' | 'gex' | 'flow' | 'iv' | 'vix' | 'macro';
+export type DataType =
+  | 'quote' | 'candles' | 'options_chain' | 'gex' | 'flow' | 'iv' | 'vix' | 'macro'
+  | 'underlying' | 'expirations' | 'chain' | 'quotes' | 'greeks'
+  | 'hist_candles' | 'hist_metrics' | 'hist_regime';
+
+export interface DerivedMetrics {
+  symbol: string;
+  timeframe: string;
+  atr14: number;
+  atr30: number;
+  hv20: number;
+  hv60: number;
+  hvPercentile252: number;
+  computedAt: number;
+}
+
+export type VolatilityRegime = 'HIGH_VOL_EXPANSION' | 'LOW_VOL_CHOP' | 'TRENDING' | 'NEUTRAL';
+
+export interface RegimeSnapshot {
+  symbol: string;
+  regime: VolatilityRegime;
+  metrics: DerivedMetrics;
+  rulesTriggered: string[];
+  computedAt: number;
+  analyticsVersion: string;
+  timeframe: string;
+  lookback: number;
+}

@@ -19,6 +19,8 @@ class ExitMonitor {
     this._intervalId = null;
     this._checksRun = 0;
     this._exitsTriggered = 0;
+    this._regimeCache = new Map();
+    this._REGIME_CACHE_TTL_MS = 5 * 60 * 1000;
   }
 
   start(intervalMs = 15000) {
@@ -54,6 +56,14 @@ class ExitMonitor {
   }
 
   async checkAllPositions() {
+    // Evict expired entries from regime cache at cycle start
+    const now = Date.now();
+    for (const [sym, entry] of this._regimeCache) {
+      if (now - entry.fetchedAt > this._REGIME_CACHE_TTL_MS) {
+        this._regimeCache.delete(sym);
+      }
+    }
+
     const positions = await db.query(
       `SELECT p.*, s.enable_exit_monitor, s.default_trailing_stop_pct,
               s.default_max_hold_hours, s.force_close_at_dte_zero
@@ -170,7 +180,14 @@ class ExitMonitor {
     }
 
     // 4. Trailing stop check (tracks underlying price movement)
-    const trailingPct = parseFloat(position.trailing_stop_pct || position.default_trailing_stop_pct || 0);
+    const regimeData = await this._getRegimeForSymbol(position.underlying_symbol || position.symbol);
+    const regime = regimeData?.regime || null;
+
+    const baseTrailingPct = parseFloat(position.trailing_stop_pct || position.default_trailing_stop_pct || 0);
+    const baseMaxHold = position.max_hold_hours || position.default_max_hold_hours;
+    const exitAdj = this._applyRegimeExitAdjustments(baseTrailingPct, baseMaxHold, regime);
+    const trailingPct = exitAdj.trailingPct;
+
     if (trailingPct > 0 && !isCreditSpread) {
       if (profitsWhenDown) {
         const trailingStop = newLowest * (1 + trailingPct);
@@ -193,8 +210,8 @@ class ExitMonitor {
       }
     }
 
-    // 5. Max hold duration check
-    const maxHoldHours = position.max_hold_hours || position.default_max_hold_hours;
+    // 5. Max hold duration check (regime-adjusted)
+    const maxHoldHours = exitAdj.maxHoldHours;
     if (maxHoldHours) {
       const hoursOpen = (Date.now() - new Date(position.opened_at).getTime()) / (1000 * 60 * 60);
       if (hoursOpen >= maxHoldHours) {
@@ -205,6 +222,60 @@ class ExitMonitor {
         return;
       }
     }
+  }
+
+  /**
+   * Fetch regime for a symbol with per-cycle caching to avoid hammering the data service.
+   * Returns null on failure — exit monitor continues with base parameters.
+   */
+  async _getRegimeForSymbol(symbol) {
+    const cached = this._regimeCache.get(symbol);
+    if (cached && (Date.now() - cached.fetchedAt) < this._REGIME_CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    try {
+      const result = await dataServiceProxy.getHistoricalRegime(symbol);
+      if (result?.regime) {
+        this._regimeCache.set(symbol, { data: result, fetchedAt: Date.now() });
+        return result;
+      }
+    } catch (_) {
+      // Regime unavailable — exit monitor proceeds with default params
+    }
+
+    return null;
+  }
+
+  /**
+   * Apply regime-based adjustments to exit parameters.
+   *
+   * HIGH_VOL_EXPANSION: wider trailing stop (allow runners), extend max hold
+   * LOW_VOL_CHOP:       tighter trailing stop, reduce max hold (time stop)
+   * TRENDING:           wider trailing stop, extend max hold
+   */
+  _applyRegimeExitAdjustments(trailingPct, maxHoldHours, regime) {
+    if (!regime) return { trailingPct, maxHoldHours, regimeAdjusted: false };
+
+    let adjTrailing = trailingPct;
+    let adjMaxHold = maxHoldHours;
+
+    switch (regime) {
+      case 'HIGH_VOL_EXPANSION':
+        adjTrailing = trailingPct * 1.5;
+        adjMaxHold = maxHoldHours ? maxHoldHours * 1.5 : null;
+        break;
+      case 'LOW_VOL_CHOP':
+        adjTrailing = trailingPct * 0.7;
+        adjMaxHold = maxHoldHours ? maxHoldHours * 0.75 : null;
+        break;
+      case 'TRENDING':
+        adjTrailing = trailingPct * 1.3;
+        adjMaxHold = maxHoldHours ? maxHoldHours * 1.25 : null;
+        break;
+    }
+
+    return { trailingPct: adjTrailing, maxHoldHours: adjMaxHold, regimeAdjusted: true };
   }
 
   /**

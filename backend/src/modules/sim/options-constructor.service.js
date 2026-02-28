@@ -29,9 +29,11 @@ class OptionsConstructor {
    *   When provided, these override the DB recipe values. Expected shape:
    *   { contract_type, target_delta, min_delta, max_delta, target_dte, min_dte, max_dte,
    *     min_open_interest, min_volume, max_bid_ask_spread_pct, spread_width }
+   * @param {Object} [regimeContext] - Regime context for dynamic scoring weights.
+   *   { regime, hvPercentile, atrRatio }
    * @returns {Promise<{ success: boolean, signal?: Object, reason?: string }>}
    */
-  async construct(signal, userId, engineOverrides = null) {
+  async construct(signal, userId, engineOverrides = null, regimeContext = null) {
     try {
       const direction = this._resolveDirection(signal);
       if (!direction) {
@@ -70,10 +72,10 @@ class OptionsConstructor {
       );
 
       if (recipe.contract_type === 'CREDIT_SPREAD') {
-        return this._constructSpread(signal, recipe, expirationContracts, expiration, direction);
+        return this._constructSpread(signal, recipe, expirationContracts, expiration, direction, regimeContext);
       }
 
-      return this._constructSingleLeg(signal, recipe, expirationContracts, expiration);
+      return this._constructSingleLeg(signal, recipe, expirationContracts, expiration, regimeContext);
     } catch (err) {
       logger.error(`Options constructor error: ${err.message}`, 'options-constructor');
       return { success: false, reason: `Constructor error: ${err.message}` };
@@ -262,7 +264,7 @@ class OptionsConstructor {
 
   // --- Single leg construction (CALL or PUT) ---
 
-  _constructSingleLeg(signal, recipe, contracts, expiration) {
+  _constructSingleLeg(signal, recipe, contracts, expiration, regimeContext = null) {
     const optionType = recipe.contract_type === 'CALL' ? 'call' : 'put';
     const candidates = contracts.filter((c) => c.type === optionType);
 
@@ -270,7 +272,7 @@ class OptionsConstructor {
       return { success: false, reason: `No ${optionType} contracts at expiration ${expiration}` };
     }
 
-    const strike = this._selectStrikeByDelta(candidates, recipe);
+    const strike = this._selectStrikeByDelta(candidates, recipe, regimeContext);
     if (!strike) {
       return {
         success: false,
@@ -324,7 +326,7 @@ class OptionsConstructor {
 
   // --- Spread construction ---
 
-  _constructSpread(signal, recipe, contracts, expiration, direction) {
+  _constructSpread(signal, recipe, contracts, expiration, direction, regimeContext = null) {
     // For credit spreads:
     //   Bullish (long direction) → Bull Put Spread: sell higher put, buy lower put
     //   Bearish (short direction) → Bear Call Spread: sell lower call, buy higher call
@@ -337,7 +339,7 @@ class OptionsConstructor {
     }
 
     // Select short leg by delta
-    const shortLeg = this._selectStrikeByDelta(candidates, recipe);
+    const shortLeg = this._selectStrikeByDelta(candidates, recipe, regimeContext);
     if (!shortLeg) {
       return {
         success: false,
@@ -438,10 +440,11 @@ class OptionsConstructor {
    *   ivWeight     (0.15) — prefer lower IV relative to peers (cheaper)
    *   liquidWeight (0.30) — OI, volume, tight spread
    */
-  _selectStrikeByDelta(contracts, recipe) {
+  _selectStrikeByDelta(contracts, recipe, regimeContext = null) {
     const targetDelta = parseFloat(recipe.target_delta);
     const minDelta = parseFloat(recipe.min_delta);
     const maxDelta = parseFloat(recipe.max_delta);
+    const dynamicWeights = this._getDynamicWeights(regimeContext);
 
     const eligible = contracts.filter((c) => {
       const absDelta = Math.abs(c.delta);
@@ -450,13 +453,13 @@ class OptionsConstructor {
 
     if (eligible.length === 0) return null;
     if (eligible.length === 1) {
-      eligible[0]._riskScore = this._scoreContract(eligible[0], targetDelta, eligible);
+      eligible[0]._riskScore = this._scoreContract(eligible[0], targetDelta, eligible, dynamicWeights);
       return eligible[0];
     }
 
     const scored = eligible.map((c) => ({
       ...c,
-      _riskScore: this._scoreContract(c, targetDelta, eligible),
+      _riskScore: this._scoreContract(c, targetDelta, eligible, dynamicWeights),
     }));
 
     scored.sort((a, b) => b._riskScore.composite - a._riskScore.composite);
@@ -473,9 +476,10 @@ class OptionsConstructor {
 
   /**
    * Compute a 0-100 composite risk/quality score for a contract.
+   * Accepts optional dynamic weights derived from regime context.
    */
-  _scoreContract(contract, targetDelta, peers) {
-    const W = { delta: 0.30, theta: 0.15, gamma: 0.10, iv: 0.15, liquidity: 0.30 };
+  _scoreContract(contract, targetDelta, peers, dynamicWeights = null) {
+    const W = dynamicWeights || { delta: 0.30, theta: 0.15, gamma: 0.10, iv: 0.15, liquidity: 0.30 };
 
     // Delta accuracy: 100 when exactly on target, 0 at boundary
     const deltaError = Math.abs(Math.abs(contract.delta) - targetDelta);
@@ -590,6 +594,46 @@ class OptionsConstructor {
     }
 
     return { pass: true };
+  }
+
+  // --- Regime-adaptive scoring weights ---
+
+  /**
+   * Compute dynamic scoring weights based on regime context.
+   * Weights are normalized to sum to 1.0 for deterministic scoring.
+   *
+   * HIGH_VOL_EXPANSION: delta +20%, theta penalty -10%
+   * LOW_VOL_CHOP:       liquidity (spread+OI) +25%, gamma -30%
+   * TRENDING:           delta +10%
+   */
+  _getDynamicWeights(regimeContext) {
+    const base = { delta: 0.30, theta: 0.15, gamma: 0.10, iv: 0.15, liquidity: 0.30 };
+    if (!regimeContext?.regime) return base;
+
+    const W = { ...base };
+
+    switch (regimeContext.regime) {
+      case 'HIGH_VOL_EXPANSION':
+        W.delta *= 1.20;
+        W.theta *= 0.90;
+        break;
+      case 'LOW_VOL_CHOP':
+        W.liquidity *= 1.25;
+        W.gamma *= 0.70;
+        break;
+      case 'TRENDING':
+        W.delta *= 1.10;
+        break;
+    }
+
+    const total = W.delta + W.theta + W.gamma + W.iv + W.liquidity;
+    W.delta /= total;
+    W.theta /= total;
+    W.gamma /= total;
+    W.iv /= total;
+    W.liquidity /= total;
+
+    return W;
   }
 
   // --- Direction resolution ---

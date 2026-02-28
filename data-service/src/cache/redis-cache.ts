@@ -14,6 +14,14 @@ const TTL_MAP: Record<DataType, number> = {
   iv: 120,
   vix: 300,
   macro: 3600,
+  underlying: 2,
+  expirations: 86400,
+  chain: 60,
+  quotes: 2,
+  greeks: 10,
+  hist_candles: 86400,
+  hist_metrics: 21600,
+  hist_regime: 900,
 };
 
 export class RedisCache {

@@ -21,9 +21,9 @@ interface CircuitStats {
 }
 
 const DEFAULT_CONFIG: CircuitConfig = {
-  failureThreshold: 5,
+  failureThreshold: 3,
   resetTimeoutMs: 30_000,
-  halfOpenMaxAttempts: 3,
+  halfOpenMaxAttempts: 2,
 };
 
 export class CircuitBreaker {

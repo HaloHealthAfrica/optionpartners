@@ -106,6 +106,35 @@ const MIGRATIONS = [
       );
     `,
   },
+  {
+    name: '007_create_volatility_snapshots',
+    sql: `
+      CREATE TABLE IF NOT EXISTS volatility_snapshots (
+        id               SERIAL PRIMARY KEY,
+        symbol           VARCHAR(10) NOT NULL,
+        regime           VARCHAR(30) NOT NULL,
+        metrics          JSONB NOT NULL DEFAULT '{}',
+        rules_triggered  JSONB NOT NULL DEFAULT '[]',
+        captured_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_vol_snap_symbol ON volatility_snapshots (symbol);
+      CREATE INDEX IF NOT EXISTS idx_vol_snap_captured_at ON volatility_snapshots (captured_at);
+      CREATE INDEX IF NOT EXISTS idx_vol_snap_symbol_time ON volatility_snapshots (symbol, captured_at DESC);
+    `,
+  },
+  {
+    name: '008_add_volatility_snapshot_versioning',
+    sql: `
+      ALTER TABLE volatility_snapshots
+        ADD COLUMN IF NOT EXISTS analytics_version TEXT NOT NULL DEFAULT 'v1',
+        ADD COLUMN IF NOT EXISTS timeframe TEXT NOT NULL DEFAULT '1d',
+        ADD COLUMN IF NOT EXISTS lookback INTEGER NOT NULL DEFAULT 252;
+
+      UPDATE volatility_snapshots
+        SET analytics_version = 'v1', timeframe = '1d', lookback = 252
+        WHERE analytics_version IS NULL OR analytics_version = 'v1';
+    `,
+  },
 ];
 
 export async function runMigrations(): Promise<void> {

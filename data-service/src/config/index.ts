@@ -20,6 +20,12 @@ const configSchema = z.object({
     rateLimit: z.coerce.number().default(120),
   }),
 
+  marketData: z.object({
+    apiToken: z.string().default(''),
+    baseUrl: z.string().default('https://api.marketdata.app'),
+    rateLimit: z.coerce.number().default(100),
+  }),
+
   polygon: z.object({
     apiKey: z.string().default(''),
     baseUrl: z.string().default('https://api.polygon.io'),
@@ -65,6 +71,12 @@ function loadConfig(): AppConfig {
       apiKey: process.env.UNUSUAL_WHALES_API_KEY || '',
       baseUrl: process.env.UNUSUAL_WHALES_BASE_URL,
       rateLimit: process.env.UNUSUAL_WHALES_RATE_LIMIT,
+    },
+
+    marketData: {
+      apiToken: process.env.MARKETDATA_API_TOKEN || '',
+      baseUrl: process.env.MARKETDATA_BASE_URL,
+      rateLimit: process.env.MARKETDATA_RATE_LIMIT,
     },
 
     polygon: {

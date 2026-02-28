@@ -9,6 +9,10 @@ const symbolStateService = require('./symbol-state.service');
 const tradeDecisionEngine = require('./trade-decision-engine');
 const optionsConstructor = require('./options-constructor.service');
 const dataServiceProxy = require('../../services/dataServiceProxy');
+const regimeIntegration = require('../portfolio/regime-integration');
+const adaptiveParams = require('../strategy/adaptive-params');
+const riskScaler = require('./risk-scaler');
+const expectedMoveFilter = require('./expected-move-filter');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
 const { assertSimMode } = require('../../config/tradingMode');
@@ -178,15 +182,84 @@ class DecisionRouter {
         return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
       }
 
-      // ── Phase 2.5: Refresh chain data from data-service before evaluation ──
+      // ── Phase 2.5: Refresh chain data + volatility regime from data-service ──
       const effectiveSymbol = signal.symbol || symbol;
       await this._refreshChainData(effectiveSymbol, userId);
+      const volRegime = await this._fetchVolatilityRegime(effectiveSymbol);
 
-      // ── Phase 3: Trade Decision Engine (deterministic, replaces fuzzy scoring) ──
+      // ── Phase 2.6: Adaptive portfolio config from regime ──
+      const portfolioConfig = regimeIntegration.getAdaptivePortfolioConfig(volRegime);
+
+      // ── Phase 3: Trade Decision Engine (deterministic) ──
       const symState = await symbolStateService.getState(userId, effectiveSymbol);
+      if (volRegime) {
+        symState.volatility_regime = volRegime.regime;
+        symState.volatility_metrics = volRegime.metrics;
+      }
       const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId);
 
-      await this._logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision);
+      // Build regime overrides (existing clamping logic)
+      const regimeResult = this._regimeOverrides(volRegime);
+      const { _overridesApplied, _regime, _regimeRaw, _regimeClamped, ...regimeSafe } = regimeResult;
+
+      // ── Phase 3.5: Adaptive strategy params from HV metrics ──
+      const regimeMetrics = volRegime?.metrics || null;
+      const baseStrategyConfig = {
+        dte_target: tradeDecision.dte_target,
+        dte_min: tradeDecision.dte_min,
+        dte_max: tradeDecision.dte_max,
+        delta_target: tradeDecision.delta_target,
+        delta_min: tradeDecision.delta_min,
+        delta_max: tradeDecision.delta_max,
+        max_bid_ask_spread_pct: 0.08,
+        takeProfitPct: 0.50,
+      };
+      const adaptedConfig = adaptiveParams.getAdaptiveStrategyParams(baseStrategyConfig, regimeMetrics);
+
+      // Apply portfolio-level flags to adapted config
+      if (portfolioConfig.allowLowerDelta) {
+        adaptedConfig.min_delta = Math.max(0.30, (adaptedConfig.min_delta || 0.45) - 0.10);
+      }
+      if (portfolioConfig.tightenSpreadRequirement) {
+        adaptedConfig.max_bid_ask_spread_pct = Math.max(0.03, (adaptedConfig.max_bid_ask_spread_pct || 0.08) - 0.02);
+      }
+
+      // ── Phase 3.6: Risk scaling from HV percentile ──
+      const hvPercentile = regimeMetrics?.hvPercentile252 ?? null;
+      const hvRiskResult = riskScaler.applyRiskScaling(tradeDecision.size_multiplier || 1, hvPercentile);
+      const portfolioRiskMult = portfolioConfig.riskMultiplier || 1.0;
+      const combinedRiskMultiplier = hvRiskResult.multiplier * portfolioRiskMult;
+      const adjustedSizeMultiplier = (tradeDecision.size_multiplier || 1) * combinedRiskMultiplier;
+
+      // ── Build versioned regime audit context (Phase 7) ──
+      const regimeAuditContext = {
+        regime: volRegime?.regime || null,
+        hvPercentile: hvPercentile,
+        atr14: regimeMetrics?.atr14 ?? null,
+        atr30: regimeMetrics?.atr30 ?? null,
+        analyticsVersion: volRegime?.analyticsVersion || null,
+        overridesApplied: _overridesApplied || false,
+        rawOverrides: _regimeRaw || null,
+        clampedOverrides: _regimeClamped || null,
+        portfolioConfig: {
+          explosiveAllocation: portfolioConfig.explosiveAllocation,
+          compoundingAllocation: portfolioConfig.compoundingAllocation,
+          riskMultiplier: portfolioConfig.riskMultiplier,
+          regimeSource: portfolioConfig.regimeSource,
+        },
+        adaptedStrategyParams: adaptedConfig.adjustments || [],
+        riskScaling: {
+          hvMultiplier: hvRiskResult.multiplier,
+          portfolioMultiplier: portfolioRiskMult,
+          combined: combinedRiskMultiplier,
+        },
+        adjustedSizeMultiplier,
+        adjustedDTE: adaptedConfig.dte_target,
+        adjustedDelta: adaptedConfig.delta_target,
+        adjustedWeights: null,
+      };
+
+      await this._logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision, regimeAuditContext);
 
       if (tradeDecision.action === 'BLOCK') {
         const reason = tradeDecision.rationale.join('; ');
@@ -206,7 +279,7 @@ class DecisionRouter {
         signal.contractType = null; // force construction with engine overrides
       }
 
-      // Options constructor with engine overrides
+      // Options constructor with engine + adaptive overrides
       if (optionsConstructor.needsConstruction(signal)) {
         const constructorEnabled = await optionsConstructor.isEnabled(userId);
         if (!constructorEnabled) {
@@ -217,19 +290,34 @@ class DecisionRouter {
 
         const engineOverrides = {
           contract_type: tradeDecision.contractType,
-          target_delta: tradeDecision.delta_target,
-          min_delta: tradeDecision.delta_min,
-          max_delta: tradeDecision.delta_max,
-          target_dte: tradeDecision.dte_target,
-          min_dte: tradeDecision.dte_min,
-          max_dte: tradeDecision.dte_max,
+          target_delta: adaptedConfig.delta_target,
+          min_delta: adaptedConfig.min_delta || tradeDecision.delta_min,
+          max_delta: adaptedConfig.delta_max || tradeDecision.delta_max,
+          target_dte: adaptedConfig.dte_target,
+          min_dte: adaptedConfig.dte_min || tradeDecision.dte_min,
+          max_dte: adaptedConfig.dte_max || tradeDecision.dte_max,
           min_open_interest: 100,
           min_volume: 10,
-          max_bid_ask_spread_pct: 0.08,
+          max_bid_ask_spread_pct: adaptedConfig.max_bid_ask_spread_pct || 0.08,
           spread_width: 5,
+          ...regimeSafe,
         };
 
-        const construction = await optionsConstructor.construct(signal, userId, engineOverrides);
+        // Regime context for dynamic scoring weights (Phase 3)
+        const regimeContext = volRegime ? {
+          regime: volRegime.regime,
+          hvPercentile: hvPercentile,
+          atrRatio: (regimeMetrics?.atr14 && regimeMetrics?.atr30 > 0)
+            ? regimeMetrics.atr14 / regimeMetrics.atr30
+            : null,
+        } : null;
+
+        regimeAuditContext.finalParamsUsed = engineOverrides;
+        if (regimeContext) {
+          regimeAuditContext.adjustedWeights = optionsConstructor._getDynamicWeights(regimeContext);
+        }
+
+        const construction = await optionsConstructor.construct(signal, userId, engineOverrides, regimeContext);
         if (!construction.success) {
           await this._logRejection(userId, webhookEventId, signal, 'OPTIONS_CONSTRUCTOR', construction.reason);
           return {
@@ -245,15 +333,35 @@ class DecisionRouter {
           `[OPTIONS_CONSTRUCTOR] ${signal.symbol} → ${signal.contractType} strike=${signal.strike} exp=${signal.expiration}`,
           'decision-router'
         );
+
+        // ── Phase 5: Expected move filter ──
+        if (regimeMetrics?.atr14) {
+          const targetPct = adaptedConfig.takeProfitReduction
+            ? 0.50 - adaptedConfig.takeProfitReduction
+            : 0.50;
+          const emFilter = expectedMoveFilter.validateExpectedMove({
+            atr14: regimeMetrics.atr14,
+            delta: signal.delta,
+            optionPremium: signal.midPrice,
+            targetPctMove: targetPct,
+          });
+          regimeAuditContext.expectedMoveCheck = emFilter.details;
+          if (!emFilter.pass) {
+            await this._logRejection(userId, webhookEventId, signal, 'EXPECTED_MOVE', emFilter.reason);
+            return {
+              approved: false,
+              reason: `Expected move filter: ${emFilter.reason}`,
+              signal,
+              indicatorSource,
+            };
+          }
+        }
       }
 
       // ── Build approved order intent ──
-      // For options entries, the side is always BUY (you buy calls or puts).
-      // The signal direction (long/short) determines CALL vs PUT, not BUY vs SELL.
       const resolvedContractType = signal.contractType || tradeDecision.contractType || 'STOCK';
       const isEntry = tradeDecision.action === 'BUY_CALL' || tradeDecision.action === 'BUY_PUT' || tradeDecision.action === 'SELL_SPREAD';
       const side = isEntry ? 'BUY' : (signal.action === 'BUY' ? 'BUY' : 'SELL');
-      const sizeMultiplier = tradeDecision.size_multiplier || 1;
       const baseQty = signal.quantity || 1;
 
       return {
@@ -270,7 +378,7 @@ class DecisionRouter {
           strikeShort: signal.strikeShort,
           strikeLong: signal.strikeLong,
           expiration: signal.expiration,
-          quantity: Math.max(1, Math.round(baseQty * sizeMultiplier)),
+          quantity: Math.max(1, Math.round(baseQty * adjustedSizeMultiplier)),
           strategy: signal.strategy,
           limitPrice: signal.limitPrice,
           stopLoss: tradeDecision.risk_parameters.stop_level || signal.stopLoss,
@@ -441,7 +549,7 @@ class DecisionRouter {
     return result.rows[0];
   }
 
-  async _logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision) {
+  async _logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision, regimeContext = null) {
     try {
       await db.query(
         `INSERT INTO intelligence_verdicts
@@ -467,6 +575,7 @@ class DecisionRouter {
             dte_target: tradeDecision.dte_target,
             size_multiplier: tradeDecision.size_multiplier,
             risk_parameters: tradeDecision.risk_parameters,
+            volatility_regime: regimeContext,
           }),
         ]
       );
@@ -518,6 +627,116 @@ class DecisionRouter {
       }
     } catch (err) {
       logger.warn(`[CHAIN_REFRESH] ${symbol}: data-service unavailable (${err.message}) — using cached state`, 'decision-router');
+    }
+  }
+
+  /**
+   * Regime-aware parameter adjustments for options construction.
+   * All adjustments are clamped to global safety caps so regime logic
+   * can never expand risk beyond base configuration.
+   */
+  _regimeOverrides(volRegime) {
+    const GLOBAL_CAPS = {
+      MAX_DTE: parseInt(process.env.SIM_GLOBAL_MAX_DTE || '60', 10),
+      MIN_DTE: 0,
+      MAX_SPREAD_PCT: parseFloat(process.env.SIM_GLOBAL_MAX_SPREAD_PCT || '0.15'),
+      MAX_SPREAD_WIDTH: parseFloat(process.env.SIM_GLOBAL_MAX_SPREAD_WIDTH || '15'),
+      MIN_SPREAD_WIDTH: 1,
+    };
+
+    if (!volRegime?.regime) return { _overridesApplied: false };
+
+    let raw = {};
+    switch (volRegime.regime) {
+      case 'HIGH_VOL_EXPANSION':
+        raw = {
+          max_bid_ask_spread_pct: 0.12,
+          min_dte: 14,
+          target_dte: 30,
+          spread_width: 10,
+        };
+        break;
+      case 'LOW_VOL_CHOP':
+        raw = {
+          max_bid_ask_spread_pct: 0.06,
+          target_dte: 7,
+          max_dte: 21,
+          spread_width: 2.5,
+        };
+        break;
+      default:
+        return { _overridesApplied: false };
+    }
+
+    const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
+
+    const clamped = {};
+    if (raw.target_dte !== undefined)
+      clamped.target_dte = clamp(raw.target_dte, GLOBAL_CAPS.MIN_DTE, GLOBAL_CAPS.MAX_DTE);
+    if (raw.min_dte !== undefined)
+      clamped.min_dte = clamp(raw.min_dte, GLOBAL_CAPS.MIN_DTE, GLOBAL_CAPS.MAX_DTE);
+    if (raw.max_dte !== undefined)
+      clamped.max_dte = clamp(raw.max_dte, GLOBAL_CAPS.MIN_DTE, GLOBAL_CAPS.MAX_DTE);
+    if (raw.max_bid_ask_spread_pct !== undefined)
+      clamped.max_bid_ask_spread_pct = clamp(raw.max_bid_ask_spread_pct, 0.01, GLOBAL_CAPS.MAX_SPREAD_PCT);
+    if (raw.spread_width !== undefined)
+      clamped.spread_width = clamp(raw.spread_width, GLOBAL_CAPS.MIN_SPREAD_WIDTH, GLOBAL_CAPS.MAX_SPREAD_WIDTH);
+
+    logger.info(
+      `[REGIME_OVERRIDE] ${volRegime.symbol}: regime=${volRegime.regime} raw=${JSON.stringify(raw)} clamped=${JSON.stringify(clamped)}`,
+      'decision-router'
+    );
+
+    return {
+      ...clamped,
+      _overridesApplied: true,
+      _regime: volRegime.regime,
+      _regimeRaw: raw,
+      _regimeClamped: clamped,
+    };
+  }
+
+  /**
+   * Fetch the volatility regime from the data service.
+   * Tries the v1 historical endpoint first (comprehensive, fresh),
+   * then falls back to the legacy /api/regime endpoint.
+   * Returns null on failure — decision pipeline continues without regime context.
+   */
+  async _fetchVolatilityRegime(symbol) {
+    // Try v1 historical endpoint first
+    try {
+      const result = await dataServiceProxy.getHistoricalRegime(symbol);
+      if (result?.regime) {
+        logger.info(
+          `[VOL_REGIME] ${symbol}: regime=${result.regime} hvPct=${result.metrics?.hvPercentile252?.toFixed(2) ?? 'N/A'} (source=v1/historical)`,
+          'decision-router'
+        );
+        return { ...result, _source: 'v1_historical' };
+      }
+    } catch (err) {
+      logger.info(
+        `[VOL_REGIME] ${symbol}: v1 historical unavailable (${err.message}), trying legacy`,
+        'decision-router'
+      );
+    }
+
+    // Fall back to legacy /api/regime endpoint
+    try {
+      const result = await dataServiceProxy.getVolatilityRegime(symbol);
+      if (result?.regime) {
+        logger.info(
+          `[VOL_REGIME] ${symbol}: regime=${result.regime} hvPct=${result.metrics?.hvPercentile252?.toFixed(2) ?? 'N/A'} (source=legacy)`,
+          'decision-router'
+        );
+        return { ...result, _source: 'legacy' };
+      }
+      return null;
+    } catch (err) {
+      logger.warn(
+        `[REGIME_UNAVAILABLE] ${symbol}: all regime endpoints unavailable (${err.message}) — proceeding with base config`,
+        'decision-router'
+      );
+      return null;
     }
   }
 

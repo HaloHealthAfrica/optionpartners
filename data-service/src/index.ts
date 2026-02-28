@@ -13,7 +13,11 @@ import { cacheManager } from './cache';
 import { initDatabase, runMigrations, closeDatabase, snapshotStore } from './persistence';
 import { WorkerManager } from './workers/worker-manager';
 import { createRoutes } from './api/routes';
+import { createV1Routes } from './api/v1-routes';
 import { apiKeyAuth } from './api/auth-middleware';
+import { MarketDataClient } from './providers/marketdata/client';
+import { MarketDataAdapter } from './providers/marketdata/adapter';
+import { circuitBreaker } from './services/circuit-breaker';
 
 async function main() {
   const app = express();
@@ -50,6 +54,16 @@ async function main() {
   if (config.polygon.apiKey) {
     orchestrator.registerProvider(new PolygonClient());
     logger.info('Polygon provider registered (tertiary fallback)');
+  }
+
+  // --- Initialize MarketData.app adapter (IP-whitelisted, options authority) ---
+  let marketDataAdapter: MarketDataAdapter | undefined;
+  if (config.marketData.apiToken) {
+    const mdClient = new MarketDataClient(config.marketData.apiToken);
+    marketDataAdapter = new MarketDataAdapter(mdClient);
+    logger.info('MarketData.app adapter initialized (options chain authority)');
+  } else {
+    logger.warn('MARKETDATA_API_TOKEN not set — MarketData.app adapter disabled');
   }
 
   // --- Initialize CBOE + FRED + Macro Regime ---
@@ -96,10 +110,23 @@ async function main() {
         'GET /api/history/gex/:symbol?limit=50',
         'GET /api/history/flow/:symbol?limit=50',
         'GET /api/history/vix?limit=100',
+        'GET /api/regime/:symbol?asOf=ISO_DATE',
+        'GET /api/regime/summary?symbols=SPY,QQQ,IWM',
         'GET /api/health',
         'GET /api/workers/status',
         'POST /api/workers/symbols',
         'DELETE /api/workers/symbols/:symbol',
+        'GET /v1/underlying/:symbol/quote',
+        'GET /v1/options/:symbol/expirations',
+        'GET /v1/options/:symbol/chain?exp=YYYY-MM-DD&right=CALL|PUT',
+        'POST /v1/options/quotes',
+        'POST /v1/options/greeks',
+        'GET /v1/historical/:symbol/candles?tf=1d&start=YYYY-MM-DD&end=YYYY-MM-DD',
+        'GET /v1/historical/:symbol/metrics?tf=1d&lookback=252',
+        'GET /v1/historical/:symbol/regime?tf=1d&lookback=252',
+        'GET /v1/historical/:symbol/iv (P1 stub)',
+        'GET /v1/meta/sources',
+        'GET /v1/health',
       ],
     });
   });
@@ -110,6 +137,15 @@ async function main() {
     fred,
     dbAvailable,
     workerManager,
+  }));
+
+  // --- Mount v1 API routes (options, strike selection, observability) ---
+  app.use('/v1', createV1Routes({
+    orchestrator,
+    marketDataAdapter,
+    cacheManager,
+    circuitBreaker,
+    apiKey: config.apiKey,
   }));
 
   // --- Graceful shutdown ---

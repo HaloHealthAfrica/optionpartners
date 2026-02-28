@@ -1,6 +1,6 @@
 import { getPool } from './db';
 import { createChildLogger } from '../utils/logger';
-import type { GexData, OptionsFlowSummary, Candle, VixData } from '../types';
+import type { GexData, OptionsFlowSummary, Candle, VixData, RegimeSnapshot } from '../types';
 import type { MacroData } from '../services/macro-regime';
 
 const log = createChildLogger('snapshot-store');
@@ -154,6 +154,99 @@ export class SnapshotStore {
       termStructure: r.term_structure,
       timestamp: new Date(r.captured_at).getTime(),
     }));
+  }
+
+  // --- Volatility regime snapshots ---
+
+  async saveVolatilitySnapshot(snapshot: RegimeSnapshot): Promise<void> {
+    if (!this.available) return;
+    try {
+      await getPool().query(
+        `INSERT INTO volatility_snapshots (symbol, regime, metrics, rules_triggered, analytics_version, timeframe, lookback)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          snapshot.symbol, snapshot.regime, JSON.stringify(snapshot.metrics),
+          JSON.stringify(snapshot.rulesTriggered), snapshot.analyticsVersion,
+          snapshot.timeframe, snapshot.lookback,
+        ],
+      );
+      log.debug({ symbol: snapshot.symbol, regime: snapshot.regime, version: snapshot.analyticsVersion }, 'Volatility snapshot saved');
+    } catch (err) {
+      log.warn({ symbol: snapshot.symbol, error: err instanceof Error ? err.message : err }, 'Failed to save volatility snapshot');
+    }
+  }
+
+  async getLatestVolatilitySnapshot(symbol: string): Promise<RegimeSnapshot | null> {
+    if (!this.available) return null;
+    try {
+      const { rows } = await getPool().query(
+        `SELECT symbol, regime, metrics, rules_triggered, captured_at,
+                analytics_version, timeframe, lookback
+         FROM volatility_snapshots
+         WHERE symbol = $1
+         ORDER BY captured_at DESC
+         LIMIT 1`,
+        [symbol],
+      );
+      if (rows.length === 0) return null;
+      return this.mapVolatilityRow(rows[0]);
+    } catch (err) {
+      log.warn({ symbol, error: err instanceof Error ? err.message : err }, 'Failed to read volatility snapshot');
+      return null;
+    }
+  }
+
+  async getRegimeAsOf(symbol: string, asOf: Date): Promise<RegimeSnapshot | null> {
+    if (!this.available) return null;
+    try {
+      const { rows } = await getPool().query(
+        `SELECT symbol, regime, metrics, rules_triggered, captured_at,
+                analytics_version, timeframe, lookback
+         FROM volatility_snapshots
+         WHERE symbol = $1 AND captured_at <= $2
+         ORDER BY captured_at DESC
+         LIMIT 1`,
+        [symbol, asOf],
+      );
+      if (rows.length === 0) return null;
+      return this.mapVolatilityRow(rows[0]);
+    } catch (err) {
+      log.warn({ symbol, error: err instanceof Error ? err.message : err }, 'Failed to read volatility snapshot asOf');
+      return null;
+    }
+  }
+
+  async getRegimeSummary(symbols: string[]): Promise<RegimeSnapshot[]> {
+    if (!this.available || symbols.length === 0) return [];
+    try {
+      const placeholders = symbols.map((_, i) => `$${i + 1}`).join(', ');
+      const { rows } = await getPool().query(
+        `SELECT DISTINCT ON (symbol)
+                symbol, regime, metrics, rules_triggered, captured_at,
+                analytics_version, timeframe, lookback
+         FROM volatility_snapshots
+         WHERE symbol IN (${placeholders})
+         ORDER BY symbol, captured_at DESC`,
+        symbols,
+      );
+      return rows.map((r) => this.mapVolatilityRow(r));
+    } catch (err) {
+      log.warn({ symbols, error: err instanceof Error ? err.message : err }, 'Failed to read regime summary');
+      return [];
+    }
+  }
+
+  private mapVolatilityRow(r: Record<string, unknown>): RegimeSnapshot {
+    return {
+      symbol: r.symbol as string,
+      regime: r.regime as RegimeSnapshot['regime'],
+      metrics: r.metrics as RegimeSnapshot['metrics'],
+      rulesTriggered: r.rules_triggered as string[],
+      computedAt: new Date(r.captured_at as string).getTime(),
+      analyticsVersion: (r.analytics_version as string) || 'v1',
+      timeframe: (r.timeframe as string) || '1d',
+      lookback: (r.lookback as number) || 252,
+    };
   }
 }
 

@@ -130,6 +130,68 @@ export function createRoutes(
     }
   });
 
+  // --- Volatility regime (persisted snapshot — no live recomputation) ---
+
+  router.get('/regime/summary', async (req: Request, res: Response) => {
+    try {
+      if (!context?.snapshotStore) {
+        res.status(503).json({ error: 'Snapshot store unavailable' });
+        return;
+      }
+      const raw = (req.query.symbols as string) || '';
+      const symbols = raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+      if (symbols.length === 0) {
+        res.status(400).json({ error: 'Missing symbols query parameter' });
+        return;
+      }
+      const data = await context.snapshotStore.getRegimeSummary(symbols);
+      res.json({
+        data: data.map((s) => ({
+          symbol: s.symbol,
+          regime: s.regime,
+          hvPercentile: s.metrics.hvPercentile252,
+          atrRatio: s.metrics.atr30 !== 0 ? s.metrics.atr14 / s.metrics.atr30 : 0,
+          computedAt: s.computedAt,
+          analyticsVersion: s.analyticsVersion,
+        })),
+        count: data.length,
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  router.get('/regime/:symbol', async (req: Request<SymbolParams>, res: Response) => {
+    try {
+      if (!context?.snapshotStore) {
+        res.status(503).json({ error: 'Snapshot store unavailable' });
+        return;
+      }
+
+      const asOfRaw = req.query.asOf as string | undefined;
+      let snapshot;
+
+      if (asOfRaw) {
+        const asOf = new Date(asOfRaw);
+        if (isNaN(asOf.getTime())) {
+          res.status(400).json({ error: `Invalid asOf date: ${asOfRaw}` });
+          return;
+        }
+        snapshot = await context.snapshotStore.getRegimeAsOf(sym(req), asOf);
+      } else {
+        snapshot = await context.snapshotStore.getLatestVolatilitySnapshot(sym(req));
+      }
+
+      if (!snapshot) {
+        res.status(404).json({ error: `No volatility regime snapshot found for ${sym(req)}` });
+        return;
+      }
+      res.json(snapshot);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
   // --- Snapshot-persisted endpoints (same data, also writes to Postgres) ---
 
   router.get('/gex/:symbol/snapshot', async (req: Request<SymbolParams>, res: Response) => {

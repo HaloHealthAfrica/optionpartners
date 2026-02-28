@@ -3,6 +3,7 @@ import { GexPoller } from './gex-poller';
 import { FlowPoller } from './flow-poller';
 import { VixPoller } from './vix-poller';
 import { MacroPoller } from './macro-poller';
+import { VolatilityPoller } from './volatility-poller';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 import type { MacroRegimeService } from '../services/macro-regime';
 
@@ -14,6 +15,7 @@ export interface WorkerManagerConfig {
   enableFlow?: boolean;
   enableVix?: boolean;
   enableMacro?: boolean;
+  enableVolatility?: boolean;
 }
 
 const DEFAULT_SYMBOLS = ['SPY', 'QQQ', 'IWM'];
@@ -23,6 +25,7 @@ export class WorkerManager {
   readonly flowPoller: FlowPoller;
   readonly vixPoller: VixPoller;
   readonly macroPoller: MacroPoller;
+  readonly volatilityPoller: VolatilityPoller;
 
   private marketHoursTimer: ReturnType<typeof setInterval> | null = null;
   private isRTH = false;
@@ -38,6 +41,7 @@ export class WorkerManager {
     this.flowPoller = new FlowPoller(orchestrator, symbols);
     this.vixPoller = new VixPoller(orchestrator);
     this.macroPoller = new MacroPoller(macroRegime);
+    this.volatilityPoller = new VolatilityPoller(orchestrator, symbols);
   }
 
   start(config: WorkerManagerConfig = {}): void {
@@ -47,6 +51,7 @@ export class WorkerManager {
     if (config.enableFlow !== false) this.flowPoller.start();
     if (config.enableVix !== false) this.vixPoller.start();
     if (config.enableMacro !== false) this.macroPoller.start();
+    if (config.enableVolatility !== false) this.volatilityPoller.start();
 
     // Check market hours every minute and adjust GEX poller interval
     this.startMarketHoursMonitor();
@@ -56,6 +61,7 @@ export class WorkerManager {
       flow: this.flowPoller.isRunning(),
       vix: this.vixPoller.isRunning(),
       macro: this.macroPoller.isRunning(),
+      volatility: this.volatilityPoller.isRunning(),
       symbols: this.gexPoller.getSymbols(),
     }, 'Workers started');
   }
@@ -66,6 +72,7 @@ export class WorkerManager {
     this.flowPoller.stop();
     this.vixPoller.stop();
     this.macroPoller.stop();
+    this.volatilityPoller.stop();
 
     if (this.marketHoursTimer) {
       clearInterval(this.marketHoursTimer);
@@ -76,12 +83,14 @@ export class WorkerManager {
   addSymbol(symbol: string): void {
     this.gexPoller.addSymbol(symbol);
     this.flowPoller.addSymbol(symbol);
+    this.volatilityPoller.addSymbol(symbol);
     log.info({ symbol }, 'Symbol added to all pollers');
   }
 
   removeSymbol(symbol: string): void {
     this.gexPoller.removeSymbol(symbol);
     this.flowPoller.removeSymbol(symbol);
+    this.volatilityPoller.removeSymbol(symbol);
     log.info({ symbol }, 'Symbol removed from all pollers');
   }
 
@@ -95,6 +104,7 @@ export class WorkerManager {
       flow: { running: this.flowPoller.isRunning(), symbols: this.flowPoller.getSymbols() },
       vix: { running: this.vixPoller.isRunning() },
       macro: { running: this.macroPoller.isRunning() },
+      volatility: { running: this.volatilityPoller.isRunning(), symbols: this.volatilityPoller.getSymbols() },
     };
   }
 
