@@ -6,6 +6,7 @@ const tradeFinalizer = require('./trade-finalizer');
 const ledgerService = require('./ledger.service');
 const NotificationService = require('../../services/notificationService');
 const dataServiceProxy = require('../../services/dataServiceProxy');
+const marketContext = require('./market-context.service');
 const logger = require('../../utils/logger');
 
 /**
@@ -20,6 +21,7 @@ class ExitMonitor {
     this._checksRun = 0;
     this._exitsTriggered = 0;
     this._regimeCache = new Map();
+    this._gexCache = new Map();
     this._REGIME_CACHE_TTL_MS = 5 * 60 * 1000;
   }
 
@@ -180,12 +182,14 @@ class ExitMonitor {
     }
 
     // 4. Trailing stop check (tracks underlying price movement)
-    const regimeData = await this._getRegimeForSymbol(position.underlying_symbol || position.symbol);
+    const sym = position.underlying_symbol || position.symbol;
+    const regimeData = await this._getRegimeForSymbol(sym);
     const regime = regimeData?.regime || null;
+    const gexData = await this._getGEXForSymbol(sym);
 
     const baseTrailingPct = parseFloat(position.trailing_stop_pct || position.default_trailing_stop_pct || 0);
     const baseMaxHold = position.max_hold_hours || position.default_max_hold_hours;
-    const exitAdj = this._applyRegimeExitAdjustments(baseTrailingPct, baseMaxHold, regime);
+    const exitAdj = this._applyRegimeExitAdjustments(baseTrailingPct, baseMaxHold, regime, gexData, underlyingPrice);
     const trailingPct = exitAdj.trailingPct;
 
     if (trailingPct > 0 && !isCreditSpread) {
@@ -248,14 +252,17 @@ class ExitMonitor {
   }
 
   /**
-   * Apply regime-based adjustments to exit parameters.
+   * Apply regime + GEX-based adjustments to exit parameters.
    *
    * HIGH_VOL_EXPANSION: wider trailing stop (allow runners), extend max hold
    * LOW_VOL_CHOP:       tighter trailing stop, reduce max hold (time stop)
    * TRENDING:           wider trailing stop, extend max hold
+   *
+   * GEX negative: wider trailing (explosive moves expected)
+   * GEX positive: tighter trailing (price likely to pin)
    */
-  _applyRegimeExitAdjustments(trailingPct, maxHoldHours, regime) {
-    if (!regime) return { trailingPct, maxHoldHours, regimeAdjusted: false };
+  _applyRegimeExitAdjustments(trailingPct, maxHoldHours, regime, gexData = null, currentPrice = null) {
+    if (!regime && !gexData) return { trailingPct, maxHoldHours, regimeAdjusted: false };
 
     let adjTrailing = trailingPct;
     let adjMaxHold = maxHoldHours;
@@ -275,7 +282,38 @@ class ExitMonitor {
         break;
     }
 
+    // GEX-based trailing stop adjustment
+    if (gexData?.net_gex != null && adjTrailing > 0) {
+      if (gexData.net_gex < -500_000_000) {
+        // Strong negative GEX = explosive moves — widen trailing to let runners run
+        adjTrailing *= 1.2;
+      } else if (gexData.net_gex > 500_000_000) {
+        // Strong positive GEX = price pinning — tighten trailing to lock in gains
+        adjTrailing *= 0.85;
+      }
+    }
+
     return { trailingPct: adjTrailing, maxHoldHours: adjMaxHold, regimeAdjusted: true };
+  }
+
+  /**
+   * Fetch GEX data for a symbol with caching to avoid excessive DB hits.
+   */
+  async _getGEXForSymbol(symbol) {
+    const cached = this._gexCache.get(symbol);
+    if (cached && (Date.now() - cached.fetchedAt) < this._REGIME_CACHE_TTL_MS) {
+      return cached.data;
+    }
+
+    try {
+      const data = await marketContext.getLatestGEX(symbol);
+      if (data) {
+        this._gexCache.set(symbol, { data, fetchedAt: Date.now() });
+      }
+      return data;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**

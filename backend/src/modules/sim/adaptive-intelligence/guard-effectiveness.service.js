@@ -17,13 +17,14 @@ class GuardEffectivenessService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - lookbackDays);
 
-    const [gateBreakdown, exitQuality, exitReasons, latency, guardThresholds] =
+    const [gateBreakdown, exitQuality, exitReasons, latency, guardThresholds, gexEnv] =
       await Promise.all([
         this._gateRejectionBreakdown(userId, cutoff),
         this._exitQualityAnalysis(userId, cutoff),
         this._exitReasonBreakdown(userId, cutoff),
         this._processingLatency(userId, cutoff),
         this._guardThresholdAnalysis(userId, cutoff),
+        this._gexEnvironmentAnalysis(userId, cutoff),
       ]);
 
     const totalRejections = gateBreakdown.reduce((sum, g) => sum + g.count, 0);
@@ -35,6 +36,7 @@ class GuardEffectivenessService {
       exitReasons,
       latency,
       guardThresholds,
+      gexEnvironment: gexEnv,
       totalRejections,
       totalTrades,
       acceptanceRate: totalRejections + totalTrades > 0
@@ -445,6 +447,77 @@ class GuardEffectivenessService {
     });
 
     return thresholds;
+  }
+
+  /**
+   * Performance bucketed by GEX environment at trade entry.
+   * Positive GEX = pinning (mean-reverting), Negative GEX = explosive (trending).
+   */
+  async _gexEnvironmentAnalysis(userId, cutoff) {
+    const { rows } = await db.query(
+      `WITH trade_gex AS (
+         SELECT
+           st.id as trade_id,
+           st.pnl,
+           st.pnl_percent,
+           st.r_multiple,
+           st.exit_reason,
+           gx.net_gex,
+           gx.flip_price,
+           ROW_NUMBER() OVER (PARTITION BY st.id ORDER BY gx.captured_at DESC) as rn
+         FROM sim_trades st
+         INNER JOIN gex_snapshots gx
+           ON gx.symbol = st.underlying_symbol
+           AND gx.captured_at <= st.entry_time
+           AND gx.captured_at >= st.entry_time - INTERVAL '24 hours'
+         WHERE st.user_id = $1
+           AND st.exit_time IS NOT NULL
+           AND st.entry_time >= $2
+       )
+       SELECT
+         CASE
+           WHEN net_gex > 500000000 THEN 'Strong Positive GEX (pinning)'
+           WHEN net_gex > 0 THEN 'Positive GEX'
+           WHEN net_gex > -500000000 THEN 'Negative GEX'
+           ELSE 'Strong Negative GEX (explosive)'
+         END as bucket,
+         COUNT(*) as total,
+         COUNT(*) FILTER (WHERE pnl > 0) as wins,
+         ROUND(AVG(pnl)::numeric, 2) as avg_pnl,
+         ROUND(AVG(pnl_percent)::numeric, 2) as avg_pnl_pct,
+         ROUND(AVG(r_multiple)::numeric, 3) as avg_r,
+         ROUND(SUM(pnl)::numeric, 2) as total_pnl,
+         ROUND(AVG(net_gex / 1000000.0)::numeric, 0) as avg_gex_millions
+       FROM trade_gex
+       WHERE rn = 1
+       GROUP BY 1
+       ORDER BY avg_gex_millions DESC`,
+      [userId, cutoff]
+    );
+
+    const buckets = rows.map(r => ({
+      bucket: r.bucket,
+      sampleSize: parseInt(r.total),
+      wins: parseInt(r.wins),
+      winRate: parseInt(r.total) > 0 ? parseInt(r.wins) / parseInt(r.total) : 0,
+      avgPnl: parseFloat(r.avg_pnl) || 0,
+      avgPnlPct: parseFloat(r.avg_pnl_pct) || 0,
+      avgR: parseFloat(r.avg_r) || 0,
+      totalPnl: parseFloat(r.total_pnl) || 0,
+      avgGexMillions: parseInt(r.avg_gex_millions) || 0,
+    }));
+
+    const negativeGex = buckets.find(b => b.bucket.includes('Negative'));
+    const positiveGex = buckets.find(b => b.bucket.includes('Positive') && !b.bucket.includes('Negative'));
+
+    return {
+      buckets,
+      recommendation: negativeGex && positiveGex
+        ? negativeGex.winRate > positiveGex.winRate
+          ? `Negative GEX (explosive) conditions outperform (${(negativeGex.winRate * 100).toFixed(0)}% WR vs ${(positiveGex.winRate * 100).toFixed(0)}%) — directional trades thrive without dealer pinning`
+          : `Positive GEX (pinning) conditions outperform — consider mean-reversion strategies in positive GEX`
+        : 'Insufficient GEX data for environment analysis — ensure data service is seeding GEX snapshots',
+    };
   }
 
   _stalenessRecommendation(buckets) {

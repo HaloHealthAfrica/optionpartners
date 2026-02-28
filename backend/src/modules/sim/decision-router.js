@@ -9,6 +9,7 @@ const symbolStateService = require('./symbol-state.service');
 const tradeDecisionEngine = require('./trade-decision-engine');
 const optionsConstructor = require('./options-constructor.service');
 const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
+const marketContext = require('./market-context.service');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const regimeIntegration = require('../portfolio/regime-integration');
 const adaptiveParams = require('../strategy/adaptive-params');
@@ -183,10 +184,13 @@ class DecisionRouter {
         return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
       }
 
-      // ── Phase 2.5: Refresh chain data + volatility regime from data-service ──
+      // ── Phase 2.5: Refresh chain data + volatility regime + market context ──
       const effectiveSymbol = signal.symbol || symbol;
-      await this._refreshChainData(effectiveSymbol, userId);
-      const volRegime = await this._fetchVolatilityRegime(effectiveSymbol);
+      const [, volRegime, mktCtx] = await Promise.all([
+        this._refreshChainData(effectiveSymbol, userId),
+        this._fetchVolatilityRegime(effectiveSymbol),
+        marketContext.getFullContext(effectiveSymbol),
+      ]);
 
       // ── Phase 2.6: Adaptive portfolio config from regime ──
       const portfolioConfig = regimeIntegration.getAdaptivePortfolioConfig(volRegime);
@@ -197,7 +201,7 @@ class DecisionRouter {
         symState.volatility_regime = volRegime.regime;
         symState.volatility_metrics = volRegime.metrics;
       }
-      const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId);
+      const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId, mktCtx);
 
       // Build regime overrides (existing clamping logic)
       const regimeResult = this._regimeOverrides(volRegime);
@@ -258,6 +262,11 @@ class DecisionRouter {
         adjustedDTE: adaptedConfig.dte_target,
         adjustedDelta: adaptedConfig.delta_target,
         adjustedWeights: await this._getCalWeightsForAudit(userId),
+        marketContext: mktCtx?.hasData ? {
+          iv: mktCtx.iv ? { iv_rank: mktCtx.iv.iv_rank, iv_percentile: mktCtx.iv.iv_percentile, current_iv: mktCtx.iv.current_iv } : null,
+          gex: mktCtx.gex ? { net_gex: mktCtx.gex.net_gex, flip_price: mktCtx.gex.flip_price } : null,
+          flow: mktCtx.flow ? { sentiment: mktCtx.flow.sentiment, put_call_ratio: mktCtx.flow.put_call_ratio } : null,
+        } : null,
       };
 
       await this._logIntelligenceVerdict(userId, webhookEventId, signal, tradeDecision, regimeAuditContext);

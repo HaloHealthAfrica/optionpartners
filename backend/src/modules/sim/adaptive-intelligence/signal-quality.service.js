@@ -18,7 +18,7 @@ class SignalQualityService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - lookbackDays);
 
-    const [sourcePerf, convictionAccuracy, deltaPerf, dtePerf, sizingPerf, expectedMovePerf] =
+    const [sourcePerf, convictionAccuracy, deltaPerf, dtePerf, sizingPerf, expectedMovePerf, ivEnvPerf, flowAlignPerf] =
       await Promise.all([
         this._sourcePerformance(userId, cutoff, minSampleSize),
         this._convictionAccuracy(userId, cutoff),
@@ -26,6 +26,8 @@ class SignalQualityService {
         this._dtePerformance(userId, cutoff, minSampleSize),
         this._sizingPerformance(userId, cutoff),
         this._expectedMoveAnalysis(userId, cutoff, minSampleSize),
+        this._ivEnvironmentPerformance(userId, cutoff, minSampleSize),
+        this._flowAlignmentAnalysis(userId, cutoff, minSampleSize),
       ]);
 
     const totalTrades = sourcePerf.reduce((sum, s) => sum + s.sampleSize, 0);
@@ -37,6 +39,8 @@ class SignalQualityService {
       dtePerformance: dtePerf,
       sizingPerformance: sizingPerf,
       expectedMoveFilter: expectedMovePerf,
+      ivEnvironment: ivEnvPerf,
+      flowAlignment: flowAlignPerf,
       totalTrades,
       lookbackDays,
       computedAt: Date.now(),
@@ -360,6 +364,158 @@ class SignalQualityService {
         : filterRate > 0
           ? `Filter blocking ${(filterRate * 100).toFixed(0)}% — appears well-calibrated`
           : 'Expected move filter has not blocked any signals in this window',
+    };
+  }
+
+  /**
+   * Performance bucketed by IV environment at time of trade entry.
+   * Joins sim_trades with iv_snapshots using the closest IV snapshot before entry_time.
+   */
+  async _ivEnvironmentPerformance(userId, cutoff, minSampleSize) {
+    const { rows } = await db.query(
+      `WITH trade_iv AS (
+         SELECT
+           st.id as trade_id,
+           st.pnl,
+           st.pnl_percent,
+           st.r_multiple,
+           iv.iv_rank,
+           iv.iv_percentile,
+           iv.current_iv,
+           ROW_NUMBER() OVER (PARTITION BY st.id ORDER BY iv.captured_at DESC) as rn
+         FROM sim_trades st
+         INNER JOIN iv_snapshots iv
+           ON iv.symbol = st.underlying_symbol
+           AND iv.captured_at <= st.entry_time
+           AND iv.captured_at >= st.entry_time - INTERVAL '24 hours'
+         WHERE st.user_id = $1
+           AND st.exit_time IS NOT NULL
+           AND st.entry_time >= $2
+       )
+       SELECT
+         CASE
+           WHEN iv_rank >= 80 THEN 'High IV (80+)'
+           WHEN iv_rank >= 50 THEN 'Mid IV (50-79)'
+           WHEN iv_rank >= 20 THEN 'Low IV (20-49)'
+           ELSE 'Very Low IV (<20)'
+         END as bucket,
+         ROUND(AVG(iv_rank)::numeric, 1) as avg_iv_rank,
+         COUNT(*) as total,
+         COUNT(*) FILTER (WHERE pnl > 0) as wins,
+         ROUND(AVG(pnl)::numeric, 2) as avg_pnl,
+         ROUND(AVG(pnl_percent)::numeric, 2) as avg_pnl_pct,
+         ROUND(AVG(r_multiple)::numeric, 3) as avg_r,
+         ROUND(SUM(pnl)::numeric, 2) as total_pnl
+       FROM trade_iv
+       WHERE rn = 1
+       GROUP BY 1
+       ORDER BY avg_iv_rank DESC`,
+      [userId, cutoff]
+    );
+
+    const buckets = rows.map(r => ({
+      bucket: r.bucket,
+      avgIvRank: parseFloat(r.avg_iv_rank),
+      sampleSize: parseInt(r.total),
+      wins: parseInt(r.wins),
+      winRate: parseInt(r.total) > 0 ? parseInt(r.wins) / parseInt(r.total) : 0,
+      avgPnl: parseFloat(r.avg_pnl) || 0,
+      avgPnlPct: parseFloat(r.avg_pnl_pct) || 0,
+      avgR: parseFloat(r.avg_r) || 0,
+      totalPnl: parseFloat(r.total_pnl) || 0,
+      significant: parseInt(r.total) >= minSampleSize,
+    }));
+
+    const best = buckets.filter(b => b.significant).sort((a, b) => b.avgR - a.avgR)[0];
+    const worst = buckets.filter(b => b.significant).sort((a, b) => a.avgR - b.avgR)[0];
+
+    return {
+      buckets,
+      bestEnvironment: best ? best.bucket : null,
+      recommendation: best && worst && best.bucket !== worst.bucket
+        ? `Best IV environment: ${best.bucket} (avg R: ${best.avgR}, ${(best.winRate * 100).toFixed(1)}% WR). Worst: ${worst.bucket} (avg R: ${worst.avgR})`
+        : buckets.length > 0
+          ? 'IV environment analysis available but needs more data across tiers'
+          : 'No IV snapshot data available — ensure data service is seeding IV snapshots',
+    };
+  }
+
+  /**
+   * Performance based on options flow alignment at trade entry.
+   * Joins sim_trades with options_flow_snapshots.
+   */
+  async _flowAlignmentAnalysis(userId, cutoff, minSampleSize) {
+    const { rows } = await db.query(
+      `WITH trade_flow AS (
+         SELECT
+           st.id as trade_id,
+           st.pnl,
+           st.pnl_percent,
+           st.r_multiple,
+           st.direction,
+           fl.sentiment,
+           fl.put_call_ratio,
+           fl.net_premium,
+           ROW_NUMBER() OVER (PARTITION BY st.id ORDER BY fl.captured_at DESC) as rn
+         FROM sim_trades st
+         INNER JOIN options_flow_snapshots fl
+           ON fl.symbol = st.underlying_symbol
+           AND fl.captured_at <= st.entry_time
+           AND fl.captured_at >= st.entry_time - INTERVAL '24 hours'
+         WHERE st.user_id = $1
+           AND st.exit_time IS NOT NULL
+           AND st.entry_time >= $2
+       )
+       SELECT
+         CASE
+           WHEN (direction = 'long' AND (sentiment = 'bullish' OR put_call_ratio < 0.7))
+             OR (direction = 'short' AND (sentiment = 'bearish' OR put_call_ratio > 1.3))
+             THEN 'Flow Aligned'
+           WHEN (direction = 'long' AND (sentiment = 'bearish' OR put_call_ratio > 1.3))
+             OR (direction = 'short' AND (sentiment = 'bullish' OR put_call_ratio < 0.7))
+             THEN 'Flow Conflicting'
+           ELSE 'Flow Neutral'
+         END as alignment,
+         COUNT(*) as total,
+         COUNT(*) FILTER (WHERE pnl > 0) as wins,
+         ROUND(AVG(pnl)::numeric, 2) as avg_pnl,
+         ROUND(AVG(pnl_percent)::numeric, 2) as avg_pnl_pct,
+         ROUND(AVG(r_multiple)::numeric, 3) as avg_r,
+         ROUND(SUM(pnl)::numeric, 2) as total_pnl,
+         ROUND(AVG(put_call_ratio)::numeric, 2) as avg_pcr
+       FROM trade_flow
+       WHERE rn = 1
+       GROUP BY 1
+       ORDER BY total DESC`,
+      [userId, cutoff]
+    );
+
+    const buckets = rows.map(r => ({
+      alignment: r.alignment,
+      sampleSize: parseInt(r.total),
+      wins: parseInt(r.wins),
+      winRate: parseInt(r.total) > 0 ? parseInt(r.wins) / parseInt(r.total) : 0,
+      avgPnl: parseFloat(r.avg_pnl) || 0,
+      avgPnlPct: parseFloat(r.avg_pnl_pct) || 0,
+      avgR: parseFloat(r.avg_r) || 0,
+      totalPnl: parseFloat(r.total_pnl) || 0,
+      avgPcr: parseFloat(r.avg_pcr) || 0,
+      significant: parseInt(r.total) >= minSampleSize,
+    }));
+
+    const aligned = buckets.find(b => b.alignment === 'Flow Aligned');
+    const conflicting = buckets.find(b => b.alignment === 'Flow Conflicting');
+    const flowIsEdge = aligned && conflicting && aligned.significant && conflicting.significant
+      && aligned.winRate > conflicting.winRate + 0.05;
+
+    return {
+      buckets,
+      flowIsEdge,
+      recommendation: flowIsEdge
+        ? `Flow-aligned trades outperform (${(aligned.winRate * 100).toFixed(0)}% vs ${(conflicting.winRate * 100).toFixed(0)}% WR) — flow data adds predictive value`
+        : aligned && conflicting
+          ? 'Flow alignment shows minimal edge — monitor with more data'
+          : 'Insufficient flow data for alignment analysis — ensure data service is seeding flow snapshots',
     };
   }
 

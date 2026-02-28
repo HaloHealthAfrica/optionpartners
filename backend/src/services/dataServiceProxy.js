@@ -74,4 +74,6 @@ module.exports = {
     v1Get(`/historical/${symbol.toUpperCase()}/metrics`, { tf, lookback }),
   getHistoricalCandles: (symbol, tf, start, end) =>
     v1Get(`/historical/${symbol.toUpperCase()}/candles`, { tf, start, end }),
+  getHistoricalIV: (symbol) =>
+    v1Get(`/historical/${symbol.toUpperCase()}/iv`),
 };

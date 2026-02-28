@@ -5,20 +5,27 @@ const logger = require('../../../utils/logger');
 
 // Conviction components as they appear in rationale strings
 const COMPONENT_PATTERNS = [
-  { key: 'strat_align',      pattern: /CONVICTION \+\d+: STRAT direction aligns/,     staticWeight: 10 },
-  { key: 'strat_conflict',   pattern: /CONVICTION -\d+: STRAT direction conflicts/,   staticWeight: -10 },
-  { key: 'strat_continuity', pattern: /CONVICTION \+\d+: STRAT continuity/,           staticWeight: 10 },
-  { key: 'strat_no_cont',    pattern: /CONVICTION -\d+: STRAT no continuity/,         staticWeight: -15 },
-  { key: 'continuation',     pattern: /CONVICTION \+\d+: CONTINUATION pattern/,       staticWeight: 10 },
-  { key: 'revstrat',         pattern: /CONVICTION -\d+: REVSTRAT pattern/,            staticWeight: -5 },
-  { key: 'trend_high',       pattern: /CONVICTION \+\d+: TREND alignment=\d+ ≥ 75/,   staticWeight: 15 },
-  { key: 'trend_mid',        pattern: /CONVICTION \+\d+: TREND alignment=\d+ ≥ 65/,   staticWeight: 10 },
-  { key: 'flow_unusual',     pattern: /CONVICTION \+\d+: Unusual options flow/,       staticWeight: 15 },
-  { key: 'flow_aligns',      pattern: /CONVICTION \+\d+: Options flow aligns/,        staticWeight: 8 },
-  { key: 'flow_conflict',    pattern: /CONVICTION -\d+: Large opposing flow/,         staticWeight: -5 },
-  { key: 'saty_aligns',      pattern: /CONVICTION \+\d+: SATY/,                       staticWeight: 8 },
-  { key: 'saty_conflict',    pattern: /CONVICTION -\d+: SATY/,                        staticWeight: -5 },
-  { key: 'macro_strong',     pattern: /CONVICTION \+\d+: Strong macro/,               staticWeight: 5 },
+  { key: 'strat_align',       pattern: /CONVICTION \+\d+: STRAT direction aligns/,     staticWeight: 10 },
+  { key: 'strat_conflict',    pattern: /CONVICTION -\d+: STRAT direction conflicts/,   staticWeight: -10 },
+  { key: 'strat_continuity',  pattern: /CONVICTION \+\d+: STRAT continuity/,           staticWeight: 10 },
+  { key: 'strat_no_cont',     pattern: /CONVICTION -\d+: STRAT no continuity/,         staticWeight: -15 },
+  { key: 'continuation',      pattern: /CONVICTION \+\d+: CONTINUATION pattern/,       staticWeight: 10 },
+  { key: 'revstrat',          pattern: /CONVICTION -\d+: REVSTRAT pattern/,            staticWeight: -5 },
+  { key: 'trend_high',        pattern: /CONVICTION \+\d+: TREND alignment=\d+ ≥ 75/,   staticWeight: 15 },
+  { key: 'trend_mid',         pattern: /CONVICTION \+\d+: TREND alignment=\d+ ≥ 65/,   staticWeight: 10 },
+  { key: 'flow_unusual',      pattern: /CONVICTION \+\d+: Unusual options flow/,       staticWeight: 15 },
+  { key: 'flow_aligns',       pattern: /CONVICTION \+\d+: Options flow aligns/,        staticWeight: 8 },
+  { key: 'flow_conflict',     pattern: /CONVICTION -\d+: Large opposing flow/,         staticWeight: -5 },
+  { key: 'saty_aligns',       pattern: /CONVICTION \+\d+: SATY/,                       staticWeight: 8 },
+  { key: 'saty_conflict',     pattern: /CONVICTION -\d+: SATY/,                        staticWeight: -5 },
+  { key: 'macro_strong',      pattern: /CONVICTION \+\d+: Strong macro/,               staticWeight: 5 },
+  // Market context components (IV/GEX/flow from historical snapshots)
+  { key: 'iv_high',           pattern: /CONVICTION -\d+: IV_RANK=\d+/,                staticWeight: -5 },
+  { key: 'iv_low',            pattern: /CONVICTION \+\d+: IV_RANK=\d+/,               staticWeight: 5 },
+  { key: 'gex_negative',      pattern: /CONVICTION \+\d+: GEX strongly negative/,     staticWeight: 8 },
+  { key: 'gex_positive',      pattern: /CONVICTION -\d+: GEX strongly positive/,      staticWeight: -8 },
+  { key: 'hist_flow_aligns',  pattern: /CONVICTION \+\d+: Historical flow aligns/,    staticWeight: 5 },
+  { key: 'hist_flow_conflict', pattern: /CONVICTION -\d+: Historical flow conflicts/, staticWeight: -5 },
 ];
 
 class ConvictionCalibratorService {

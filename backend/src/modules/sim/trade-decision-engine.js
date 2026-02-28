@@ -53,9 +53,10 @@ class TradeDecisionEngine {
    * @param {Object} symbolState - Rolling state from symbol-state.service.js
    * @param {Object} accountState - Account state row from sim_account_state
    * @param {string} userId
+   * @param {Object} [marketContext] - Optional IV/GEX/flow context from market-context.service
    * @returns {Promise<TradeDecision>}
    */
-  async evaluate(signal, symbolState, accountState, userId) {
+  async evaluate(signal, symbolState, accountState, userId, marketContext = null) {
     const rationale = [];
     const ticker = signal.symbol || symbolState.symbol;
 
@@ -86,12 +87,12 @@ class TradeDecisionEngine {
     // ── Part 2: TREND alignment check (penalty-based, not a hard gate) ──
     const trendCheck = this._applyTrendRules(symbolState, rationale);
 
-    // ── Part 3: Conviction calculation (with optional calibrated weights) ──
+    // ── Part 3: Conviction calculation (with optional calibrated weights + market context) ──
     let calibratedWeights = null;
     try {
       calibratedWeights = await calibrationStore.getWeightMap(userId);
     } catch (_) { /* proceed with static weights */ }
-    let conviction = this._computeConviction(signal, symbolState, rationale, calibratedWeights);
+    let conviction = this._computeConviction(signal, symbolState, rationale, calibratedWeights, marketContext);
 
     // Apply trend penalty after conviction is computed
     if (trendCheck.penalty > 0) {
@@ -123,16 +124,16 @@ class TradeDecisionEngine {
     }
 
     // ── Part 4: Trade type decision ──
-    const tradeType = this._determineTradeType(signal, symbolState, conviction, rationale);
+    const tradeType = this._determineTradeType(signal, symbolState, conviction, rationale, marketContext);
 
-    // ── Part 5: Delta target selection ──
-    const deltaTargets = this._selectDeltaTargets(conviction, tradeType, rationale);
+    // ── Part 5: Delta target selection (IV-adjusted) ──
+    const deltaTargets = this._selectDeltaTargets(conviction, tradeType, rationale, marketContext);
 
-    // ── Part 6: DTE logic ──
-    const dteTargets = this._selectDteRange(symbolState, isOrbTrigger, rationale);
+    // ── Part 6: DTE logic (IV-adjusted) ──
+    const dteTargets = this._selectDteRange(symbolState, isOrbTrigger, rationale, marketContext);
 
-    // ── Part 7: Exit / risk parameters ──
-    const riskParams = this._computeRiskParameters(signal, symbolState, entrySignal, rationale);
+    // ── Part 7: Exit / risk parameters (GEX-aware) ──
+    const riskParams = this._computeRiskParameters(signal, symbolState, entrySignal, rationale, marketContext);
 
     // ── Part 3: Size multiplier from conviction ──
     let sizeMultiplier = this._convictionToSize(conviction);
@@ -508,7 +509,7 @@ class TradeDecisionEngine {
   //  Part 3 — CONVICTION MODEL
   // ═══════════════════════════════════════════════════════════════════
 
-  _computeConviction(signal, state, rationale, calibratedWeights = null) {
+  _computeConviction(signal, state, rationale, calibratedWeights = null, marketContext = null) {
     const entry = state.latest_entry_signal;
     const dir = signal.direction || entry?.direction;
     const w = (key, staticVal) => calibratedWeights?.get(key) ?? staticVal;
@@ -635,6 +636,64 @@ class TradeDecisionEngine {
       rationale.push('CONVICTION -5: CONTRACTION regime penalty');
     }
 
+    // ── Market Context enrichment (IV / GEX / Flow from historical snapshots) ──
+    if (marketContext) {
+      // IV environment modifier
+      if (marketContext.iv) {
+        const ivRank = marketContext.iv.iv_rank;
+        if (ivRank != null) {
+          if (ivRank >= 80) {
+            // High IV = premium is expensive; directional plays harder, spreads preferred
+            const wt = w('iv_high', -5);
+            conviction += wt;
+            rationale.push(`CONVICTION ${wt}: IV_RANK=${ivRank.toFixed(0)} (elevated — premium expensive)`);
+          } else if (ivRank <= 20) {
+            // Very low IV = cheap premium, strong directional opportunity
+            const wt = w('iv_low', 5);
+            conviction += wt;
+            rationale.push(`CONVICTION +${wt}: IV_RANK=${ivRank.toFixed(0)} (low — cheap premium)`);
+          }
+        }
+      }
+
+      // GEX environment modifier
+      if (marketContext.gex) {
+        const netGex = marketContext.gex.net_gex;
+        if (netGex != null) {
+          if (netGex < -500_000_000) {
+            // Strong negative GEX = dealers amplify moves — good for directional
+            const wt = w('gex_negative', 8);
+            conviction += wt;
+            rationale.push(`CONVICTION +${wt}: GEX strongly negative (${(netGex / 1e6).toFixed(0)}M — explosive potential)`);
+          } else if (netGex > 500_000_000) {
+            // Strong positive GEX = dealer hedging pins price — bad for directional
+            const wt = w('gex_positive', -8);
+            conviction += wt;
+            rationale.push(`CONVICTION ${wt}: GEX strongly positive (${(netGex / 1e6).toFixed(0)}M — pinning risk)`);
+          }
+        }
+      }
+
+      // Historical flow snapshot validation
+      if (marketContext.flow && dir) {
+        const flowSentiment = marketContext.flow.sentiment;
+        const pcr = marketContext.flow.put_call_ratio;
+        const flowBullish = flowSentiment === 'bullish' || pcr < 0.7;
+        const flowBearish = flowSentiment === 'bearish' || pcr > 1.3;
+        const dirLong = dir === 'long';
+
+        if ((dirLong && flowBullish) || (!dirLong && flowBearish)) {
+          const wt = w('hist_flow_aligns', 5);
+          conviction += wt;
+          rationale.push(`CONVICTION +${wt}: Historical flow aligns (sentiment=${flowSentiment}, PCR=${pcr?.toFixed(2)})`);
+        } else if ((dirLong && flowBearish) || (!dirLong && flowBullish)) {
+          const wt = w('hist_flow_conflict', -5);
+          conviction += wt;
+          rationale.push(`CONVICTION ${wt}: Historical flow conflicts (sentiment=${flowSentiment}, PCR=${pcr?.toFixed(2)})`);
+        }
+      }
+    }
+
     conviction = Math.max(0, Math.round(conviction));
     rationale.push(`CONVICTION_FINAL: ${conviction}`);
     return conviction;
@@ -644,17 +703,19 @@ class TradeDecisionEngine {
   //  Part 4 — TRADE TYPE DECISION
   // ═══════════════════════════════════════════════════════════════════
 
-  _determineTradeType(signal, state, conviction, rationale) {
+  _determineTradeType(signal, state, conviction, rationale, marketContext = null) {
     const dir = signal.direction || state.latest_entry_signal?.direction;
-    const iv = state.iv_percentile;
+    // Prefer IV rank from historical snapshots over webhook-provided iv_percentile
+    const ivFromSnapshot = marketContext?.iv?.iv_rank;
+    const iv = ivFromSnapshot != null ? ivFromSnapshot : state.iv_percentile;
 
     // CREDIT SPREAD conditions
     if (iv != null && iv >= 70 && state.regime === 'CHOP' && conviction >= 60 && conviction < 80) {
-      rationale.push(`TRADE_TYPE: CREDIT_SPREAD (IV=${iv}% ≥ 70, regime=CHOP, moderate conviction)`);
+      rationale.push(`TRADE_TYPE: CREDIT_SPREAD (IV=${iv.toFixed ? iv.toFixed(0) : iv}% ≥ 70, regime=CHOP, moderate conviction)`);
       return 'CREDIT_SPREAD';
     }
     if (iv != null && iv >= 80) {
-      rationale.push(`TRADE_TYPE: CREDIT_SPREAD (IV=${iv}% ≥ 80 — prefer spreads over naked)`);
+      rationale.push(`TRADE_TYPE: CREDIT_SPREAD (IV=${iv.toFixed ? iv.toFixed(0) : iv}% ≥ 80 — prefer spreads over naked)`);
       return 'CREDIT_SPREAD';
     }
 
@@ -694,8 +755,13 @@ class TradeDecisionEngine {
   //  Part 5 — DELTA TARGET SELECTION
   // ═══════════════════════════════════════════════════════════════════
 
-  _selectDeltaTargets(conviction, tradeType, rationale) {
+  _selectDeltaTargets(conviction, tradeType, rationale, marketContext = null) {
     if (tradeType === 'CREDIT_SPREAD') {
+      // In high IV, widen spread short leg to further OTM for higher probability
+      if (marketContext?.iv?.iv_rank >= 70) {
+        rationale.push(`DELTA: Spread short leg 0.25-0.30 delta (IV rank ${marketContext.iv.iv_rank.toFixed(0)} — wider strike)`);
+        return { target: 0.25, min: 0.20, max: 0.30 };
+      }
       rationale.push('DELTA: Spread short leg 0.30-0.35 delta');
       return { target: 0.30, min: 0.25, max: 0.35 };
     }
@@ -713,8 +779,12 @@ class TradeDecisionEngine {
       rationale.push(`DELTA: Conviction ${conviction} 70-79 → standard 0.45-0.55`);
     }
 
-    // Flow-based OTM shift for high-leverage plays
-    // (handled via size multiplier instead of delta shift for safety)
+    // IV-based delta adjustment: in very low IV, can go slightly more ITM (cheaper premium)
+    if (marketContext?.iv?.iv_rank != null && marketContext.iv.iv_rank <= 20 && tradeType !== 'CREDIT_SPREAD') {
+      target = Math.min(0.70, target + 0.05);
+      max = Math.min(0.75, max + 0.05);
+      rationale.push(`DELTA +0.05: Low IV rank (${marketContext.iv.iv_rank.toFixed(0)}) — cheaper premium allows higher delta`);
+    }
 
     return { target, min, max };
   }
@@ -723,7 +793,7 @@ class TradeDecisionEngine {
   //  Part 6 — DTE LOGIC
   // ═══════════════════════════════════════════════════════════════════
 
-  _selectDteRange(state, isOrb, rationale) {
+  _selectDteRange(state, isOrb, rationale, marketContext = null) {
     // ORB: short DTE
     if (isOrb) {
       rationale.push('DTE: ORB signal → 7-14 DTE');
@@ -748,6 +818,21 @@ class TradeDecisionEngine {
       return { target: 30, min: 21, max: 45 };
     }
 
+    // IV-aware DTE adjustment on the default swing range
+    if (marketContext?.iv?.iv_rank != null) {
+      const ivRank = marketContext.iv.iv_rank;
+      if (ivRank >= 70) {
+        // High IV = accelerated theta decay — shorter DTE captures premium collapse
+        rationale.push(`DTE: High IV rank (${ivRank.toFixed(0)}) → shortened 10-21 DTE`);
+        return { target: 14, min: 10, max: 21 };
+      }
+      if (ivRank <= 20) {
+        // Low IV = slow theta — extend DTE to give the trade room
+        rationale.push(`DTE: Low IV rank (${ivRank.toFixed(0)}) → extended 21-45 DTE`);
+        return { target: 30, min: 21, max: 45 };
+      }
+    }
+
     // Default swing: 14-30 DTE
     rationale.push('DTE: Default swing → 14-30 DTE');
     return { target: 21, min: 14, max: 30 };
@@ -757,7 +842,7 @@ class TradeDecisionEngine {
   //  Part 7 — EXIT / RISK PARAMETERS
   // ═══════════════════════════════════════════════════════════════════
 
-  _computeRiskParameters(signal, state, entrySignal, rationale) {
+  _computeRiskParameters(signal, state, entrySignal, rationale, marketContext = null) {
     let stopLevel = null;
     let stopSource = null;
     let maxLoss = null;
@@ -798,7 +883,33 @@ class TradeDecisionEngine {
       maxLoss = Math.abs(state.last_price - stopLevel) * 100; // per contract
     }
 
-    return { stop_level: stopLevel, stop_source: stopSource, max_loss: maxLoss };
+    // GEX flip price proximity: tighten stops if price is near the GEX flip level
+    let gexFlipDistance = null;
+    if (marketContext?.gex?.flip_price && state.last_price && stopLevel) {
+      const flipPrice = parseFloat(marketContext.gex.flip_price);
+      if (flipPrice > 0) {
+        gexFlipDistance = Math.abs(state.last_price - flipPrice) / state.last_price;
+        const dir = signal.direction || entrySignal?.direction;
+
+        if (gexFlipDistance < 0.005) {
+          // Within 0.5% of GEX flip — high-conviction inflection zone
+          rationale.push(`GEX_RISK: Price within ${(gexFlipDistance * 100).toFixed(2)}% of GEX flip @ ${flipPrice} — inflection zone`);
+        } else if (gexFlipDistance < 0.02) {
+          // Within 2% — use flip as natural stop/target reference
+          if (dir === 'long' && flipPrice < state.last_price && flipPrice > stopLevel) {
+            stopLevel = flipPrice;
+            stopSource = 'GEX_FLIP';
+            rationale.push(`STOP: Tightened to GEX flip @ ${flipPrice} (natural support)`);
+          } else if (dir === 'short' && flipPrice > state.last_price && (stopLevel == null || flipPrice < stopLevel)) {
+            stopLevel = flipPrice;
+            stopSource = 'GEX_FLIP';
+            rationale.push(`STOP: Tightened to GEX flip @ ${flipPrice} (natural resistance)`);
+          }
+        }
+      }
+    }
+
+    return { stop_level: stopLevel, stop_source: stopSource, max_loss: maxLoss, gex_flip_distance: gexFlipDistance };
   }
 
   // ═══════════════════════════════════════════════════════════════════

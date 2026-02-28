@@ -676,6 +676,51 @@
             </div>
           </div>
         </div>
+
+        <!-- IV Environment + Flow Alignment -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">IV Environment</h3>
+              <p class="text-xs text-indigo-600 mt-0.5">{{ store.signalQualityData.ivEnvironment?.recommendation }}</p>
+            </div>
+            <div v-if="store.signalQualityData.ivEnvironment?.buckets?.length" class="p-4 space-y-2">
+              <div v-for="b in store.signalQualityData.ivEnvironment.buckets" :key="b.bucket" class="flex items-center gap-2">
+                <span class="text-[11px] text-gray-600 dark:text-gray-400 w-28 truncate" :title="b.bucket">{{ b.bucket }}</span>
+                <div class="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-4 overflow-hidden">
+                  <div class="h-full rounded-full" :class="b.winRate >= 0.5 ? 'bg-green-500' : 'bg-red-400'" :style="{ width: `${Math.min(b.winRate * 100, 100)}%` }"></div>
+                </div>
+                <span class="text-xs font-semibold w-10 text-right" :class="b.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(b.winRate) }}</span>
+                <span class="text-[10px] text-gray-400 w-14 text-right">R:{{ b.avgR || '-' }} n={{ b.sampleSize }}</span>
+              </div>
+            </div>
+            <div v-else class="p-4 text-center text-xs text-gray-400">
+              No IV snapshot data available for analysis
+            </div>
+          </div>
+
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Flow Alignment</h3>
+              <p class="text-xs mt-0.5" :class="store.signalQualityData.flowAlignment?.flowIsEdge ? 'text-green-600' : 'text-amber-600'">
+                {{ store.signalQualityData.flowAlignment?.recommendation }}
+              </p>
+            </div>
+            <div v-if="store.signalQualityData.flowAlignment?.buckets?.length" class="p-4">
+              <div v-for="b in store.signalQualityData.flowAlignment.buckets" :key="b.alignment" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
+                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">{{ b.alignment }}</span>
+                <div class="flex items-center gap-3">
+                  <span class="text-xs" :class="b.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(b.winRate) }} WR</span>
+                  <span class="text-xs" :class="b.avgPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ b.avgPnl }}</span>
+                  <span class="text-[10px] text-gray-400">PCR:{{ b.avgPcr }} n={{ b.sampleSize }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="p-4 text-center text-xs text-gray-400">
+              No flow snapshot data available for analysis
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -865,6 +910,30 @@
             </div>
           </div>
         </div>
+
+        <!-- GEX Environment -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">GEX Environment</h3>
+            <p class="text-xs text-indigo-600 mt-0.5">{{ store.guardEffectivenessData.gexEnvironment?.recommendation }}</p>
+          </div>
+          <div v-if="store.guardEffectivenessData.gexEnvironment?.buckets?.length" class="p-4">
+            <div v-for="b in store.guardEffectivenessData.gexEnvironment.buckets" :key="b.bucket" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-medium text-gray-700 dark:text-gray-300">{{ b.bucket }}</span>
+                <span class="text-[10px] text-gray-400">(avg {{ b.avgGexMillions }}M)</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="text-xs" :class="b.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(b.winRate) }} WR</span>
+                <span class="text-xs" :class="b.avgPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ b.avgPnl }}</span>
+                <span class="text-[10px] text-gray-400">R:{{ b.avgR || '-' }} n={{ b.sampleSize }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="p-4 text-center text-xs text-gray-400">
+            No GEX snapshot data available for environment analysis
+          </div>
+        </div>
       </div>
     </div>
 
@@ -972,6 +1041,12 @@ function formatComponentKey(key) {
     saty_aligns: 'SATY Phase Aligns',
     saty_conflict: 'SATY Phase Conflict',
     macro_strong: 'Strong Macro',
+    iv_high: 'High IV Penalty',
+    iv_low: 'Low IV Boost',
+    gex_negative: 'Negative GEX Boost',
+    gex_positive: 'Positive GEX Penalty',
+    hist_flow_aligns: 'Historical Flow Aligns',
+    hist_flow_conflict: 'Historical Flow Conflict',
   }
   return names[key] || key
 }
