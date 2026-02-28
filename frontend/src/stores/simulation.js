@@ -386,6 +386,69 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  // Adaptive Intelligence
+  const adaptiveSummary = ref(null)
+  const calibrationData = ref(null)
+  const regimeEdgeData = ref(null)
+  const temporalEdgeData = ref(null)
+  const adaptiveLoading = ref(false)
+
+  async function fetchAdaptiveSummary(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.get('/sim/adaptive/summary', { params: { lookbackDays } })
+      adaptiveSummary.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
+  async function fetchCalibration(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.get('/sim/adaptive/calibration', { params: { lookbackDays } })
+      calibrationData.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
+  async function fetchRegimeEdge(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.get('/sim/adaptive/regime-edge', { params: { lookbackDays } })
+      regimeEdgeData.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
+  async function fetchTemporalEdge(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.get('/sim/adaptive/temporal-edge', { params: { lookbackDays } })
+      temporalEdgeData.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
   return {
     accountState, positions, orders, trades, equityCurve,
     strategyBreakdown, dteBreakdown, webhookEvents, simRuns,
@@ -403,5 +466,9 @@ export const useSimulationStore = defineStore('simulation', () => {
     fetchScorecard, recalculateScorecard, fetchCooldowns, clearCooldown,
     fetchRejections, fetchLivePositions, fetchIntelligenceConfig,
     updateIntelligenceConfig, fetchIntelligenceStatus, fetchEquityByStrategy,
+    // Adaptive Intelligence
+    adaptiveSummary, calibrationData, regimeEdgeData, temporalEdgeData,
+    adaptiveLoading,
+    fetchAdaptiveSummary, fetchCalibration, fetchRegimeEdge, fetchTemporalEdge,
   }
 })

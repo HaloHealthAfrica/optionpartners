@@ -281,6 +281,138 @@ export function createRoutes(
     }
   });
 
+  // --- IV history endpoint ---
+
+  router.get('/history/iv/:symbol', async (req: Request<SymbolParams>, res: Response) => {
+    try {
+      const limit = parseInt((req.query.limit as string) || '50', 10);
+      const data = context?.snapshotStore
+        ? await context.snapshotStore.getRecentIv(sym(req), limit)
+        : [];
+      res.json({ data, count: data.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // --- Seed endpoint: pull initial data for symbols from all providers ---
+
+  router.post('/seed', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as { symbols?: string[] };
+      const symbols = (body.symbols || ['SPY', 'QQQ', 'IWM']).map((s: string) => s.toUpperCase());
+      const lookbackDays = 252;
+
+      const results: Record<string, { candles?: number; regime?: string; gex?: boolean; flow?: boolean; iv?: boolean; vix?: boolean; macro?: boolean; errors: string[] }> = {};
+
+      // 1. VIX + Macro (global, not per-symbol)
+      let vixOk = false;
+      let macroOk = false;
+      try {
+        await orchestrator.getVIX();
+        vixOk = true;
+      } catch (err) {
+        // VIX fetch failed — non-critical
+      }
+      try {
+        if (context?.fred) {
+          await context.fred.getAllMacroData();
+          macroOk = true;
+        }
+      } catch {
+        // Macro fetch failed — non-critical
+      }
+
+      // 2. Per-symbol: candles, regime, GEX, flow, IV
+      for (const symbol of symbols) {
+        const r: { candles?: number; regime?: string; gex?: boolean; flow?: boolean; iv?: boolean; vix?: boolean; macro?: boolean; errors: string[] } = { errors: [] };
+        r.vix = vixOk;
+        r.macro = macroOk;
+
+        // Historical candles (1d, last 252 days) — fetched + persisted
+        try {
+          const end = new Date();
+          const start = new Date();
+          start.setDate(start.getDate() - Math.ceil(lookbackDays * 1.5));
+
+          const candleResult = await orchestrator.getCandles(symbol, '1day', lookbackDays);
+          const candles = candleResult.data;
+
+          if (context?.snapshotStore && Array.isArray(candles) && candles.length > 0) {
+            await context.snapshotStore.saveCandles(symbol, '1day', candles, candleResult.provider);
+          }
+          r.candles = Array.isArray(candles) ? candles.length : 0;
+        } catch (err) {
+          r.errors.push(`candles: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // Volatility regime from candles
+        try {
+          const candleResult = await orchestrator.getCandles(symbol, '1day', lookbackDays);
+          const candles = candleResult.data;
+          if (Array.isArray(candles) && candles.length >= 60) {
+            const { buildDerivedMetrics, detectRegime } = await import('../analytics/regime.service');
+            const metrics = buildDerivedMetrics(symbol, candles);
+            const snapshot = detectRegime(metrics, candles);
+            if (context?.snapshotStore) {
+              await context.snapshotStore.saveVolatilitySnapshot(snapshot);
+            }
+            r.regime = snapshot.regime;
+          }
+        } catch (err) {
+          r.errors.push(`regime: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // GEX snapshot
+        try {
+          await orchestrator.getGEXWithSnapshot(symbol);
+          r.gex = true;
+        } catch (err) {
+          r.gex = false;
+          r.errors.push(`gex: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // Flow snapshot
+        try {
+          await orchestrator.getFlowWithSnapshot(symbol);
+          r.flow = true;
+        } catch (err) {
+          r.flow = false;
+          r.errors.push(`flow: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // IV snapshot
+        try {
+          const ivResult = await orchestrator.getIV(symbol);
+          if (context?.snapshotStore) {
+            await context.snapshotStore.saveIvSnapshot(symbol, {
+              currentIV: ivResult.data.currentIV,
+              ivRank: ivResult.data.ivRank,
+              ivPercentile: ivResult.data.ivPercentile,
+              historicalIV30: ivResult.data.historicalIV30,
+              historicalIV60: ivResult.data.historicalIV60,
+              historicalIV90: ivResult.data.historicalIV90,
+            }, ivResult.provider);
+          }
+          r.iv = true;
+        } catch (err) {
+          r.iv = false;
+          r.errors.push(`iv: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        results[symbol] = r;
+      }
+
+      res.json({
+        seeded: symbols,
+        results,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
   // --- Worker management endpoints ---
 
   router.get('/workers/status', (_req: Request, res: Response) => {

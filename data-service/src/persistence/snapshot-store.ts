@@ -236,6 +236,70 @@ export class SnapshotStore {
     }
   }
 
+  // --- IV snapshots ---
+
+  async saveIvSnapshot(symbol: string, data: {
+    currentIV: number;
+    ivRank: number;
+    ivPercentile: number;
+    historicalIV30: number;
+    historicalIV60: number;
+    historicalIV90: number;
+  }, provider = 'unusual_whales'): Promise<void> {
+    if (!this.available) return;
+    try {
+      await getPool().query(
+        `INSERT INTO iv_snapshots (symbol, current_iv, iv_rank, iv_percentile, hv_30, hv_60, hv_90, provider)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [symbol, data.currentIV, data.ivRank, data.ivPercentile, data.historicalIV30, data.historicalIV60, data.historicalIV90, provider],
+      );
+      log.debug({ symbol }, 'IV snapshot saved');
+    } catch (err) {
+      log.warn({ symbol, error: err instanceof Error ? err.message : err }, 'Failed to save IV snapshot');
+    }
+  }
+
+  async getRecentIv(symbol: string, limit = 50): Promise<Array<{
+    symbol: string;
+    currentIV: number;
+    ivRank: number;
+    ivPercentile: number;
+    hv30: number;
+    hv60: number;
+    hv90: number;
+    timestamp: number;
+  }>> {
+    if (!this.available) return [];
+    const { rows } = await getPool().query(
+      `SELECT symbol, current_iv, iv_rank, iv_percentile, hv_30, hv_60, hv_90, captured_at
+       FROM iv_snapshots WHERE symbol = $1 ORDER BY captured_at DESC LIMIT $2`,
+      [symbol, limit],
+    );
+    return rows.map((r) => ({
+      symbol: r.symbol,
+      currentIV: r.current_iv,
+      ivRank: r.iv_rank,
+      ivPercentile: r.iv_percentile,
+      hv30: r.hv_30,
+      hv60: r.hv_60,
+      hv90: r.hv_90,
+      timestamp: new Date(r.captured_at).getTime(),
+    }));
+  }
+
+  async getLatestIv(symbol: string): Promise<{
+    currentIV: number;
+    ivRank: number;
+    ivPercentile: number;
+    hv30: number;
+    hv60: number;
+    hv90: number;
+    timestamp: number;
+  } | null> {
+    const rows = await this.getRecentIv(symbol, 1);
+    return rows[0] || null;
+  }
+
   private mapVolatilityRow(r: Record<string, unknown>): RegimeSnapshot {
     return {
       symbol: r.symbol as string,

@@ -27,6 +27,7 @@ import {
 } from './v1-schemas';
 import { fetchCandlesChunked } from '../historical/historical-candles.service';
 import { computeMetrics, detectRegime } from '../analysis/regime-engine';
+import { snapshotStore } from '../persistence/snapshot-store';
 
 const log = createChildLogger('v1-routes');
 
@@ -318,17 +319,32 @@ export function createV1Routes(ctx: V1RouteContext): Router {
     }
   });
 
-  // ---- GET /v1/historical/:symbol/iv (P1 stub) -------------------------
+  // ---- GET /v1/historical/:symbol/iv ------------------------------------
 
   router.get('/historical/:symbol/iv', async (req: Request, res: Response) => {
     try {
-      symbolParamSchema.parse(req.params);
-      const body = ivStubResponseSchema.parse({
-        status: 'NOT_SUPPORTED',
-        message: 'Historical IV endpoint is not yet implemented (P1). Vendor support pending.',
+      const { symbol } = symbolParamSchema.parse(req.params);
+      const limit = parseInt((req.query.limit as string) || '100', 10);
+
+      const data = await snapshotStore.getRecentIv(symbol, limit);
+
+      if (data.length === 0) {
+        res.json({
+          symbol,
+          data: [],
+          count: 0,
+          message: 'No IV snapshots yet. IV data accumulates via the IV poller. Call POST /api/seed to take an initial snapshot.',
+          ts: Date.now(),
+        });
+        return;
+      }
+
+      res.json({
+        symbol,
+        data,
+        count: data.length,
         ts: Date.now(),
       });
-      res.json(body);
     } catch (err) {
       handleRouteError(res, err);
     }

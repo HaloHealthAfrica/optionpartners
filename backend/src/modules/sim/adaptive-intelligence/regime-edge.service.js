@@ -1,0 +1,186 @@
+'use strict';
+
+const db = require('../../../config/database');
+const logger = require('../../../utils/logger');
+
+const REGIMES = ['HIGH_VOL_EXPANSION', 'LOW_VOL_CHOP', 'TRENDING', 'NEUTRAL'];
+
+class RegimeEdgeService {
+  /**
+   * Compute strategy performance segmented by volatility regime.
+   * Joins sim_trades with volatility_snapshots to find the regime that was
+   * active at each trade's entry time.
+   */
+  async analyze(userId, options = {}) {
+    const lookbackDays = options.lookbackDays || 90;
+    const minSampleSize = options.minSampleSize || 5;
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - lookbackDays);
+
+    // Join trades with the closest volatility snapshot before each trade entry.
+    // Uses a lateral join to find the most recent regime for each trade's symbol at entry time.
+    const { rows } = await db.query(
+      `SELECT
+         st.strategy,
+         st.symbol,
+         st.pnl,
+         st.pnl_percent,
+         st.r_multiple,
+         st.entry_time,
+         st.exit_time,
+         st.dte_at_entry,
+         st.delta_at_entry,
+         vs.regime,
+         vs.captured_at as regime_at
+       FROM sim_trades st
+       LEFT JOIN LATERAL (
+         SELECT regime, captured_at
+         FROM volatility_snapshots
+         WHERE symbol = st.underlying_symbol
+           AND captured_at <= st.entry_time
+         ORDER BY captured_at DESC
+         LIMIT 1
+       ) vs ON true
+       WHERE st.user_id = $1
+         AND st.exit_time IS NOT NULL
+         AND st.entry_time >= $2
+       ORDER BY st.entry_time DESC`,
+      [userId, cutoff]
+    );
+
+    if (rows.length === 0) {
+      return { matrix: [], strategies: [], regimes: REGIMES, totalTrades: 0, lookbackDays };
+    }
+
+    // Also try falling back to checks_detail regime for trades without volatility snapshots
+    const tradesWithRegime = rows.map(row => ({
+      ...row,
+      regime: row.regime || 'UNKNOWN',
+    }));
+
+    // Build strategy × regime matrix
+    const matrixMap = new Map();
+
+    for (const trade of tradesWithRegime) {
+      const key = `${trade.strategy}::${trade.regime}`;
+      if (!matrixMap.has(key)) {
+        matrixMap.set(key, {
+          strategy: trade.strategy,
+          regime: trade.regime,
+          trades: [],
+        });
+      }
+      matrixMap.get(key).trades.push(trade);
+    }
+
+    const matrix = [];
+    for (const [, cell] of matrixMap) {
+      const metrics = this._computeMetrics(cell.trades);
+      const status = this._determineStatus(metrics, minSampleSize);
+
+      matrix.push({
+        strategy: cell.strategy,
+        regime: cell.regime,
+        ...metrics,
+        status,
+      });
+    }
+
+    // Sort: strategy asc, then regime
+    matrix.sort((a, b) => {
+      const s = a.strategy.localeCompare(b.strategy);
+      return s !== 0 ? s : a.regime.localeCompare(b.regime);
+    });
+
+    const strategies = [...new Set(matrix.map(m => m.strategy))];
+    const regimesFound = [...new Set(matrix.map(m => m.regime))];
+
+    // Compute current regime implications (if we have a current regime)
+    const currentImplications = this._computeImplications(matrix, minSampleSize);
+
+    return {
+      matrix,
+      strategies,
+      regimes: regimesFound,
+      totalTrades: tradesWithRegime.length,
+      lookbackDays,
+      currentImplications,
+      computedAt: Date.now(),
+    };
+  }
+
+  /**
+   * Get the current regime for a symbol from the latest volatility snapshot.
+   */
+  async getCurrentRegime(symbol) {
+    const { rows } = await db.query(
+      `SELECT regime, metrics, captured_at
+       FROM volatility_snapshots
+       WHERE symbol = $1
+       ORDER BY captured_at DESC
+       LIMIT 1`,
+      [symbol]
+    );
+    return rows[0] || null;
+  }
+
+  _computeMetrics(trades) {
+    const pnls = trades.map(t => parseFloat(t.pnl));
+    const wins = pnls.filter(p => p > 0);
+    const losses = pnls.filter(p => p <= 0);
+
+    const totalPnl = pnls.reduce((a, b) => a + b, 0);
+    const winRate = trades.length > 0 ? wins.length / trades.length : 0;
+    const avgPnl = trades.length > 0 ? totalPnl / trades.length : 0;
+
+    const rValues = trades.filter(t => t.r_multiple != null).map(t => parseFloat(t.r_multiple));
+    const avgR = rValues.length > 0 ? rValues.reduce((a, b) => a + b, 0) / rValues.length : 0;
+
+    const grossWins = wins.reduce((a, b) => a + b, 0);
+    const grossLosses = Math.abs(losses.reduce((a, b) => a + b, 0));
+    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? 999 : 0);
+
+    return {
+      totalTrades: trades.length,
+      winRate: Math.round(winRate * 10000) / 10000,
+      avgPnl: Math.round(avgPnl * 100) / 100,
+      avgR: Math.round(avgR * 1000) / 1000,
+      totalPnl: Math.round(totalPnl * 100) / 100,
+      profitFactor: Math.round(profitFactor * 100) / 100,
+    };
+  }
+
+  _determineStatus(metrics, minSampleSize) {
+    if (metrics.totalTrades < minSampleSize) return 'INSUFFICIENT_DATA';
+    if (metrics.winRate < 0.40 || metrics.profitFactor < 1.0) return 'SUPPRESSED';
+    if (metrics.winRate >= 0.60 && metrics.profitFactor >= 1.5) return 'STRONG';
+    return 'ACTIVE';
+  }
+
+  /**
+   * For each strategy, identify which regimes are strong/suppressed.
+   */
+  _computeImplications(matrix, minSampleSize) {
+    const byStrategy = new Map();
+    for (const cell of matrix) {
+      if (!byStrategy.has(cell.strategy)) {
+        byStrategy.set(cell.strategy, []);
+      }
+      byStrategy.get(cell.strategy).push(cell);
+    }
+
+    const implications = [];
+    for (const [strategy, cells] of byStrategy) {
+      const strong = cells.filter(c => c.status === 'STRONG').map(c => c.regime);
+      const suppressed = cells.filter(c => c.status === 'SUPPRESSED').map(c => c.regime);
+      const active = cells.filter(c => c.status === 'ACTIVE').map(c => c.regime);
+
+      implications.push({ strategy, strong, active, suppressed });
+    }
+
+    return implications;
+  }
+}
+
+module.exports = new RegimeEdgeService();

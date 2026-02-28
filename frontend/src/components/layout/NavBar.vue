@@ -412,6 +412,12 @@ const baseNavigation = [
         to: '/sim/strategies',
         route: 'sim-strategies',
         description: 'Performance analytics by strategy and DTE bucket'
+      },
+      {
+        name: 'Adaptive Intelligence',
+        to: '/sim/adaptive',
+        route: 'sim-adaptive',
+        description: 'Feedback loop: conviction calibration, regime edge, temporal patterns'
       }
     ]
   },

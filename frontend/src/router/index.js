@@ -186,6 +186,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/sim/adaptive',
+      name: 'sim-adaptive',
+      component: () => import('@/views/simulation/AdaptiveIntelligenceView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),

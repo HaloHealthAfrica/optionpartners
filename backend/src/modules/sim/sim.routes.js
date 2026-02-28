@@ -5,6 +5,7 @@ const router = express.Router();
 const { authenticate } = require('../../middleware/auth');
 const simController = require('./sim.controller');
 const intelligenceController = require('./intelligence.controller');
+const adaptiveIntelligence = require('./adaptive-intelligence/adaptive-intelligence.controller');
 
 // All sim routes require authentication
 router.use(authenticate);
@@ -56,5 +57,11 @@ router.get('/intelligence/status', intelligenceController.getIntelligenceStatus)
 router.get('/intelligence/equity-by-strategy', intelligenceController.getEquityByStrategy);
 router.get('/intelligence/verdicts', intelligenceController.getVerdicts);
 router.get('/intelligence/snapshot/:symbol', intelligenceController.getSymbolSnapshot);
+
+// Adaptive Intelligence (feedback loop analytics)
+router.get('/adaptive/summary', adaptiveIntelligence.getSummary);
+router.get('/adaptive/calibration', adaptiveIntelligence.getCalibration);
+router.get('/adaptive/regime-edge', adaptiveIntelligence.getRegimeEdge);
+router.get('/adaptive/temporal-edge', adaptiveIntelligence.getTemporalEdge);
 
 module.exports = router;

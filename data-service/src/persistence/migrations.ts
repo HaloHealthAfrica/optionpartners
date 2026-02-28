@@ -135,6 +135,26 @@ const MIGRATIONS = [
         WHERE analytics_version IS NULL OR analytics_version = 'v1';
     `,
   },
+  {
+    name: '009_create_iv_snapshots',
+    sql: `
+      CREATE TABLE IF NOT EXISTS iv_snapshots (
+        id              SERIAL PRIMARY KEY,
+        symbol          VARCHAR(10) NOT NULL,
+        current_iv      DOUBLE PRECISION NOT NULL,
+        iv_rank         DOUBLE PRECISION NOT NULL,
+        iv_percentile   DOUBLE PRECISION NOT NULL,
+        hv_30           DOUBLE PRECISION,
+        hv_60           DOUBLE PRECISION,
+        hv_90           DOUBLE PRECISION,
+        provider        VARCHAR(30) NOT NULL DEFAULT 'unusual_whales',
+        captured_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_iv_snap_symbol ON iv_snapshots (symbol);
+      CREATE INDEX IF NOT EXISTS idx_iv_snap_captured_at ON iv_snapshots (captured_at);
+      CREATE INDEX IF NOT EXISTS idx_iv_snap_symbol_time ON iv_snapshots (symbol, captured_at DESC);
+    `,
+  },
 ];
 
 export async function runMigrations(): Promise<void> {
