@@ -59,19 +59,28 @@ export function parseMarkdownToSections(markdown) {
 export function getSectionIcon(title) {
   const titleLower = title.toLowerCase()
 
-  if (titleLower.includes('performance') || titleLower.includes('assessment')) {
-    return 'ChartBarIcon'
+  if (titleLower.includes('executive summary') || titleLower.includes('summary') || titleLower.includes('overview')) {
+    return 'ClipboardDocumentListIcon'
   }
-  if (titleLower.includes('strength')) {
+  if (titleLower.includes('keep doing') || titleLower.includes('strength')) {
     return 'SparklesIcon'
   }
-  if (titleLower.includes('weakness') || titleLower.includes('improvement')) {
+  if (titleLower.includes('stop doing') || titleLower.includes('weakness') || titleLower.includes('improvement')) {
     return 'ExclamationTriangleIcon'
+  }
+  if (titleLower.includes('prioritized action') || titleLower.includes('action plan') || titleLower.includes('optimization')) {
+    return 'ArrowRightCircleIcon'
+  }
+  if (titleLower.includes('data request') || titleLower.includes('data needed')) {
+    return 'LightBulbIcon'
+  }
+  if (titleLower.includes('performance') || titleLower.includes('assessment')) {
+    return 'ChartBarIcon'
   }
   if (titleLower.includes('risk')) {
     return 'ShieldCheckIcon'
   }
-  if (titleLower.includes('strategy') || titleLower.includes('optimization')) {
+  if (titleLower.includes('strategy')) {
     return 'LightBulbIcon'
   }
   if (titleLower.includes('sector') || titleLower.includes('diversification')) {
@@ -83,11 +92,8 @@ export function getSectionIcon(title) {
   if (titleLower.includes('entry') || titleLower.includes('exit')) {
     return 'ArrowsRightLeftIcon'
   }
-  if (titleLower.includes('next') || titleLower.includes('step') || titleLower.includes('action')) {
+  if (titleLower.includes('next') || titleLower.includes('step')) {
     return 'ArrowRightCircleIcon'
-  }
-  if (titleLower.includes('summary') || titleLower.includes('overview')) {
-    return 'ClipboardDocumentListIcon'
   }
 
   return 'DocumentTextIcon'

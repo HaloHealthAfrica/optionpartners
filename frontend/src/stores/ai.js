@@ -124,6 +124,50 @@ export const useAIStore = defineStore('ai', () => {
   }
 
   /**
+   * Create a new AI session for webhook/sim trade analysis
+   * @param {Object} filters - Optional filters (outcome, symbol, strategy)
+   */
+  async function createWebhookSession(filters = {}) {
+    loading.value = true
+    generating.value = true
+    error.value = null
+
+    try {
+      console.log('[AI_STORE] Creating webhook analysis session with filters:', filters)
+      const response = await api.post('/ai/sessions/webhooks', { filters })
+
+      currentSession.value = {
+        id: response.data.session_id,
+        status: 'active',
+        followup_count: 0,
+        max_followups: response.data.max_followups,
+        trade_summary: response.data.trade_summary,
+        expires_at: response.data.expires_at,
+        source: 'webhooks'
+      }
+
+      messages.value = [{
+        role: 'assistant',
+        content: response.data.initial_analysis,
+        created_at: new Date().toISOString()
+      }]
+
+      if (response.data.credits_remaining !== undefined && response.data.credits_remaining !== null) {
+        credits.value.remaining = response.data.credits_remaining
+        credits.value.used = credits.value.allocated - response.data.credits_remaining
+      }
+
+      return response.data
+    } catch (err) {
+      error.value = err.response?.data?.message || err.response?.data?.error || 'Failed to start webhook AI session'
+      throw err
+    } finally {
+      loading.value = false
+      generating.value = false
+    }
+  }
+
+  /**
    * Send a follow-up question
    * @param {string} message - The follow-up question
    */
@@ -278,6 +322,7 @@ export const useAIStore = defineStore('ai', () => {
     // Actions
     fetchCredits,
     createSession,
+    createWebhookSession,
     sendFollowup,
     loadSession,
     fetchRecentSessions,

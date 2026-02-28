@@ -64,6 +64,62 @@ const aiController = {
   },
 
   /**
+   * Create a new AI session for webhook/sim trade analysis
+   * POST /api/ai/sessions/webhooks
+   * Body: { filters?: { outcome?, symbol?, strategy? } }
+   * Returns: { session_id, initial_analysis, credits_used, credits_remaining }
+   */
+  async createWebhookSession(req, res, next) {
+    try {
+      console.log('[AI_CONTROLLER] Creating webhook analysis session for user', req.user.id);
+
+      const { filters } = req.body || {};
+
+      const result = await AISessionService.createWebhookSession(
+        req.user.id,
+        filters,
+        {
+          apiKey: req.body.apiKey,
+          modelName: req.body.modelName
+        }
+      );
+
+      res.status(201).json({
+        success: true,
+        ...result
+      });
+    } catch (error) {
+      console.error('[AI_CONTROLLER] Error creating webhook session:', error.message);
+
+      if (error.message.includes('Insufficient credits')) {
+        return res.status(402).json({
+          success: false,
+          error: 'Insufficient credits',
+          message: error.message
+        });
+      }
+
+      if (error.message.includes('No webhook signals')) {
+        return res.status(404).json({
+          success: false,
+          error: 'No data',
+          message: error.message
+        });
+      }
+
+      if (error.message.includes('API key')) {
+        return res.status(500).json({
+          success: false,
+          error: 'AI configuration error',
+          message: error.message
+        });
+      }
+
+      next(error);
+    }
+  },
+
+  /**
    * Send a follow-up question in an existing session
    * POST /api/ai/sessions/:id/followup
    * Body: { message: string }

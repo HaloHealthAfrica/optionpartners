@@ -55,6 +55,40 @@ router.post('/sessions', authenticate, aiController.createSession);
 
 /**
  * @swagger
+ * /api/ai/sessions/webhooks:
+ *   post:
+ *     summary: Create a new AI session for webhook/sim trade analysis
+ *     tags: [AI]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               filters:
+ *                 type: object
+ *                 properties:
+ *                   outcome:
+ *                     type: string
+ *                     enum: [traded, blocked]
+ *                   symbol:
+ *                     type: string
+ *                   strategy:
+ *                     type: string
+ *     responses:
+ *       201:
+ *         description: Webhook analysis session created
+ *       402:
+ *         description: Insufficient credits
+ *       404:
+ *         description: No webhook signals found
+ */
+router.post('/sessions/webhooks', authenticate, aiController.createWebhookSession);
+
+/**
+ * @swagger
  * /api/ai/sessions:
  *   get:
  *     summary: Get user's recent AI sessions

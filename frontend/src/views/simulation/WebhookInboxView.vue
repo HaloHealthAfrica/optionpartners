@@ -11,6 +11,13 @@
           Auto-refresh
         </label>
         <button
+          @click="openAIPanel"
+          class="btn-secondary text-sm flex items-center gap-1.5"
+        >
+          <SparklesIcon class="h-4 w-4" />
+          AI Analysis
+        </button>
+        <button
           @click="refresh"
           :disabled="refreshing"
           class="btn-secondary text-sm flex items-center gap-1.5"
@@ -517,16 +524,189 @@
         </div>
       </div>
     </div>
+
+    <!-- AI Analysis Slide-over Panel -->
+    <Transition
+      enter-active-class="transition ease-out duration-300"
+      enter-from-class="translate-x-full"
+      enter-to-class="translate-x-0"
+      leave-active-class="transition ease-in duration-200"
+      leave-from-class="translate-x-0"
+      leave-to-class="translate-x-full"
+    >
+      <div v-if="aiPanelOpen" class="fixed inset-y-0 right-0 z-50 w-full sm:w-[540px] flex">
+        <!-- Backdrop -->
+        <div class="fixed inset-0 bg-black/30" @click="closeAIPanel"></div>
+
+        <!-- Panel -->
+        <div class="relative ml-auto flex h-full w-full sm:w-[540px] flex-col bg-white dark:bg-gray-800 shadow-2xl">
+          <!-- Panel Header -->
+          <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+            <div class="flex items-center gap-3">
+              <div class="p-2 rounded-lg bg-primary-100 dark:bg-primary-900/30">
+                <SparklesIcon class="h-5 w-5 text-primary-600 dark:text-primary-400" />
+              </div>
+              <div>
+                <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Webhook Signal Analysis</h3>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  <template v-if="aiStore.hasActiveSession && aiStore.currentSession?.source === 'webhooks'">
+                    {{ aiStore.followupsRemaining }} of {{ aiStore.currentSession.max_followups }} follow-ups remaining
+                  </template>
+                  <template v-else>
+                    AI-powered analysis of your signal processing pipeline
+                  </template>
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                v-if="aiStore.hasActiveSession && aiStore.currentSession?.source === 'webhooks'"
+                @click="startWebhookAnalysis"
+                :disabled="aiStore.generating"
+                class="text-xs px-2.5 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+              >
+                New Analysis
+              </button>
+              <button @click="closeAIPanel" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <XMarkIcon class="h-5 w-5" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Panel Body -->
+          <div class="flex-1 overflow-y-auto">
+            <!-- No session: start prompt -->
+            <div v-if="!aiStore.hasActiveSession && !aiStore.loading && !aiStore.generating" class="flex flex-col items-center justify-center h-full px-6 text-center">
+              <SparklesIcon class="h-12 w-12 text-gray-300 dark:text-gray-600 mb-4" />
+              <h4 class="text-base font-medium text-gray-900 dark:text-white mb-2">
+                Analyze Your Signal Pipeline
+              </h4>
+              <p class="text-sm text-gray-500 dark:text-gray-400 mb-6 max-w-sm">
+                Get AI-powered insights on your webhook signals, conviction engine performance,
+                strategy effectiveness, and actionable optimization recommendations.
+              </p>
+
+              <div v-if="!aiStore.canStartSession" class="mb-4 p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg max-w-sm">
+                <p class="text-amber-800 dark:text-amber-200 text-sm">
+                  <template v-if="aiStore.credits.unlimited === false && aiStore.credits.remaining <= 0">
+                    You've used all your AI credits for this period.
+                  </template>
+                  <template v-else>
+                    AI analysis requires credits. Configure your AI provider in Settings.
+                  </template>
+                </p>
+              </div>
+
+              <button
+                @click="startWebhookAnalysis"
+                :disabled="!aiStore.canStartSession || aiStore.generating"
+                class="btn-primary inline-flex items-center gap-2"
+              >
+                <SparklesIcon class="h-4 w-4" />
+                Start Signal Analysis
+                <span v-if="!aiStore.credits.unlimited" class="text-xs opacity-75">
+                  ({{ aiStore.creditCosts.new_session }} credits)
+                </span>
+              </button>
+            </div>
+
+            <!-- Loading state -->
+            <div v-else-if="aiStore.loading && !aiStore.hasActiveSession" class="flex flex-col items-center justify-center h-full px-6">
+              <div class="animate-spin h-10 w-10 mb-4 border-4 border-primary-600 border-t-transparent rounded-full"></div>
+              <p class="text-gray-600 dark:text-gray-400 font-medium">Analyzing your signal pipeline...</p>
+              <p class="text-gray-400 dark:text-gray-500 text-xs mt-2">Reviewing signals, conviction scores, and trade outcomes</p>
+            </div>
+
+            <!-- Conversation -->
+            <div v-else-if="aiStore.hasActiveSession" class="px-6 py-4 space-y-4" ref="aiMessagesContainer">
+              <template v-for="(message, index) in aiStore.messages" :key="index">
+                <div v-if="message.role === 'user'" class="flex justify-end">
+                  <div class="max-w-[85%] bg-primary-600 text-white rounded-lg px-4 py-2">
+                    <p class="text-sm whitespace-pre-wrap">{{ message.content }}</p>
+                  </div>
+                </div>
+                <div v-else-if="message.role === 'assistant'" class="flex justify-start">
+                  <div class="max-w-[95%] bg-gray-100 dark:bg-gray-700 rounded-lg px-4 py-3">
+                    <AIWebhookReport v-if="index === 0" :content="message.content" />
+                    <AIReportRenderer v-else :content="message.content" />
+                  </div>
+                </div>
+              </template>
+
+              <div v-if="aiStore.generating" class="flex justify-start">
+                <div class="bg-gray-100 dark:bg-gray-700 rounded-lg px-4 py-3">
+                  <div class="flex items-center gap-2 text-gray-500 dark:text-gray-400">
+                    <div class="flex gap-1">
+                      <div class="w-2 h-2 bg-primary-600 rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                      <div class="w-2 h-2 bg-primary-600 rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                      <div class="w-2 h-2 bg-primary-600 rounded-full animate-bounce" style="animation-delay: 300ms"></div>
+                    </div>
+                    <span class="text-sm">Thinking...</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Panel Footer: Follow-up input -->
+          <div v-if="aiStore.hasActiveSession && aiStore.currentSession?.source === 'webhooks'" class="border-t border-gray-200 dark:border-gray-700 px-6 py-4">
+            <div v-if="aiStore.canAskFollowup">
+              <form @submit.prevent="sendAIFollowup" class="flex gap-2">
+                <input
+                  v-model="aiFollowupMessage"
+                  type="text"
+                  placeholder="Ask a follow-up question..."
+                  class="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  :disabled="aiStore.generating || !aiStore.canSendFollowup"
+                />
+                <button
+                  type="submit"
+                  :disabled="!aiFollowupMessage.trim() || aiStore.generating || !aiStore.canSendFollowup"
+                  class="btn-primary inline-flex items-center gap-1 text-sm"
+                >
+                  <PaperAirplaneIcon class="h-4 w-4" />
+                  Send
+                </button>
+              </form>
+              <p v-if="!aiStore.canSendFollowup && !aiStore.credits.unlimited" class="text-xs text-amber-600 dark:text-amber-400 mt-2">
+                Not enough credits for a follow-up question
+              </p>
+            </div>
+            <div v-else class="text-center">
+              <p class="text-sm text-gray-500 dark:text-gray-400 mb-3">All follow-up questions used for this session.</p>
+              <button
+                @click="startWebhookAnalysis"
+                :disabled="!aiStore.canStartSession"
+                class="btn-primary text-sm inline-flex items-center gap-2"
+              >
+                <SparklesIcon class="h-4 w-4" />
+                Start New Analysis
+              </button>
+            </div>
+          </div>
+
+          <!-- Error display -->
+          <div v-if="aiStore.error" class="px-6 py-3 border-t border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20">
+            <p class="text-red-800 dark:text-red-200 text-sm">{{ aiStore.error }}</p>
+            <button @click="aiStore.clearError" class="text-red-600 dark:text-red-400 text-xs underline mt-1">Dismiss</button>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useSimulationStore } from '@/stores/simulation'
-import { ArrowPathIcon, XMarkIcon, BoltIcon, InboxIcon } from '@heroicons/vue/24/outline'
+import { useAIStore } from '@/stores/ai'
+import { ArrowPathIcon, XMarkIcon, BoltIcon, InboxIcon, SparklesIcon, PaperAirplaneIcon } from '@heroicons/vue/24/outline'
+import AIReportRenderer from '@/components/ai/AIReportRenderer.vue'
+import AIWebhookReport from '@/components/ai/AIWebhookReport.vue'
 import api from '@/services/api'
 
 const store = useSimulationStore()
+const aiStore = useAIStore()
 const selectedEvent = ref(null)
 const selectedTradedSignal = ref(null)
 const processing = ref(false)
@@ -536,6 +716,58 @@ const tradedOutcome = ref('')
 const autoRefresh = ref(true)
 const stats = ref({ total: 0, RECEIVED: 0, PROCESSED: 0, REJECTED: 0 })
 let refreshTimer = null
+
+// AI panel state
+const aiPanelOpen = ref(false)
+const aiFollowupMessage = ref('')
+const aiMessagesContainer = ref(null)
+
+function openAIPanel() {
+  aiPanelOpen.value = true
+  aiStore.fetchCredits().catch(() => {})
+}
+
+function closeAIPanel() {
+  aiPanelOpen.value = false
+}
+
+async function startWebhookAnalysis() {
+  aiStore.reset()
+  try {
+    const filters = {}
+    if (tradedOutcome.value) filters.outcome = tradedOutcome.value
+    await aiStore.createWebhookSession(filters)
+    await nextTick()
+    scrollAIToBottom()
+  } catch (err) {
+    console.error('[WEBHOOK_AI] Error starting analysis:', err)
+  }
+}
+
+async function sendAIFollowup() {
+  if (!aiFollowupMessage.value.trim()) return
+  const message = aiFollowupMessage.value.trim()
+  aiFollowupMessage.value = ''
+  try {
+    await aiStore.sendFollowup(message)
+    await nextTick()
+    scrollAIToBottom()
+  } catch (err) {
+    console.error('[WEBHOOK_AI] Error sending follow-up:', err)
+    aiFollowupMessage.value = message
+  }
+}
+
+function scrollAIToBottom() {
+  if (aiMessagesContainer.value) {
+    aiMessagesContainer.value.scrollTop = aiMessagesContainer.value.scrollHeight
+  }
+}
+
+watch(() => aiStore.messages.length, async () => {
+  await nextTick()
+  scrollAIToBottom()
+})
 
 const webhookUrl = computed(() => {
   const host = window.location.origin
