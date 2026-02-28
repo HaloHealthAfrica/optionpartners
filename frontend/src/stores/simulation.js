@@ -395,6 +395,8 @@ export const useSimulationStore = defineStore('simulation', () => {
   const calibrationStatus = ref(null)
   const activeWeights = ref(null)
   const calibrationLog = ref([])
+  const signalQualityData = ref(null)
+  const guardEffectivenessData = ref(null)
 
   async function fetchAdaptiveSummary(lookbackDays = 90) {
     try {
@@ -523,6 +525,34 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  async function fetchSignalQuality(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.get('/sim/adaptive/signal-quality', { params: { lookbackDays } })
+      signalQualityData.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
+  async function fetchGuardEffectiveness(lookbackDays = 90) {
+    try {
+      adaptiveLoading.value = true
+      const { data } = await api.get('/sim/adaptive/guard-effectiveness', { params: { lookbackDays } })
+      guardEffectivenessData.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      adaptiveLoading.value = false
+    }
+  }
+
   return {
     accountState, positions, orders, trades, equityCurve,
     strategyBreakdown, dteBreakdown, webhookEvents, simRuns,
@@ -543,8 +573,10 @@ export const useSimulationStore = defineStore('simulation', () => {
     // Adaptive Intelligence
     adaptiveSummary, calibrationData, regimeEdgeData, temporalEdgeData,
     adaptiveLoading, calibrationStatus, activeWeights, calibrationLog,
+    signalQualityData, guardEffectivenessData,
     fetchAdaptiveSummary, fetchCalibration, fetchRegimeEdge, fetchTemporalEdge,
     fetchCalibrationStatus, fetchActiveWeights, applyCalibration,
     revertCalibration, toggleAutoCalibration, fetchCalibrationLog,
+    fetchSignalQuality, fetchGuardEffectiveness,
   }
 })

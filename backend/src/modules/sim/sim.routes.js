@@ -73,4 +73,8 @@ router.post('/adaptive/calibration/auto-toggle', adaptiveIntelligence.toggleAuto
 router.put('/adaptive/calibration/threshold', adaptiveIntelligence.setCalibrationThreshold);
 router.get('/adaptive/calibration/log', adaptiveIntelligence.getCalibrationLog);
 
+// Signal quality + Guard effectiveness analysis
+router.get('/adaptive/signal-quality', adaptiveIntelligence.getSignalQuality);
+router.get('/adaptive/guard-effectiveness', adaptiveIntelligence.getGuardEffectiveness);
+
 module.exports = router;

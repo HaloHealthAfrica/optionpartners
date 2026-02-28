@@ -533,12 +533,338 @@
       </div>
     </div>
 
-    <!-- ═══ Tab: Exit Tuning (placeholder) ═══ -->
-    <div v-else-if="activeTab === 'exits'">
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
-        <WrenchScrewdriverIcon class="h-12 w-12 mx-auto mb-3 opacity-50" />
-        <p class="font-medium">Exit Tuning — Coming Soon</p>
-        <p class="mt-2 text-xs max-w-md mx-auto">MAE/MFE distributions, adaptive stop/target calibration, and IV-adjusted exit parameters. Requires IV snapshot accumulation.</p>
+    <!-- ═══ Tab: Signal Quality ═══ -->
+    <div v-else-if="activeTab === 'signalQuality'">
+      <div v-if="!store.signalQualityData || store.signalQualityData.totalTrades === 0" class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
+        <ChartBarSquareIcon class="h-12 w-12 mx-auto mb-3 opacity-50" />
+        <p>No completed trades to analyze signal quality against.</p>
+      </div>
+
+      <div v-else class="space-y-6">
+        <!-- Source performance -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Source Performance</h3>
+            <p class="text-xs text-gray-500 mt-0.5">Win rate, profit factor and avg PnL by indicator source</p>
+          </div>
+          <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+            <thead class="bg-gray-50 dark:bg-gray-900/50">
+              <tr>
+                <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">Source</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Trades</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Win Rate</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Profit Factor</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Avg PnL</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Total PnL</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Avg R</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Avg Conv.</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+              <tr v-for="s in store.signalQualityData.sourcePerformance" :key="s.source" :class="{ 'opacity-50': !s.significant }">
+                <td class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-white">{{ s.source }}</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ s.sampleSize }}</td>
+                <td class="px-4 py-2 text-sm text-center font-semibold" :class="s.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(s.winRate) }}</td>
+                <td class="px-4 py-2 text-sm text-center" :class="s.profitFactor >= 1.5 ? 'text-green-600' : s.profitFactor >= 1 ? 'text-gray-700 dark:text-gray-300' : 'text-red-500'">{{ s.profitFactor }}</td>
+                <td class="px-4 py-2 text-sm text-center" :class="s.avgPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ s.avgPnl }}</td>
+                <td class="px-4 py-2 text-sm text-center font-semibold" :class="s.totalPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ s.totalPnl }}</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ s.avgR || '-' }}</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ s.avgConviction || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Conviction accuracy -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Conviction Accuracy</h3>
+            <p class="text-xs mt-0.5" :class="store.signalQualityData.convictionAccuracy?.isMonotonic ? 'text-green-600' : 'text-amber-600'">
+              {{ store.signalQualityData.convictionAccuracy?.recommendation }}
+            </p>
+          </div>
+          <div class="p-4 space-y-2">
+            <div v-for="b in store.signalQualityData.convictionAccuracy?.buckets" :key="b.bucket" class="flex items-center gap-3">
+              <span class="text-xs font-mono font-medium text-gray-600 dark:text-gray-400 w-14">{{ b.bucket }}</span>
+              <div class="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-5 relative overflow-hidden">
+                <div class="h-full rounded-full transition-all" :class="b.winRate >= 0.5 ? 'bg-green-500' : 'bg-red-400'" :style="{ width: `${Math.min(b.winRate * 100, 100)}%` }"></div>
+              </div>
+              <span class="text-xs font-semibold w-12 text-right" :class="b.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(b.winRate) }}</span>
+              <span class="text-xs text-gray-400 w-16 text-right">n={{ b.sampleSize }}, ${{ b.avgPnl }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Delta + DTE performance side-by-side -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Delta Performance</h3>
+              <p class="text-xs text-indigo-600 mt-0.5">{{ store.signalQualityData.deltaPerformance?.recommendation }}</p>
+            </div>
+            <div class="p-4 space-y-2">
+              <div v-for="d in store.signalQualityData.deltaPerformance?.buckets" :key="d.bucket" class="flex items-center gap-2">
+                <span class="text-[11px] text-gray-600 dark:text-gray-400 w-28 truncate" :title="d.bucket">{{ d.bucket }}</span>
+                <div class="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-4 overflow-hidden">
+                  <div class="h-full rounded-full" :class="d.winRate >= 0.5 ? 'bg-green-500' : 'bg-red-400'" :style="{ width: `${Math.min(d.winRate * 100, 100)}%` }"></div>
+                </div>
+                <span class="text-xs font-semibold w-10 text-right" :class="d.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(d.winRate) }}</span>
+                <span class="text-[10px] text-gray-400 w-8 text-right">n={{ d.sampleSize }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">DTE Performance</h3>
+              <p class="text-xs text-indigo-600 mt-0.5">{{ store.signalQualityData.dtePerformance?.recommendation }}</p>
+            </div>
+            <div class="p-4 space-y-2">
+              <div v-for="d in store.signalQualityData.dtePerformance?.buckets" :key="d.bucket" class="flex items-center gap-2">
+                <span class="text-[11px] text-gray-600 dark:text-gray-400 w-20 truncate">{{ d.bucket }}</span>
+                <div class="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-4 overflow-hidden">
+                  <div class="h-full rounded-full" :class="d.winRate >= 0.5 ? 'bg-green-500' : 'bg-red-400'" :style="{ width: `${Math.min(d.winRate * 100, 100)}%` }"></div>
+                </div>
+                <span class="text-xs font-semibold w-10 text-right" :class="d.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(d.winRate) }}</span>
+                <span class="text-[10px] text-gray-400 w-8 text-right">n={{ d.sampleSize }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Position sizing + Expected move filter -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Position Sizing</h3>
+              <p class="text-xs mt-0.5" :class="store.signalQualityData.sizingPerformance?.sizingEffective ? 'text-green-600' : 'text-amber-600'">
+                {{ store.signalQualityData.sizingPerformance?.recommendation }}
+              </p>
+            </div>
+            <div class="p-4">
+              <div v-for="t in store.signalQualityData.sizingPerformance?.tiers" :key="t.tier" class="flex items-center justify-between py-1.5 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
+                <span class="text-xs text-gray-700 dark:text-gray-300">{{ t.tier }}</span>
+                <div class="flex items-center gap-3">
+                  <span class="text-xs" :class="t.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(t.winRate) }} WR</span>
+                  <span class="text-xs" :class="t.avgPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ t.avgPnl }}</span>
+                  <span class="text-[10px] text-gray-400">n={{ t.sampleSize }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Expected Move Filter</h3>
+              <p class="text-xs text-gray-500 mt-0.5">{{ store.signalQualityData.expectedMoveFilter?.recommendation }}</p>
+            </div>
+            <div class="p-4 grid grid-cols-3 gap-4 text-center">
+              <div>
+                <p class="text-xs text-gray-500">Passed</p>
+                <p class="text-lg font-bold text-gray-900 dark:text-white">{{ store.signalQualityData.expectedMoveFilter?.passed || 0 }}</p>
+                <p class="text-xs text-gray-400">{{ formatPct(store.signalQualityData.expectedMoveFilter?.passedWinRate) }} WR</p>
+              </div>
+              <div>
+                <p class="text-xs text-gray-500">Rejected</p>
+                <p class="text-lg font-bold text-red-500">{{ store.signalQualityData.expectedMoveFilter?.rejected || 0 }}</p>
+                <p class="text-xs text-gray-400">{{ store.signalQualityData.expectedMoveFilter?.rejectedSymbols || 0 }} symbols</p>
+              </div>
+              <div>
+                <p class="text-xs text-gray-500">Filter Rate</p>
+                <p class="text-lg font-bold text-amber-600">{{ formatPct(store.signalQualityData.expectedMoveFilter?.filterRate) }}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Tab: Guard Effectiveness ═══ -->
+    <div v-else-if="activeTab === 'guards'">
+      <div v-if="!store.guardEffectivenessData" class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
+        <ShieldCheckIcon class="h-12 w-12 mx-auto mb-3 opacity-50" />
+        <p>No guard data available yet.</p>
+      </div>
+
+      <div v-else class="space-y-6">
+        <!-- Acceptance rate + rejection summary -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <p class="text-xs font-medium text-gray-500 uppercase">Acceptance Rate</p>
+            <p class="text-2xl font-bold text-gray-900 dark:text-white mt-1">{{ store.guardEffectivenessData.acceptanceRate }}%</p>
+          </div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <p class="text-xs font-medium text-gray-500 uppercase">Total Rejections</p>
+            <p class="text-2xl font-bold text-red-500 mt-1">{{ store.guardEffectivenessData.totalRejections }}</p>
+          </div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <p class="text-xs font-medium text-gray-500 uppercase">Total Trades</p>
+            <p class="text-2xl font-bold text-green-600 mt-1">{{ store.guardEffectivenessData.totalTrades }}</p>
+          </div>
+          <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <p class="text-xs font-medium text-gray-500 uppercase">Avg Latency</p>
+            <p class="text-2xl font-bold text-gray-900 dark:text-white mt-1">{{ store.guardEffectivenessData.latency?.avgLatencyMs || 0 }}ms</p>
+            <p class="text-xs text-gray-400">p95: {{ store.guardEffectivenessData.latency?.p95LatencyMs || 0 }}ms</p>
+          </div>
+        </div>
+
+        <!-- Gate rejection breakdown -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Rejection by Gate</h3>
+          </div>
+          <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+            <thead class="bg-gray-50 dark:bg-gray-900/50">
+              <tr>
+                <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">Gate</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Rejections</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Share</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Symbols</th>
+                <th class="px-4 py-2 text-right text-xs font-semibold text-gray-500 uppercase">Last Seen</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+              <tr v-for="g in store.guardEffectivenessData.gateBreakdown" :key="g.gate">
+                <td class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-white">{{ g.gate }}</td>
+                <td class="px-4 py-2 text-sm text-center font-semibold text-red-500">{{ g.count }}</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ g.percentage }}%</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ g.symbolsAffected }}</td>
+                <td class="px-4 py-2 text-xs text-right text-gray-400">{{ formatDate(g.lastSeen) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Exit quality (MAE/MFE) -->
+        <div v-if="store.guardEffectivenessData.exitQuality?.totalTrades > 0" class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Exit Quality (MAE / MFE)</h3>
+            <p class="text-xs text-gray-500 mt-0.5">How much heat winners take (MAE) and how much profit losers give back (MFE)</p>
+          </div>
+          <div class="p-4 grid grid-cols-2 gap-6">
+            <div>
+              <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Max Adverse Excursion (all trades)</h4>
+              <div class="space-y-1 text-xs">
+                <div class="flex justify-between"><span class="text-gray-500">Average</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mae.avg) }}</span></div>
+                <div class="flex justify-between"><span class="text-gray-500">Median</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mae.median) }}</span></div>
+                <div class="flex justify-between"><span class="text-gray-500">75th pctl</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mae.p75) }}</span></div>
+                <div class="flex justify-between"><span class="text-gray-500">90th pctl</span><span class="font-mono text-red-500">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mae.p90) }}</span></div>
+              </div>
+              <div class="mt-3 pt-2 border-t border-gray-100 dark:border-gray-700 text-xs">
+                <div class="flex justify-between"><span class="text-green-600">Winner avg MAE</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.winnerMae.avg) }}</span></div>
+                <div class="flex justify-between"><span class="text-green-600">Winner 90th pctl</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.winnerMae.p90) }}</span></div>
+              </div>
+            </div>
+            <div>
+              <h4 class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Max Favorable Excursion (all trades)</h4>
+              <div class="space-y-1 text-xs">
+                <div class="flex justify-between"><span class="text-gray-500">Average</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mfe.avg) }}</span></div>
+                <div class="flex justify-between"><span class="text-gray-500">Median</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mfe.median) }}</span></div>
+                <div class="flex justify-between"><span class="text-gray-500">75th pctl</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mfe.p75) }}</span></div>
+                <div class="flex justify-between"><span class="text-gray-500">90th pctl</span><span class="font-mono text-green-600">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.mfe.p90) }}</span></div>
+              </div>
+              <div class="mt-3 pt-2 border-t border-gray-100 dark:border-gray-700 text-xs">
+                <div class="flex justify-between"><span class="text-red-500">Loser avg MFE</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.loserMfe.avg) }}</span></div>
+                <div class="flex justify-between"><span class="text-red-500">Loser 75th pctl</span><span class="font-mono">{{ fmtExcursion(store.guardEffectivenessData.exitQuality.loserMfe.p75) }}</span></div>
+              </div>
+            </div>
+          </div>
+          <div v-if="store.guardEffectivenessData.exitQuality.recommendations?.length" class="px-4 pb-3 space-y-2">
+            <div v-for="(rec, i) in store.guardEffectivenessData.exitQuality.recommendations" :key="i"
+              class="p-2 rounded-lg bg-indigo-50 dark:bg-indigo-900/20 text-xs"
+            >
+              <p class="font-semibold text-indigo-800 dark:text-indigo-300">{{ rec.type === 'stop_adjustment' ? 'Stop Calibration' : 'Target Calibration' }}</p>
+              <p class="text-indigo-700 dark:text-indigo-400 mt-0.5">{{ rec.suggested }}</p>
+              <p class="text-indigo-500 dark:text-indigo-500 mt-0.5 italic">{{ rec.rationale }}</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Exit reason breakdown -->
+        <div v-if="store.guardEffectivenessData.exitReasons?.length" class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Exit Type Performance</h3>
+          </div>
+          <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+            <thead class="bg-gray-50 dark:bg-gray-900/50">
+              <tr>
+                <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 uppercase">Exit Type</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Count</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Win Rate</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Avg PnL</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Total PnL</th>
+                <th class="px-4 py-2 text-center text-xs font-semibold text-gray-500 uppercase">Avg R</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
+              <tr v-for="e in store.guardEffectivenessData.exitReasons" :key="e.exitType">
+                <td class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-white">{{ e.exitType }}</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ e.sampleSize }}</td>
+                <td class="px-4 py-2 text-sm text-center font-semibold" :class="e.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(e.winRate) }}</td>
+                <td class="px-4 py-2 text-sm text-center" :class="e.avgPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ e.avgPnl }}</td>
+                <td class="px-4 py-2 text-sm text-center font-semibold" :class="e.totalPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ e.totalPnl }}</td>
+                <td class="px-4 py-2 text-sm text-center text-gray-500">{{ e.avgR || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Guard threshold analysis -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Guard Threshold Analysis</h3>
+            <p class="text-xs text-gray-500 mt-0.5">Empirical assessment of each configurable guard parameter</p>
+          </div>
+          <div class="divide-y divide-gray-200 dark:divide-gray-700">
+            <div v-for="t in store.guardEffectivenessData.guardThresholds" :key="t.guard" class="px-4 py-3">
+              <div class="flex items-start justify-between">
+                <div>
+                  <p class="text-sm font-semibold text-gray-900 dark:text-white">{{ t.description }}</p>
+                  <p class="text-xs text-gray-500 mt-0.5">Current: <span class="font-mono">{{ t.currentValue }}</span></p>
+                  <p v-if="t.analysis" class="text-xs text-gray-500 mt-0.5">{{ t.analysis }}</p>
+                </div>
+                <span class="text-xs px-2 py-1 rounded-full" :class="t.recommendation.includes('effective') || t.recommendation.includes('appropriate') || t.recommendation.includes('acceptable')
+                  ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                  : t.recommendation.includes('Insufficient')
+                    ? 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+                    : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
+                ">
+                  {{ t.recommendation.includes('effective') || t.recommendation.includes('appropriate') || t.recommendation.includes('acceptable') ? 'OK' : t.recommendation.includes('Insufficient') ? 'Needs Data' : 'Review' }}
+                </span>
+              </div>
+              <p class="text-xs mt-1.5 text-indigo-600 dark:text-indigo-400">{{ t.recommendation }}</p>
+              <!-- Session/staleness buckets if present -->
+              <div v-if="t.buckets?.length" class="mt-2 space-y-1">
+                <div v-for="b in t.buckets" :key="b.bucket || b.session || b.staleness" class="flex items-center gap-2 text-xs">
+                  <span class="text-gray-500 w-24 truncate">{{ b.bucket || b.session || b.staleness }}</span>
+                  <div class="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-3 overflow-hidden">
+                    <div class="h-full rounded-full" :class="(b.winRate || 0) >= 0.5 ? 'bg-green-500' : 'bg-red-400'" :style="{ width: `${Math.min((b.winRate || 0) * 100, 100)}%` }"></div>
+                  </div>
+                  <span class="font-semibold w-10 text-right" :class="(b.winRate || 0) >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ b.winRate ? formatPct(b.winRate) : '-' }}</span>
+                  <span class="text-gray-400 w-8 text-right">n={{ b.sampleSize || b.snapshots || 0 }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Latency impact -->
+        <div v-if="store.guardEffectivenessData.latency?.latencyImpact?.length" class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Processing Latency Impact</h3>
+            <p class="text-xs text-gray-500 mt-0.5">Does processing speed affect trade outcomes?</p>
+          </div>
+          <div class="p-4 space-y-2">
+            <div v-for="l in store.guardEffectivenessData.latency.latencyImpact" :key="l.bucket" class="flex items-center gap-3">
+              <span class="text-xs text-gray-600 dark:text-gray-400 w-20">{{ l.bucket }}</span>
+              <div class="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-4 overflow-hidden">
+                <div class="h-full rounded-full" :class="l.winRate >= 0.5 ? 'bg-green-500' : 'bg-red-400'" :style="{ width: `${Math.min(l.winRate * 100, 100)}%` }"></div>
+              </div>
+              <span class="text-xs font-semibold w-10 text-right" :class="l.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(l.winRate) }}</span>
+              <span class="text-xs text-gray-400 w-16 text-right">n={{ l.sampleSize }}, ${{ l.avgPnl }}</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -548,15 +874,6 @@
         <BeakerIcon class="h-12 w-12 mx-auto mb-3 opacity-50" />
         <p class="font-medium">Backtest Lab — Coming Soon</p>
         <p class="mt-2 text-xs max-w-md mx-auto">Replay historical webhooks through modified engine rules to validate changes before deployment.</p>
-      </div>
-    </div>
-
-    <!-- ═══ Tab: IV Optimizer (placeholder) ═══ -->
-    <div v-else-if="activeTab === 'iv'">
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
-        <ChartBarSquareIcon class="h-12 w-12 mx-auto mb-3 opacity-50" />
-        <p class="font-medium">IV Optimizer — Coming Soon</p>
-        <p class="mt-2 text-xs max-w-md mx-auto">DTE x IV rank performance matrix and empirically optimal delta/DTE selection by volatility environment. Requires IV snapshot accumulation.</p>
       </div>
     </div>
   </div>
@@ -572,6 +889,7 @@ import {
   ClockIcon,
   WrenchScrewdriverIcon,
   BeakerIcon,
+  ShieldCheckIcon,
 } from '@heroicons/vue/24/outline'
 
 const store = useSimulationStore()
@@ -581,12 +899,12 @@ const lookbackDays = ref(90)
 const bannerDismissed = ref(false)
 
 const tabs = [
-  { id: 'calibration', label: 'Calibration' },
-  { id: 'regime',      label: 'Regime Edge' },
-  { id: 'temporal',    label: 'Temporal Edge' },
-  { id: 'exits',       label: 'Exit Tuning', badge: 'Soon' },
-  { id: 'backtest',    label: 'Backtest', badge: 'Soon' },
-  { id: 'iv',          label: 'IV Optimizer', badge: 'Soon' },
+  { id: 'calibration',  label: 'Calibration' },
+  { id: 'signalQuality', label: 'Signal Quality' },
+  { id: 'guards',       label: 'Guard Effectiveness' },
+  { id: 'regime',       label: 'Regime Edge' },
+  { id: 'temporal',     label: 'Temporal Edge' },
+  { id: 'backtest',     label: 'Backtest', badge: 'Soon' },
 ]
 
 const heatmapHours = computed(() => {
@@ -633,6 +951,11 @@ function formatPct(val) {
   return `${(val * 100).toFixed(1)}%`
 }
 
+function fmtExcursion(val) {
+  if (val == null || val === 0) return '-'
+  return `${(val * 100).toFixed(2)}%`
+}
+
 function formatComponentKey(key) {
   const names = {
     strat_align: 'STRAT Alignment',
@@ -663,6 +986,10 @@ async function loadTabData(tabId) {
   try {
     if (tabId === 'calibration' && !store.calibrationData) {
       await store.fetchCalibration(days)
+    } else if (tabId === 'signalQuality' && !store.signalQualityData) {
+      await store.fetchSignalQuality(days)
+    } else if (tabId === 'guards' && !store.guardEffectivenessData) {
+      await store.fetchGuardEffectiveness(days)
     } else if (tabId === 'regime' && !store.regimeEdgeData) {
       await store.fetchRegimeEdge(days)
     } else if (tabId === 'temporal' && !store.temporalEdgeData) {
@@ -679,6 +1006,8 @@ async function refreshActiveTab() {
   store.regimeEdgeData = null
   store.temporalEdgeData = null
   store.adaptiveSummary = null
+  store.signalQualityData = null
+  store.guardEffectivenessData = null
 
   await Promise.all([
     store.fetchAdaptiveSummary(days),

@@ -4,6 +4,8 @@ const convictionCalibrator = require('./conviction-calibrator.service');
 const regimeEdge = require('./regime-edge.service');
 const temporalEdge = require('./temporal-edge.service');
 const calibrationStore = require('./calibration-store.service');
+const signalQuality = require('./signal-quality.service');
+const guardEffectiveness = require('./guard-effectiveness.service');
 const logger = require('../../../utils/logger');
 
 async function getCalibration(req, res) {
@@ -178,6 +180,29 @@ async function getCalibrationLog(req, res) {
   }
 }
 
+async function getSignalQuality(req, res) {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || '90', 10);
+    const minSampleSize = parseInt(req.query.minSampleSize || '5', 10);
+    const result = await signalQuality.analyze(req.user.id, { lookbackDays, minSampleSize });
+    res.json(result);
+  } catch (err) {
+    logger.error(`Signal quality analysis failed: ${err.message}`, 'adaptive-intelligence');
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function getGuardEffectiveness(req, res) {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || '90', 10);
+    const result = await guardEffectiveness.analyze(req.user.id, { lookbackDays });
+    res.json(result);
+  } catch (err) {
+    logger.error(`Guard effectiveness analysis failed: ${err.message}`, 'adaptive-intelligence');
+    res.status(500).json({ error: err.message });
+  }
+}
+
 module.exports = {
   getCalibration,
   getRegimeEdge,
@@ -190,4 +215,6 @@ module.exports = {
   toggleAutoCalibration,
   setCalibrationThreshold,
   getCalibrationLog,
+  getSignalQuality,
+  getGuardEffectiveness,
 };
