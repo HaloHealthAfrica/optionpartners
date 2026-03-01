@@ -46,9 +46,9 @@ class WebhookProcessor {
         ? JSON.parse(event.raw_payload)
         : event.raw_payload;
 
-      // STRAT alert creation — runs before decision routing to persist the alert
-      // regardless of whether the trade is approved
       const source = detectIndicatorSource(payload);
+      await webhookService.setIndicatorSource(event.id, source);
+
       if (source === 'STRAT') {
         maybeCreateStratAlertFromWebhook(payload, event.user_id, event.id)
           .catch(err => logger.error(`STRAT alert creation failed: ${err.message}`, 'webhook-processor'));
@@ -166,6 +166,8 @@ class WebhookProcessor {
           : event.raw_payload;
 
         const batchSource = detectIndicatorSource(payload);
+        await webhookService.setIndicatorSource(event.id, batchSource);
+
         if (batchSource === 'STRAT') {
           maybeCreateStratAlertFromWebhook(payload, event.user_id, event.id)
             .catch(err => logger.error(`STRAT alert creation failed: ${err.message}`, 'webhook-processor'));

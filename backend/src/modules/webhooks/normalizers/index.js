@@ -7,6 +7,7 @@ const trend = require('./trend.normalizer');
 const orb = require('./orb.normalizer');
 const signals = require('./signals.normalizer');
 const mtfBias = require('./mtf-bias.normalizer');
+const pivotMb = require('./pivot-mb.normalizer');
 const generic = require('./generic.normalizer');
 
 /**
@@ -33,6 +34,7 @@ const NORMALIZERS = {
   TREND: trend,
   ORB: orb,
   SIGNALS: signals,
+  PIVOT_MB: pivotMb,
   UNKNOWN: generic,
 };
 

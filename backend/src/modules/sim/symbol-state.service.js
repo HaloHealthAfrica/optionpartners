@@ -131,6 +131,9 @@ class SymbolStateService {
       case 'MARKET_CONTEXT':
         this._applyMarketContext(state, rawPayload);
         break;
+      case 'PIVOT_MB':
+        this._applyPivotMb(state, rawPayload);
+        break;
       default:
         break;
     }
@@ -533,6 +536,40 @@ class SymbolStateService {
     }
 
     state.chain_updated_at = new Date().toISOString();
+  }
+
+  // ── PIVOT_MB: pivot motherbar entry signal ──────────────────────────
+
+  _applyPivotMb(state, payload) {
+    const direction = normalizeDirection(payload.side);
+    const entry = parseFloat(payload.entry_price) || null;
+    const stop = parseFloat(payload.stop_price) || null;
+    const targets = payload.targets || [];
+
+    if (entry) state.last_price = entry;
+
+    state.latest_entry_signal = {
+      direction,
+      confidence: payload.confluence_score || 0,
+      score: payload.confluence_score || 0,
+      entry_price: entry,
+      stop_loss: stop,
+      target_1: targets[0] || null,
+      target_2: targets[1] || null,
+      rr_ratio: (entry && stop && targets[0])
+        ? parseFloat((Math.abs(targets[0] - entry) / Math.abs(entry - stop)).toFixed(2))
+        : null,
+      max_loss: null,
+      market_session: null,
+      volume_vs_avg: null,
+      atr: null,
+      pattern: payload.trigger || null,
+      strategy: 'pivot_motherbar',
+      trend_alignment: null,
+      timeframe: payload.timeframe || '15',
+    };
+
+    state.entry_signal_at = new Date().toISOString();
   }
 
   // ── MARKET_CONTEXT: rich context data (regime, levels, market bias) ──

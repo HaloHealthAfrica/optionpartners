@@ -158,11 +158,12 @@ class SimExecutor {
   async _createOrder(client, intent, userId, status, rejectionReason = null) {
     const id = uuidv4();
     const result = await client.query(
-      `INSERT INTO sim_orders (id, user_id, webhook_event_id, intent_payload, side, symbol, contract_type, quantity, limit_price, status, rejection_reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO sim_orders (id, user_id, webhook_event_id, intent_payload, side, symbol, contract_type, quantity, limit_price, status, rejection_reason, strategy, indicator_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [id, userId, intent.webhookEventId, JSON.stringify(intent), intent.side, intent.symbol,
-       intent.contractType, intent.quantity, intent.limitPrice, status, rejectionReason]
+       intent.contractType, intent.quantity, intent.limitPrice, status, rejectionReason,
+       intent.strategy || null, intent.indicatorSource || null]
     );
     return result.rows[0];
   }

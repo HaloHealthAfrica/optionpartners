@@ -68,10 +68,10 @@ class WebhookService {
     if (!tsResult.valid) {
       const id = uuidv4();
       const result = await db.query(
-        `INSERT INTO webhook_events (id, source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
-         VALUES ($1, 'tradingview', $2, true, $3, 'REJECTED', $4, $5)
+        `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
+         VALUES ($1, 'tradingview', $2, $3, true, $4, 'REJECTED', $5, $6)
          RETURNING *`,
-        [id, JSON.stringify(rawPayload), `rejected_ts_${id}`, tsResult.error, userId]
+        [id, detectedSource, JSON.stringify(rawPayload), `rejected_ts_${id}`, tsResult.error, userId]
       );
       return { event: result.rows[0], isDuplicate: false };
     }
@@ -97,11 +97,11 @@ class WebhookService {
     // Atomic insert with dedupe: ON CONFLICT returns existing row
     const id = uuidv4();
     const result = await db.query(
-      `INSERT INTO webhook_events (id, source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
-       VALUES ($1, 'tradingview', $2, $3, $4, $5, $6, $7)
+      `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
+       VALUES ($1, 'tradingview', $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (dedupe_key) DO NOTHING
        RETURNING *`,
-      [id, JSON.stringify(rawPayload), signatureValid, dedupeKey, status, errorMessage, userId]
+      [id, detectedSource, JSON.stringify(rawPayload), signatureValid, dedupeKey, status, errorMessage, userId]
     );
 
     if (result.rows.length === 0) {
@@ -136,6 +136,19 @@ class WebhookService {
     await db.query(
       `UPDATE webhook_events SET status = 'REJECTED', error_message = $2, processed_at = NOW() WHERE id = $1`,
       [eventId, reason]
+    );
+  }
+
+  /**
+   * Set the detected indicator source on a webhook event.
+   * Called during processing to ensure indicator_source is always populated,
+   * even for events ingested before the column was added.
+   */
+  async setIndicatorSource(eventId, indicatorSource) {
+    if (!indicatorSource) return;
+    await db.query(
+      `UPDATE webhook_events SET indicator_source = $2 WHERE id = $1 AND indicator_source IS NULL`,
+      [eventId, indicatorSource]
     );
   }
 

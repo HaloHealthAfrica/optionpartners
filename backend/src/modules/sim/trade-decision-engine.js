@@ -64,6 +64,11 @@ class TradeDecisionEngine {
     const failClosed = this._checkFailClosed(symbolState, accountState, rationale);
     if (failClosed) return failClosed;
 
+    // ── PIVOT_MB: Self-contained mechanical evaluation ──
+    if (signal.strategy === 'pivot_motherbar') {
+      return this._evaluatePivotMotherBar(signal, symbolState, rationale);
+    }
+
     // ── Part 2: Signal preconditions ──
     const entrySignal = symbolState.latest_entry_signal;
     const isOrbTrigger = signal.indicatorSource === 'ORB';
@@ -939,6 +944,137 @@ class TradeDecisionEngine {
       rationale,
       risk_parameters: { stop_level: null, max_loss: null },
       contractType: null,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  PIVOT_MB — Mechanical strategy evaluation
+  // ═══════════════════════════════════════════════════════════════════
+
+  _evaluatePivotMotherBar(signal, symbolState, rationale) {
+    const ticker = signal.symbol || symbolState.symbol;
+    const meta = signal.meta?.indicatorMeta;
+
+    if (!meta) {
+      rationale.push('PIVOT_MB_BLOCK: Missing indicatorMeta');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const trigger = meta.trigger;
+    const targets = signal.meta?.targets || [];
+    const entry = signal.limitPrice;
+    const stop = signal.stopLoss;
+
+    // ── 1. Session guard ──
+    const sessionPhase = (
+      symbolState.session_phase
+      || symbolState.sessionPhase
+      || symbolState.latest_saty_signal?.phaseName
+      || ''
+    ).toUpperCase();
+
+    if (sessionPhase !== 'OPENING_DRIVE' && sessionPhase !== 'MORNING') {
+      rationale.push(`PIVOT_MB_BLOCK: INVALID_SESSION (phase=${sessionPhase || 'UNKNOWN'})`);
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 2. Confluence guard ──
+    if ((signal.score || 0) < 70) {
+      rationale.push(`PIVOT_MB_BLOCK: Confluence score ${signal.score || 0} < 70`);
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 3. Pivot zone guard ──
+    const pivotPosition = meta.pivotPosition;
+
+    if (signal.direction === 'long') {
+      if (!pivotPosition || !['AT_S1', 'AT_S2'].includes(pivotPosition)) {
+        rationale.push(`PIVOT_MB_BLOCK: Long requires pivotPosition AT_S1|AT_S2, got ${pivotPosition}`);
+        return this._blocked(ticker, 0, rationale);
+      }
+    } else if (signal.direction === 'short') {
+      if (!pivotPosition || !['AT_R1', 'AT_R2'].includes(pivotPosition)) {
+        rationale.push(`PIVOT_MB_BLOCK: Short requires pivotPosition AT_R1|AT_R2, got ${pivotPosition}`);
+        return this._blocked(ticker, 0, rationale);
+      }
+    } else {
+      rationale.push('PIVOT_MB_BLOCK: No valid direction');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 4. Trigger mode logic ──
+    if (trigger === 'BREAK_CLOSE') {
+      if ((meta.atrPercentile || 0) < 65) {
+        rationale.push(`PIVOT_MB_BLOCK: BREAK_CLOSE requires atrPercentile >= 65, got ${meta.atrPercentile}`);
+        return this._blocked(ticker, 0, rationale);
+      }
+      if ((meta.emaAlignment || 0) < 70) {
+        rationale.push(`PIVOT_MB_BLOCK: BREAK_CLOSE requires emaAlignment >= 70, got ${meta.emaAlignment}`);
+        return this._blocked(ticker, 0, rationale);
+      }
+    } else if (trigger === 'BREAK_RETEST') {
+      if (!meta.motherBar) {
+        rationale.push('PIVOT_MB_BLOCK: BREAK_RETEST requires motherBar data');
+        return this._blocked(ticker, 0, rationale);
+      }
+      if (!meta.motherBar.retest_hold) {
+        rationale.push('PIVOT_MB_BLOCK: BREAK_RETEST requires motherBar.retest_hold === true');
+        return this._blocked(ticker, 0, rationale);
+      }
+      if ((meta.emaAlignment || 0) < 70) {
+        rationale.push(`PIVOT_MB_BLOCK: BREAK_RETEST requires emaAlignment >= 70, got ${meta.emaAlignment}`);
+        return this._blocked(ticker, 0, rationale);
+      }
+    } else {
+      rationale.push(`PIVOT_MB_BLOCK: Unknown trigger type: ${trigger}`);
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 5. Reward validation ──
+    if (entry == null || stop == null || targets.length === 0) {
+      rationale.push('PIVOT_MB_BLOCK: Missing entry, stop, or targets for R:R validation');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const risk = Math.abs(entry - stop);
+    const reward1 = Math.abs(targets[0] - entry);
+
+    if (risk <= 0 || reward1 < risk) {
+      rationale.push(`PIVOT_MB_BLOCK: R:R invalid (risk=${risk.toFixed(2)}, reward=${reward1.toFixed(2)})`);
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 6. All guards passed — build TradeDecision ──
+    const conviction = signal.score;
+    const action = signal.direction === 'long' ? 'BUY_CALL' : 'BUY_PUT';
+    const contractType = signal.direction === 'long' ? 'CALL' : 'PUT';
+    const deltaTargets = this._selectDeltaTargets(conviction, contractType, rationale);
+    const sizeMultiplier = this._convictionToSize(conviction);
+
+    rationale.push(`PIVOT_MB_APPROVED: trigger=${trigger} conviction=${conviction} pivot=${pivotPosition}`);
+    rationale.push(`SIZE: ${sizeMultiplier}x (conviction=${conviction})`);
+    rationale.push('DTE: PIVOT_MB → 3-14 DTE (short-term directional)');
+
+    return {
+      action,
+      ticker,
+      strike: null,
+      expiry: null,
+      delta_target: deltaTargets.target,
+      delta_min: deltaTargets.min,
+      delta_max: deltaTargets.max,
+      dte_target: 7,
+      dte_min: 3,
+      dte_max: 14,
+      size_multiplier: sizeMultiplier,
+      conviction_score: conviction,
+      rationale,
+      risk_parameters: {
+        stop_level: stop,
+        stop_source: 'PIVOT_MB_SIGNAL',
+        max_loss: risk * 100,
+      },
+      contractType,
     };
   }
 

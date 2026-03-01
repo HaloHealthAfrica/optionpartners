@@ -23,7 +23,7 @@ const { assertSimMode } = require('../../config/tradingMode');
  * Sources that trigger trade evaluation.
  * All other sources update SymbolState only (context providers).
  */
-const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'UNKNOWN']);
+const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'UNKNOWN']);
 
 /**
  * @typedef {Object} DecisionResult
