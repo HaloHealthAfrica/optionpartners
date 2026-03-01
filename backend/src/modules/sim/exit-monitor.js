@@ -345,42 +345,74 @@ class ExitMonitor {
   async _getLatestPrice(position) {
     const MAX_PRICE_AGE_MS = parseInt(process.env.SIM_MAX_PRICE_AGE_MS || '900000', 10); // 15 min default
 
-    // Check price_cache first for the most reliable/recent price
+    // For options, look up the underlying symbol (e.g. "SPY") not the
+    // contract symbol (e.g. "SPY 20260320 C 505") — price_cache only
+    // stores underlying prices.
+    const lookupSymbol = position.underlying_symbol || position.symbol;
+
+    // 1. Check price_cache
     const cached = await db.query(
       'SELECT price, updated_at FROM price_cache WHERE symbol = $1',
-      [position.symbol]
+      [lookupSymbol]
     );
     if (cached.rows.length > 0) {
       const ageMs = Date.now() - new Date(cached.rows[0].updated_at).getTime();
-      if (ageMs > MAX_PRICE_AGE_MS) {
-        // Price is stale — likely outside market hours. Skip evaluation
-        // to avoid false exits on after-hours or weekend data.
-        return null;
+      if (ageMs <= MAX_PRICE_AGE_MS) {
+        return parseFloat(cached.rows[0].price);
       }
-      return parseFloat(cached.rows[0].price);
+      // Cache exists but is stale — try to refresh below
     }
 
-    // Fall back to most recent webhook payload (check both symbol and ticker fields)
+    // 2. Check recent webhook payloads
     const result = await db.query(
       `SELECT raw_payload, received_at FROM webhook_events
        WHERE user_id = $1
          AND status IN ('PROCESSED', 'RECEIVED')
          AND (raw_payload->>'symbol' = $2 OR raw_payload->>'ticker' = $2)
        ORDER BY received_at DESC LIMIT 1`,
-      [position.user_id, position.symbol]
+      [position.user_id, lookupSymbol]
     );
 
     if (result.rows.length > 0) {
       const ageMs = Date.now() - new Date(result.rows[0].received_at).getTime();
-      if (ageMs > MAX_PRICE_AGE_MS) return null;
+      if (ageMs <= MAX_PRICE_AGE_MS) {
+        const payload = typeof result.rows[0].raw_payload === 'string'
+          ? JSON.parse(result.rows[0].raw_payload)
+          : result.rows[0].raw_payload;
+        const price = payload.close || payload.price || payload.mid_price
+          || payload.midPrice || payload.last;
+        if (price) return parseFloat(price);
+      }
+    }
 
-      const payload = typeof result.rows[0].raw_payload === 'string'
-        ? JSON.parse(result.rows[0].raw_payload)
-        : result.rows[0].raw_payload;
+    // 3. Active fetch: pull a live quote from the data-service
+    //    (TwelveData / Polygon) and update price_cache so subsequent
+    //    lookups within the same cycle don't re-fetch.
+    try {
+      const quote = await dataServiceProxy.getQuote(lookupSymbol);
+      const price = quote?.data?.price ?? quote?.data?.last ?? quote?.data?.close;
+      if (price) {
+        const parsed = parseFloat(price);
+        await db.query(
+          `INSERT INTO price_cache (symbol, price, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (symbol) DO UPDATE SET price = $2, updated_at = NOW()`,
+          [lookupSymbol, parsed]
+        );
+        logger.info(`[PRICE_REFRESH] ${lookupSymbol}: fetched live quote $${parsed} from data-service`, 'exit-monitor');
+        return parsed;
+      }
+    } catch (err) {
+      logger.warn(`[PRICE_REFRESH] ${lookupSymbol}: live quote fetch failed (${err.message})`, 'exit-monitor');
+    }
 
-      const price = payload.close || payload.price || payload.mid_price
-        || payload.midPrice || payload.last;
-      if (price) return parseFloat(price);
+    // 4. Last resort: return stale cached price rather than null.
+    //    A slightly old price is better than skipping the position entirely.
+    if (cached.rows.length > 0) {
+      const stalePrice = parseFloat(cached.rows[0].price);
+      const ageMin = ((Date.now() - new Date(cached.rows[0].updated_at).getTime()) / 60000).toFixed(1);
+      logger.warn(`[PRICE_STALE] ${lookupSymbol}: using stale price $${stalePrice} (${ageMin}min old) — all live sources failed`, 'exit-monitor');
+      return stalePrice;
     }
 
     return null;
@@ -391,10 +423,12 @@ class ExitMonitor {
    * Tries live chain data first, falls back to intrinsic value.
    */
   async _estimateOptionPrice(position, underlyingPrice) {
+    const lookupSymbol = position.underlying_symbol || position.symbol;
+
     // Try live chain data from the data service
     try {
       const chainData = await dataServiceProxy.getOptionsChain(
-        position.underlying_symbol || position.symbol,
+        lookupSymbol,
         position.expiration
       );
       if (chainData?.data?.contracts) {
@@ -403,28 +437,50 @@ class ExitMonitor {
           parseFloat(c.strike) === parseFloat(position.strike)
           && c.type?.toLowerCase() === targetType
         );
-        if (match?.mid && match.mid > 0) return match.mid;
-        if (match?.last && match.last > 0) return match.last;
+        if (match?.mid && match.mid > 0) {
+          logger.info(`[OPTION_PRICE] ${position.symbol}: chain mid=$${match.mid}`, 'exit-monitor');
+          return match.mid;
+        }
+        if (match?.last && match.last > 0) {
+          logger.info(`[OPTION_PRICE] ${position.symbol}: chain last=$${match.last} (no mid)`, 'exit-monitor');
+          return match.last;
+        }
+        if (match) {
+          logger.warn(`[OPTION_PRICE] ${position.symbol}: chain match found but mid=${match.mid} last=${match.last} — both zero/null`, 'exit-monitor');
+        } else {
+          logger.warn(`[OPTION_PRICE] ${position.symbol}: no chain match for strike=${position.strike} type=${targetType} in ${chainData.data.contracts.length} contracts`, 'exit-monitor');
+        }
       }
-    } catch (_) {
-      // Data service unavailable — fall back to intrinsic estimation
+    } catch (err) {
+      logger.warn(`[OPTION_PRICE] ${position.symbol}: chain fetch failed for ${lookupSymbol} (${err.message})`, 'exit-monitor');
     }
 
     const strike = parseFloat(position.strike);
     if (!strike || isNaN(strike)) return parseFloat(position.avg_price);
 
+    const dte = position.expiration
+      ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
+      : 0;
+
+    logger.warn(
+      `[PRICE_FALLBACK] ${position.symbol}: chain unavailable, using intrinsic+extrinsic estimate (underlying=${underlyingPrice}, strike=${strike}, dte=${dte.toFixed(1)})`,
+      'exit-monitor'
+    );
+
     if (position.contract_type === 'CALL') {
-      return Math.max(0.01, underlyingPrice - strike);
+      const intrinsic = Math.max(0, underlyingPrice - strike);
+      const extrinsic = this._estimateExtrinsicValue(underlyingPrice, strike, dte);
+      return Math.max(0.01, intrinsic + extrinsic);
     }
     if (position.contract_type === 'PUT') {
-      return Math.max(0.01, strike - underlyingPrice);
+      const intrinsic = Math.max(0, strike - underlyingPrice);
+      const extrinsic = this._estimateExtrinsicValue(underlyingPrice, strike, dte);
+      return Math.max(0.01, intrinsic + extrinsic);
     }
     if (position.contract_type === 'CREDIT_SPREAD') {
       const shortStrike = parseFloat(position.strike_short || position.strike);
       const longStrike = parseFloat(position.strike_long);
       if (!isNaN(shortStrike) && !isNaN(longStrike)) {
-        // Model both legs: short leg liability minus long leg value.
-        // For a put credit spread (short high strike, long low strike):
         const isCallSpread = shortStrike < longStrike;
         let shortIntrinsic, longIntrinsic;
         if (isCallSpread) {
@@ -434,18 +490,26 @@ class ExitMonitor {
           shortIntrinsic = Math.max(0, shortStrike - underlyingPrice);
           longIntrinsic = Math.max(0, longStrike - underlyingPrice);
         }
-        // Spread debit to close = short leg cost - long leg credit
         const spreadValue = Math.max(0, shortIntrinsic - longIntrinsic);
-        // Add small extrinsic estimate (decays toward expiry)
-        const dte = position.expiration
-          ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
-          : 0;
         const extrinsicEstimate = dte > 0 ? 0.02 * Math.sqrt(dte) : 0;
         return Math.max(0.01, spreadValue + extrinsicEstimate);
       }
     }
 
     return parseFloat(position.avg_price);
+  }
+
+  /**
+   * Rough extrinsic (time) value estimate when chain data is unavailable.
+   * Uses a simplified model: extrinsic decays with sqrt(DTE) and is
+   * proportional to how close the option is to ATM.
+   */
+  _estimateExtrinsicValue(underlyingPrice, strike, dte) {
+    if (dte <= 0) return 0;
+    const moneyness = Math.abs(underlyingPrice - strike) / underlyingPrice;
+    const atmExtrinsic = underlyingPrice * 0.01 * Math.sqrt(dte / 30);
+    const otmDecay = Math.exp(-5 * moneyness);
+    return Math.max(0, atmExtrinsic * otmDecay);
   }
 
   async _triggerExit(position, exitPrice, reason, message) {

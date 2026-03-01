@@ -494,18 +494,17 @@ class DecisionRouter {
    * Tries live chain data first, falls back to intrinsic value.
    */
   async _estimateOptionExitPrice(position) {
+    const lookupSymbol = position.underlying_symbol || position.symbol;
+
     if (position.contract_type === 'STOCK') {
-      const cached = await db.query(
-        'SELECT price FROM price_cache WHERE symbol = $1',
-        [position.symbol]
-      );
-      return cached.rows.length > 0 ? parseFloat(cached.rows[0].price) : null;
+      const price = await this._getUnderlyingPrice(lookupSymbol);
+      return price ?? parseFloat(position.avg_price);
     }
 
-    // Try live chain data
+    // Try live chain data first
     try {
       const chainData = await dataServiceProxy.getOptionsChain(
-        position.underlying_symbol || position.symbol,
+        lookupSymbol,
         position.expiration
       );
       if (chainData?.data?.contracts) {
@@ -521,22 +520,32 @@ class DecisionRouter {
       // Data service unavailable — fall back to intrinsic
     }
 
-    // Fall back to intrinsic value from cached underlying price
-    const cached = await db.query(
-      'SELECT price FROM price_cache WHERE symbol = $1',
-      [position.underlying_symbol || position.symbol]
-    );
-    if (cached.rows.length === 0) return parseFloat(position.avg_price);
+    // Fall back to intrinsic value, but fetch a live underlying
+    // price instead of relying solely on a possibly-stale cache.
+    const underlyingPrice = await this._getUnderlyingPrice(lookupSymbol);
+    if (!underlyingPrice) return parseFloat(position.avg_price);
 
-    const underlyingPrice = parseFloat(cached.rows[0].price);
     const strike = parseFloat(position.strike);
     if (!strike || isNaN(strike)) return parseFloat(position.avg_price);
 
+    const dte = position.expiration
+      ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
+      : 0;
+
+    logger.warn(
+      `[PRICE_FALLBACK] ${position.symbol}: chain unavailable, using intrinsic+extrinsic estimate (underlying=${underlyingPrice}, strike=${strike}, dte=${dte.toFixed(1)})`,
+      'decision-router'
+    );
+
     if (position.contract_type === 'CALL') {
-      return Math.max(0.01, underlyingPrice - strike);
+      const intrinsic = Math.max(0, underlyingPrice - strike);
+      const extrinsic = this._estimateExtrinsicValue(underlyingPrice, strike, dte);
+      return Math.max(0.01, intrinsic + extrinsic);
     }
     if (position.contract_type === 'PUT') {
-      return Math.max(0.01, strike - underlyingPrice);
+      const intrinsic = Math.max(0, strike - underlyingPrice);
+      const extrinsic = this._estimateExtrinsicValue(underlyingPrice, strike, dte);
+      return Math.max(0.01, intrinsic + extrinsic);
     }
     if (position.contract_type === 'CREDIT_SPREAD') {
       const shortStrike = parseFloat(position.strike_short || position.strike);
@@ -552,15 +561,61 @@ class DecisionRouter {
           longIntrinsic = Math.max(0, longStrike - underlyingPrice);
         }
         const spreadValue = Math.max(0, shortIntrinsic - longIntrinsic);
-        const dte = position.expiration
-          ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
-          : 0;
         const extrinsicEstimate = dte > 0 ? 0.02 * Math.sqrt(dte) : 0;
         return Math.max(0.01, spreadValue + extrinsicEstimate);
       }
     }
 
     return parseFloat(position.avg_price);
+  }
+
+  async _getUnderlyingPrice(symbol) {
+    // 1. Try price_cache
+    const cached = await db.query(
+      'SELECT price, updated_at FROM price_cache WHERE symbol = $1',
+      [symbol]
+    );
+    const MAX_AGE_MS = parseInt(process.env.SIM_MAX_PRICE_AGE_MS || '900000', 10);
+    if (cached.rows.length > 0) {
+      const ageMs = Date.now() - new Date(cached.rows[0].updated_at).getTime();
+      if (ageMs <= MAX_AGE_MS) {
+        return parseFloat(cached.rows[0].price);
+      }
+    }
+
+    // 2. Active fetch from data-service (TwelveData / Polygon)
+    try {
+      const quote = await dataServiceProxy.getQuote(symbol);
+      const price = quote?.data?.price ?? quote?.data?.last ?? quote?.data?.close;
+      if (price) {
+        const parsed = parseFloat(price);
+        await db.query(
+          `INSERT INTO price_cache (symbol, price, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (symbol) DO UPDATE SET price = $2, updated_at = NOW()`,
+          [symbol, parsed]
+        );
+        logger.info(`[PRICE_REFRESH] ${symbol}: fetched live quote $${parsed}`, 'decision-router');
+        return parsed;
+      }
+    } catch (err) {
+      logger.warn(`[PRICE_REFRESH] ${symbol}: quote fetch failed (${err.message})`, 'decision-router');
+    }
+
+    // 3. Last resort: stale cache
+    if (cached.rows.length > 0) {
+      return parseFloat(cached.rows[0].price);
+    }
+
+    return null;
+  }
+
+  _estimateExtrinsicValue(underlyingPrice, strike, dte) {
+    if (dte <= 0) return 0;
+    const moneyness = Math.abs(underlyingPrice - strike) / underlyingPrice;
+    const atmExtrinsic = underlyingPrice * 0.01 * Math.sqrt(dte / 30);
+    const otmDecay = Math.exp(-5 * moneyness);
+    return Math.max(0, atmExtrinsic * otmDecay);
   }
 
   async _getOrCreateAccountState(userId) {
