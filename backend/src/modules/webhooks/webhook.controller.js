@@ -2,6 +2,7 @@
 
 const webhookService = require('./webhook.service');
 const db = require('../../config/database');
+const Sentry = require('@sentry/node');
 const { assertSimMode } = require('../../config/tradingMode');
 const logger = require('../../utils/logger');
 
@@ -35,6 +36,7 @@ async function _resolveUserId(req) {
 }
 
 let _cachedDefaultUserId = null;
+let _defaultUserWarningLogged = false;
 async function _getDefaultUserId() {
   if (_cachedDefaultUserId) return _cachedDefaultUserId;
 
@@ -44,7 +46,20 @@ async function _getDefaultUserId() {
     return envId;
   }
 
+  // In production, refuse to guess the user — require explicit config
+  if (process.env.NODE_ENV === 'production') {
+    if (!_defaultUserWarningLogged) {
+      logger.warn('Unauthenticated webhook rejected: SIM_DEFAULT_USER_ID not set and running in production', 'webhook');
+      _defaultUserWarningLogged = true;
+    }
+    return null;
+  }
+
   try {
+    if (!_defaultUserWarningLogged) {
+      logger.warn('SIM_DEFAULT_USER_ID not set — falling back to first registered user (development only)', 'webhook');
+      _defaultUserWarningLogged = true;
+    }
     const result = await db.query(
       `SELECT id FROM users ORDER BY created_at ASC LIMIT 1`
     );
@@ -122,6 +137,7 @@ async function receiveTradingViewWebhook(req, res) {
     });
   } catch (error) {
     logger.error(`Webhook ingestion failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(500).json({ error: 'Internal webhook processing error' });
   }
 }
@@ -142,6 +158,7 @@ async function listWebhooks(req, res) {
     res.json(result);
   } catch (error) {
     logger.error(`List webhooks failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(500).json({ error: 'Failed to list webhooks' });
   }
 }
@@ -169,6 +186,7 @@ async function getWebhookStats(req, res) {
     res.json(counts);
   } catch (error) {
     logger.error(`Webhook stats failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(500).json({ error: 'Failed to get webhook stats' });
   }
 }
@@ -269,6 +287,7 @@ async function listTradedSignals(req, res) {
     });
   } catch (error) {
     logger.error(`List traded signals failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(500).json({ error: 'Failed to list traded signals' });
   }
 }
@@ -286,6 +305,7 @@ async function getWebhook(req, res) {
     res.json(event);
   } catch (error) {
     logger.error(`Get webhook failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(500).json({ error: 'Failed to get webhook' });
   }
 }
@@ -308,6 +328,7 @@ async function receiveOptionsFlow(req, res) {
     });
   } catch (error) {
     logger.error(`Options flow ingestion failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(error.message.includes('Missing') ? 422 : 500).json({ error: error.message });
   }
 }
@@ -330,6 +351,7 @@ async function receivePriceTick(req, res) {
     });
   } catch (error) {
     logger.error(`Price tick ingestion failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(error.message.includes('Missing') || error.message.includes('invalid') ? 422 : 500).json({ error: error.message });
   }
 }
@@ -352,6 +374,7 @@ async function receiveChainSnapshot(req, res) {
     });
   } catch (error) {
     logger.error(`Chain snapshot ingestion failed: ${error.message}`, 'webhook');
+    Sentry.captureException(error, { tags: { module: 'webhook-controller' } });
     res.status(error.message.includes('Missing') ? 422 : 500).json({ error: error.message });
   }
 }

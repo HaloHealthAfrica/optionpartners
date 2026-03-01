@@ -8,6 +8,7 @@ const executor = require('./executor');
 const tradeFinalizer = require('./trade-finalizer');
 const ledgerService = require('./ledger.service');
 const { assertSimMode } = require('../../config/tradingMode');
+const Sentry = require('@sentry/node');
 
 /**
  * Historical replay engine.
@@ -45,6 +46,7 @@ class ReplayService {
     // Execute replay asynchronously
     this._executeReplay(run, userId).catch(err => {
       logger.error(`Replay ${runId} failed: ${err.message}`, 'sim-replay');
+      Sentry.captureException(err, { tags: { module: 'sim-replay' } });
     });
 
     return run;
@@ -52,15 +54,23 @@ class ReplayService {
 
   /**
    * Execute the replay loop. Processes candles sequentially to maintain determinism.
+   * Account state is snapshot before replay and restored after, so replay
+   * never mutates the user's live sim balance.
    */
   async _executeReplay(run, userId) {
+    // Snapshot account state before replay so we can restore it afterward
+    const preReplayState = await this._snapshotAccountState(userId);
+
     try {
-      // Fetch historical candle data
+      // Reset account to a clean slate for the replay run
+      await ledgerService.resetAccount(userId);
+
       const candles = await this._fetchHistoricalData(
         run.symbol, run.timeframe, run.start_date, run.end_date
       );
 
       if (candles.length === 0) {
+        await this._restoreAccountState(userId, preReplayState);
         await this._markFailed(run.id, 'No historical data available for the specified range');
         return;
       }
@@ -69,10 +79,8 @@ class ReplayService {
       let winCount = 0;
       let totalPnl = 0;
 
-      // Take initial equity snapshot
       await ledgerService.takeEquitySnapshot(userId, run.id);
 
-      // Process each candle sequentially for determinism
       for (const candle of candles) {
         const syntheticPayload = this._candle2Payload(candle, run.symbol, run.strategy);
 
@@ -80,7 +88,6 @@ class ReplayService {
           const decision = await decisionRouter.evaluate(syntheticPayload, null, userId);
 
           if (decision.approved && decision.orderIntent) {
-            // Add price data from candle
             decision.orderIntent.bidPrice = candle.low;
             decision.orderIntent.askPrice = candle.high;
             decision.orderIntent.midPrice = (candle.open + candle.close) / 2;
@@ -105,18 +112,15 @@ class ReplayService {
           logger.warn(`Replay candle error: ${err.message}`, 'sim-replay');
         }
 
-        // Snapshot equity periodically (every 10 candles)
         if (tradeCount % 10 === 0) {
           await ledgerService.takeEquitySnapshot(userId, run.id);
         }
       }
 
-      // Final equity snapshot
       await ledgerService.takeEquitySnapshot(userId, run.id);
 
-      // Get final account state for summary
-      const account = await ledgerService.getAccountState(userId);
-
+      // Capture replay results before restoring
+      const replayAccount = await ledgerService.getAccountState(userId);
       const losingTrades = tradeCount - winCount;
       const winRate = tradeCount > 0 ? winCount / tradeCount : 0;
 
@@ -132,7 +136,7 @@ class ReplayService {
              completed_at = NOW()
          WHERE id = $1`,
         [run.id, tradeCount, winCount, losingTrades,
-         totalPnl, winRate, account.max_drawdown]
+         totalPnl, winRate, replayAccount.max_drawdown]
       );
 
       logger.info(
@@ -142,6 +146,44 @@ class ReplayService {
     } catch (error) {
       await this._markFailed(run.id, error.message);
       throw error;
+    } finally {
+      // Always restore the user's live account state
+      await this._restoreAccountState(userId, preReplayState);
+    }
+  }
+
+  async _snapshotAccountState(userId) {
+    const result = await db.query(
+      'SELECT * FROM sim_account_state WHERE user_id = $1',
+      [userId]
+    );
+    return result.rows[0] || null;
+  }
+
+  async _restoreAccountState(userId, snapshot) {
+    if (!snapshot) return;
+    try {
+      // Close any positions opened during replay
+      await db.query(
+        `DELETE FROM sim_positions WHERE user_id = $1 AND status = 'OPEN'`,
+        [userId]
+      );
+      await db.query(
+        `UPDATE sim_account_state
+         SET cash_balance = $2, buying_power = $3, margin_used = $4,
+             equity = $5, unrealized_pnl = $6, realized_pnl = $7,
+             peak_equity = $8, max_drawdown = $9, daily_pnl = $10,
+             daily_pnl_reset_at = $11, kill_switch_active = $12, updated_at = NOW()
+         WHERE user_id = $1`,
+        [userId, snapshot.cash_balance, snapshot.buying_power, snapshot.margin_used,
+         snapshot.equity, snapshot.unrealized_pnl, snapshot.realized_pnl,
+         snapshot.peak_equity, snapshot.max_drawdown, snapshot.daily_pnl,
+         snapshot.daily_pnl_reset_at, snapshot.kill_switch_active]
+      );
+      logger.info(`Restored pre-replay account state for user ${userId}`, 'sim-replay');
+    } catch (err) {
+      logger.error(`Failed to restore pre-replay state: ${err.message}`, 'sim-replay');
+      Sentry.captureException(err, { tags: { module: 'sim-replay' } });
     }
   }
 

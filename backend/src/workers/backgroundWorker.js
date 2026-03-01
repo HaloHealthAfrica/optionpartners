@@ -1,6 +1,7 @@
 const jobQueue = require('../utils/jobQueue');
 const parallelJobQueue = require('../utils/parallelJobQueue');
 const logger = require('../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * Background worker for processing queued jobs
@@ -84,6 +85,7 @@ class BackgroundWorker {
           
         } catch (error) {
           logger.logError('Failed to get queue status:', error.message);
+          Sentry.captureException(error, { tags: { module: 'background-worker' } });
         }
       }, 30000); // Every 30 seconds (more frequent monitoring)
 
@@ -101,6 +103,7 @@ class BackgroundWorker {
           setTimeout(() => this.processStuckJobs(), 10000);
         } catch (error) {
           logger.logError('Failed to process stuck jobs:', error.message);
+          Sentry.captureException(error, { tags: { module: 'background-worker' } });
         }
       }, 1000); // Start after just 1 second, not 5
       
@@ -108,6 +111,7 @@ class BackgroundWorker {
       this.isRunning = false;
       this.shouldStop = true;
       logger.logError('[ERROR] Failed to start background worker:', error.message);
+      Sentry.captureException(error, { tags: { module: 'background-worker' } });
       throw error;
     }
   }
@@ -164,6 +168,7 @@ class BackgroundWorker {
 
     } catch (error) {
       logger.logError('Failed to process stuck jobs:', error.message);
+      Sentry.captureException(error, { tags: { module: 'background-worker' } });
     }
   }
 
@@ -200,6 +205,7 @@ class BackgroundWorker {
 
     } catch (error) {
       logger.logError('Failed to ensure workers running:', error.message);
+      Sentry.captureException(error, { tags: { module: 'background-worker' } });
     }
   }
 
@@ -224,7 +230,6 @@ class BackgroundWorker {
     }
     
     logger.logImport('[SUCCESS] Background worker stopped');
-    process.exit(0);
   }
 
   /**
@@ -247,6 +252,7 @@ const backgroundWorker = new BackgroundWorker();
 if (require.main === module) {
   backgroundWorker.start().catch(error => {
     logger.logError('Failed to start background worker:', error.message);
+    Sentry.captureException(error, { tags: { module: 'background-worker' } });
     process.exit(1);
   });
 }

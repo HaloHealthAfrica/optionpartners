@@ -3,6 +3,7 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 const { verifySignature, generateDedupeKey, validateTimestamp, validatePayload } = require('./webhook.validator');
 const { detectIndicatorSource, isMarketDataType } = require('./indicator-detector');
 const symbolStateService = require('../sim/symbol-state.service');
@@ -325,6 +326,7 @@ class WebhookService {
       await symbolStateService.update('OPTIONS_FLOW', payload, userId, symbol);
     } catch (err) {
       logger.error(`Failed to update symbol state from flow: ${err.message}`, 'webhook');
+      Sentry.captureException(err, { tags: { module: 'webhook-service' } });
     }
 
     return flowResult.rows[0];
@@ -388,6 +390,7 @@ class WebhookService {
       await symbolStateService.update('PRICE_TICK', payload, userId, symbol);
     } catch (err) {
       logger.error(`Failed to update symbol state from price tick: ${err.message}`, 'webhook');
+      Sentry.captureException(err, { tags: { module: 'webhook-service' } });
     }
 
     return cacheResult.rows[0];
@@ -435,9 +438,70 @@ class WebhookService {
       await symbolStateService.update('CHAIN_SNAPSHOT', payload, userId, symbol);
     } catch (err) {
       logger.error(`Failed to update symbol state from chain: ${err.message}`, 'webhook');
+      Sentry.captureException(err, { tags: { module: 'webhook-service' } });
     }
 
     return result.rows[0];
+  }
+  /**
+   * Move permanently failed events (rejected with max retries exhausted) to
+   * DEAD_LETTER status and log an alert. Called periodically by the processor.
+   */
+  async escalateDeadLetters() {
+    try {
+      const result = await db.query(
+        `UPDATE webhook_events
+         SET status = 'DEAD_LETTER', processed_at = NOW()
+         WHERE status = 'REJECTED'
+           AND error_message LIKE 'Processing error:%'
+           AND COALESCE(retry_count, 0) >= 3
+         RETURNING id, raw_payload->>'ticker' as symbol, error_message`
+      );
+      if (result.rows.length > 0) {
+        logger.warn(`[DEAD_LETTER] Escalated ${result.rows.length} permanently failed webhook(s)`, 'webhook');
+        Sentry.captureMessage(`${result.rows.length} webhook event(s) moved to dead letter queue`, {
+          level: 'warning',
+          tags: { module: 'webhook-service' },
+          extra: { events: result.rows.map(r => ({ id: r.id, symbol: r.symbol })) },
+        });
+      }
+      return result.rows;
+    } catch (err) {
+      logger.error(`Dead letter escalation failed: ${err.message}`, 'webhook');
+      return [];
+    }
+  }
+
+  /**
+   * Cleanup old webhook events beyond a retention period.
+   * Prevents unbounded table growth.
+   */
+  async cleanupOldEvents(retentionDays = 30) {
+    try {
+      const result = await db.query(
+        `DELETE FROM webhook_events
+         WHERE received_at < NOW() - INTERVAL '1 day' * $1
+           AND status IN ('PROCESSED', 'DEAD_LETTER', 'TEST_PING')
+         RETURNING id`,
+        [retentionDays]
+      );
+
+      const marketResult = await db.query(
+        `DELETE FROM market_data_events
+         WHERE received_at < NOW() - INTERVAL '1 day' * $1
+         RETURNING id`,
+        [retentionDays]
+      );
+
+      const total = (result.rows.length || 0) + (marketResult.rows.length || 0);
+      if (total > 0) {
+        logger.info(`[CLEANUP] Deleted ${result.rows.length} webhook events and ${marketResult.rows.length} market data events older than ${retentionDays} days`, 'webhook');
+      }
+      return total;
+    } catch (err) {
+      logger.error(`Event cleanup failed: ${err.message}`, 'webhook');
+      return 0;
+    }
   }
 }
 

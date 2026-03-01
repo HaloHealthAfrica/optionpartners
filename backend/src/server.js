@@ -1,9 +1,12 @@
+require('dotenv').config();
+require('./instrument');
+
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
-require('dotenv').config();
+const Sentry = require('@sentry/node');
 
 // Validate trading mode on startup (hard-fail if not SIM)
 const { TRADING_MODE } = require('./config/tradingMode');
@@ -383,6 +386,8 @@ app.post('/api/admin/trigger-recovery', requireAdmin, async (req, res) => {
   }
 });
 
+Sentry.setupExpressErrorHandler(app);
+
 app.use(errorHandler);
 
 app.use((req, res) => {
@@ -555,6 +560,14 @@ async function startServer() {
       console.log('Stock scanner disabled (ENABLE_STOCK_SCANNER=false)');
     }
 
+    // Startup safety warnings
+    if (!process.env.WEBHOOK_SECRET) {
+      logger.warn('WEBHOOK_SECRET is not set — all webhook signature verification is bypassed. Set WEBHOOK_SECRET in production.', 'startup');
+    }
+    if (!process.env.SIM_DEFAULT_USER_ID) {
+      logger.warn('SIM_DEFAULT_USER_ID is not set — unauthenticated webhooks will fall back to the first registered user. Set SIM_DEFAULT_USER_ID for safety.', 'startup');
+    }
+
     // Start webhook processor for simulation engine
     if (process.env.ENABLE_WEBHOOK_PROCESSOR !== 'false') {
       console.log(`Starting webhook processor (TRADING_MODE=${TRADING_MODE})...`);
@@ -604,6 +617,7 @@ process.on('SIGTERM', async () => {
   stockScannerScheduler.stop();
   await backgroundWorker.stop();
   await shutdownPostHogTelemetry();
+  await Sentry.close(2000);
   process.exit(0);
 });
 
@@ -623,6 +637,7 @@ process.on('SIGINT', async () => {
   stockScannerScheduler.stop();
   await backgroundWorker.stop();
   await shutdownPostHogTelemetry();
+  await Sentry.close(2000);
   process.exit(0);
 });
 

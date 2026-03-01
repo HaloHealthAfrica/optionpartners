@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const NotificationPreferenceService = require('./notificationPreferenceService');
+const Sentry = require('@sentry/node');
 
 class NotificationService {
   
@@ -37,6 +38,7 @@ class NotificationService {
       // Do not persist xp_update events; they are transient UI signals
     } catch (error) {
       console.error('Error sending XP update notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -63,6 +65,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending achievement notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -88,6 +91,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending challenge joined notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -111,6 +115,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending challenge completed notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -131,6 +136,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending level up notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -153,6 +159,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending leaderboard ranking notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -168,6 +175,7 @@ class NotificationService {
       }
     } catch (error) {
       console.error('Error sending SSE notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -207,6 +215,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error saving notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -226,6 +235,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error getting unread notifications:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
       return [];
     }
   }
@@ -241,6 +251,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error marking notifications as read:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -269,6 +280,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending behavioral alert:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
   
@@ -292,6 +304,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending price alert:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -313,6 +326,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending CUSIP resolution notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -344,6 +358,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending news notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -375,6 +390,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending earnings notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -396,8 +412,10 @@ class NotificationService {
         },
       };
       await this.sendSSENotification(userId, message);
+      await this.saveNotification(userId, 'sim_signal', message.data);
     } catch (error) {
       console.error('Error sending sim signal notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -416,8 +434,10 @@ class NotificationService {
         },
       };
       await this.sendSSENotification(userId, message);
+      await this.saveNotification(userId, 'sim_order_filled', message.data);
     } catch (error) {
       console.error('Error sending sim order filled notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -436,8 +456,10 @@ class NotificationService {
         },
       };
       await this.sendSSENotification(userId, message);
+      await this.saveNotification(userId, 'sim_trade_closed', message.data);
     } catch (error) {
       console.error('Error sending sim trade closed notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -455,6 +477,7 @@ class NotificationService {
       await this.saveNotification(userId, 'sim_kill_switch', message.data);
     } catch (error) {
       console.error('Error sending kill switch notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 
@@ -485,6 +508,7 @@ class NotificationService {
       
     } catch (error) {
       console.error('Error sending trade reminder notification:', error);
+      Sentry.captureException(error, { tags: { module: 'notification-service' } });
     }
   }
 }

@@ -3,6 +3,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const archiver = require('archiver');
 const { createWriteStream } = require('fs');
+const Sentry = require('@sentry/node');
 
 function maskEmail(email) {
   if (!email || !email.includes('@')) return '***';
@@ -29,6 +30,7 @@ class BackupService {
       await fs.mkdir(this.backupDir, { recursive: true });
     } catch (error) {
       console.error('[BACKUP] Error creating backup directory:', error);
+      Sentry.captureException(error, { tags: { module: 'backup-service' } });
     }
   }
 
@@ -73,6 +75,7 @@ class BackupService {
       };
     } catch (error) {
       console.error('[BACKUP] Error creating backup:', error);
+      Sentry.captureException(error, { tags: { module: 'backup-service' } });
 
       // Save failed backup to database
       await db.query(
@@ -226,6 +229,7 @@ class BackupService {
         deletedCount++;
       } catch (error) {
         console.error(`[BACKUP] Error deleting backup ${backup.id}:`, error);
+        Sentry.captureException(error, { tags: { module: 'backup-service' } });
       }
     }
 
@@ -483,6 +487,7 @@ class BackupService {
         } catch (error) {
           console.error(`[RESTORE] Error restoring users: ${error.message}`);
           console.error(`[RESTORE] Users error stack:`, error.stack);
+          Sentry.captureException(error, { tags: { module: 'backup-service' } });
           await client.query(`ROLLBACK TO SAVEPOINT ${usersSavepoint}`);
           await client.query(`RELEASE SAVEPOINT ${usersSavepoint}`);
           results.users.errors += tables.users.length - results.users.added - results.users.skipped - results.users.updated;
@@ -556,6 +561,8 @@ class BackupService {
             await client.query(`RELEASE SAVEPOINT ${sp}`);
             if (results.trades.errors < 3) {
               console.error(`[RESTORE] Trade error (${trade.id}): ${error.message}`);
+              Sentry.captureException(error, { tags: { module: 'backup-service' } });
+              Sentry.captureException(error, { tags: { module: 'backup-service' } });
             }
             results.trades.errors++;
           }
@@ -615,6 +622,8 @@ class BackupService {
             await client.query(`RELEASE SAVEPOINT ${sp}`);
             if (results.diaryEntries.errors < 3) {
               console.error(`[RESTORE] Diary entry error (${entry.id}): ${error.message}`);
+              Sentry.captureException(error, { tags: { module: 'backup-service' } });
+              Sentry.captureException(error, { tags: { module: 'backup-service' } });
             }
             results.diaryEntries.errors++;
           }
@@ -740,6 +749,7 @@ class BackupService {
         } catch (error) {
           // Non-conflict error (schema mismatch, FK violation, etc.) - roll back entire table
           console.error(`[RESTORE] Error restoring ${tableName}: ${error.message}`);
+          Sentry.captureException(error, { tags: { module: 'backup-service' } });
           await client.query(`ROLLBACK TO SAVEPOINT ${tableSavepoint}`);
           await client.query(`RELEASE SAVEPOINT ${tableSavepoint}`);
           const processed = tableResults[tableName].added + tableResults[tableName].skipped;
@@ -892,6 +902,7 @@ class BackupService {
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('[RESTORE] Restore failed, transaction rolled back:', error);
+      Sentry.captureException(error, { tags: { module: 'backup-service' } });
       throw error;
     } finally {
       client.release();

@@ -1,5 +1,6 @@
 'use strict';
 
+const Sentry = require('@sentry/node');
 const webhookService = require('../webhooks/webhook.service');
 const { detectIndicatorSource } = require('../webhooks/indicator-detector');
 const decisionRouter = require('./decision-router');
@@ -23,6 +24,7 @@ class WebhookProcessor {
     this._running = false;
     this._intervalId = null;
     this._processedCount = 0;
+    this._cycleCount = 0;
   }
 
   /**
@@ -136,6 +138,10 @@ class WebhookProcessor {
       };
     } catch (error) {
       logger.error(`Processing event ${event.id} failed: ${error.message}`, 'webhook-processor');
+      Sentry.captureException(error, {
+        tags: { module: 'webhook-processor', eventId: event.id, source: 'processEvent' },
+        extra: { userId: event.user_id, rawPayload: event.raw_payload },
+      });
       await webhookService.markRejected(event.id, `Processing error: ${error.message}`);
       return { approved: false, reason: error.message };
     }
@@ -186,16 +192,28 @@ class WebhookProcessor {
         }
       } catch (error) {
         logger.error(`Decision evaluation failed for ${event.id}: ${error.message}`, 'webhook-processor');
+        Sentry.captureException(error, {
+          tags: { module: 'webhook-processor', eventId: event.id, source: 'processPending' },
+          extra: { userId: event.user_id },
+        });
         await webhookService.markRejected(event.id, `Evaluation error: ${error.message}`);
         rejected.push({ eventId: event.id, approved: false, reason: error.message });
       }
     }
 
-    // Phase 2: Prioritize approved signals
-    const userId = evaluated.length > 0 ? evaluated[0].event.user_id : null;
-    const prioritized = userId
-      ? await signalPrioritizer.prioritize(evaluated, userId)
-      : evaluated;
+    // Phase 2: Prioritize approved signals per user (not globally)
+    const byUser = new Map();
+    for (const item of evaluated) {
+      const uid = item.event.user_id;
+      if (!byUser.has(uid)) byUser.set(uid, []);
+      byUser.get(uid).push(item);
+    }
+
+    let prioritized = [];
+    for (const [uid, userItems] of byUser) {
+      const ranked = await signalPrioritizer.prioritize(userItems, uid);
+      prioritized.push(...ranked);
+    }
 
     // Phase 3: Execute in priority order
     const results = [...rejected];
@@ -274,6 +292,10 @@ class WebhookProcessor {
       };
     } catch (error) {
       logger.error(`Execution failed for ${event.id}: ${error.message}`, 'webhook-processor');
+      Sentry.captureException(error, {
+        tags: { module: 'webhook-processor', eventId: event.id, source: 'executeApprovedDecision' },
+        extra: { userId: event.user_id },
+      });
       await webhookService.markRejected(event.id, `Execution error: ${error.message}`);
       return { approved: true, executed: false, reason: error.message };
     }
@@ -291,8 +313,18 @@ class WebhookProcessor {
     this._intervalId = setInterval(async () => {
       try {
         await this.processPending();
+
+        // Every ~60 cycles (~5 min at 5s interval), run housekeeping
+        this._cycleCount++;
+        if (this._cycleCount % 60 === 0) {
+          await webhookService.escalateDeadLetters();
+          await webhookService.cleanupOldEvents(
+            parseInt(process.env.WEBHOOK_RETENTION_DAYS || '30', 10)
+          );
+        }
       } catch (error) {
         logger.error(`Processor poll error: ${error.message}`, 'webhook-processor');
+        Sentry.captureException(error, { tags: { module: 'webhook-processor', source: 'pollLoop' } });
       }
     }, intervalMs);
   }

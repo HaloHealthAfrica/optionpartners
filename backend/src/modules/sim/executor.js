@@ -5,6 +5,7 @@ const db = require('../../config/database');
 const logger = require('../../utils/logger');
 const NotificationService = require('../../services/notificationService');
 const { assertSimMode } = require('../../config/tradingMode');
+const Sentry = require('@sentry/node');
 
 /**
  * Simulated execution engine. Replaces broker execution entirely.
@@ -36,7 +37,12 @@ class SimExecutor {
     try {
       await client.query('BEGIN');
 
-      // 1. Validate account state
+      // Advisory lock on (userId, symbol) prevents concurrent entry/exit races.
+      // pg_advisory_xact_lock is released automatically at COMMIT/ROLLBACK.
+      const lockKey = this._advisoryLockKey(userId, intent.symbol);
+      await client.query('SELECT pg_advisory_xact_lock($1)', [lockKey]);
+
+      // 1. Validate account state (FOR UPDATE ensures fresh read within this tx)
       const account = await this._getAccountState(client, userId);
       if (account.kill_switch_active) {
         throw new Error('Kill switch is active -- all orders rejected');
@@ -53,6 +59,21 @@ class SimExecutor {
         const requiredCapital = this._calculateRequiredCapital(intent, fillPrice, multiplier);
         if (requiredCapital > account.buying_power) {
           const order = await this._createOrder(client, intent, userId, 'REJECTED', 'Insufficient buying power');
+          await client.query('COMMIT');
+          return { order, fill: null, position: null };
+        }
+      }
+
+      // 3b. Prevent duplicate positions for the same user+symbol+contract
+      if (intent.side === 'BUY' && !intent.positionId) {
+        const existing = await client.query(
+          `SELECT id FROM sim_positions
+           WHERE user_id = $1 AND underlying_symbol = $2 AND status = 'OPEN'
+           LIMIT 1`,
+          [userId, intent.symbol]
+        );
+        if (existing.rows.length > 0) {
+          const order = await this._createOrder(client, intent, userId, 'REJECTED', 'Duplicate position — already open for this symbol');
           await client.query('COMMIT');
           return { order, fill: null, position: null };
         }
@@ -81,6 +102,7 @@ class SimExecutor {
     } catch (error) {
       await client.query('ROLLBACK');
       logger.error(`Sim execution failed: ${error.message}`, 'sim-executor');
+      Sentry.captureException(error, { tags: { module: 'sim-executor' } });
       throw error;
     } finally {
       client.release();
@@ -88,7 +110,8 @@ class SimExecutor {
   }
 
   /**
-   * Fill price model: default mid price with configurable slippage.
+   * Fill price model: mid price with dynamic slippage that accounts for
+   * bid-ask spread, order size, and contract type.
    * Falls back to price_cache if the intent carries no price fields.
    * Deterministic given same inputs.
    */
@@ -118,20 +141,45 @@ class SimExecutor {
       }
     }
 
-    const slippage = basePrice * this.slippagePct;
+    const slippage = this._calculateSlippage(basePrice, intent);
     const isCreditSpread = intent.contractType === 'CREDIT_SPREAD';
 
     if (intent.side === 'BUY') {
-      // Debit trades: pay more (adverse). Credit spreads: receive less credit (adverse).
       return isCreditSpread
         ? Math.round((basePrice - slippage) * 10000) / 10000
         : Math.round((basePrice + slippage) * 10000) / 10000;
     } else {
-      // Debit trades: receive less (adverse). Credit spreads: pay more to close (adverse).
       return isCreditSpread
         ? Math.round((basePrice + slippage) * 10000) / 10000
         : Math.round((basePrice - slippage) * 10000) / 10000;
     }
+  }
+
+  /**
+   * Dynamic slippage model incorporating:
+   * 1. Base spread-based slippage (half the bid-ask spread, or fallback %)
+   * 2. Size impact: larger orders move the price more
+   * 3. Contract type: options have wider slippage than stock
+   */
+  _calculateSlippage(basePrice, intent) {
+    // Component 1: Spread-based (most realistic for options)
+    let spreadSlippage;
+    if (intent.bidPrice && intent.askPrice && intent.askPrice > intent.bidPrice) {
+      spreadSlippage = (intent.askPrice - intent.bidPrice) / 2;
+    } else {
+      spreadSlippage = basePrice * this.slippagePct;
+    }
+
+    // Component 2: Size impact — each additional contract past 5 adds 0.5% slippage
+    const qty = intent.quantity || 1;
+    const sizeMultiplier = qty <= 5 ? 1.0 : 1.0 + (qty - 5) * 0.005;
+
+    // Component 3: Contract type factor
+    const typeFactor = intent.contractType === 'STOCK' ? 0.5
+      : intent.contractType === 'CREDIT_SPREAD' ? 1.3
+      : 1.0;
+
+    return spreadSlippage * sizeMultiplier * typeFactor;
   }
 
   _calculateRequiredCapital(intent, fillPrice, multiplier) {
@@ -204,11 +252,11 @@ class SimExecutor {
     }
 
     if (intent.positionId || intent.side === 'SELL') {
-      // Close existing position
+      // Close (or partially close) an existing position
       const positionId = intent.positionId;
       if (!positionId) {
         const existing = await client.query(
-          `SELECT id FROM sim_positions WHERE user_id = $1 AND underlying_symbol = $2 AND status = 'OPEN' ORDER BY opened_at ASC LIMIT 1`,
+          `SELECT id FROM sim_positions WHERE user_id = $1 AND underlying_symbol = $2 AND status = 'OPEN' ORDER BY opened_at ASC LIMIT 1 FOR UPDATE`,
           [userId, intent.symbol]
         );
         if (existing.rows.length === 0) {
@@ -217,13 +265,59 @@ class SimExecutor {
         intent.positionId = existing.rows[0].id;
       }
 
+      // Read the current position inside the transaction
+      const posRead = await client.query(
+        `SELECT * FROM sim_positions WHERE id = $1 AND status = 'OPEN' FOR UPDATE`,
+        [intent.positionId]
+      );
+      if (posRead.rows.length === 0) {
+        throw new Error(`Position ${intent.positionId} is no longer OPEN (already closed)`);
+      }
+      const currentPos = posRead.rows[0];
+      const sellQty = intent.quantity || currentPos.quantity;
+
+      if (sellQty < currentPos.quantity) {
+        // Partial exit: reduce position quantity, keep OPEN
+        const remainingQty = currentPos.quantity - sellQty;
+        await client.query(
+          `UPDATE sim_positions SET quantity = $2, current_price = $3 WHERE id = $1`,
+          [intent.positionId, remainingQty, fillPrice]
+        );
+
+        // Create a synthetic closed position record for the partial exit
+        const partialId = require('uuid').v4();
+        const result = await client.query(
+          `INSERT INTO sim_positions (
+            id, user_id, symbol, underlying_symbol, contract_type, strike, strike_short, strike_long,
+            expiration, quantity, avg_price, delta_at_entry, strategy, webhook_event_id,
+            status, stop_loss, take_profit, stop_source, opened_at, closed_at, current_price,
+            highest_price, lowest_price, exit_reason
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+            'CLOSED', $15, $16, $17, $18, NOW(), $19, $20, $21, $22
+          ) RETURNING *`,
+          [partialId, userId, currentPos.symbol, currentPos.underlying_symbol,
+           currentPos.contract_type, currentPos.strike, currentPos.strike_short,
+           currentPos.strike_long, currentPos.expiration, sellQty, currentPos.avg_price,
+           currentPos.delta_at_entry, currentPos.strategy, currentPos.webhook_event_id,
+           currentPos.stop_loss, currentPos.take_profit, currentPos.stop_source,
+           currentPos.opened_at, fillPrice, currentPos.highest_price, currentPos.lowest_price,
+           intent.exitReason || null]
+        );
+        return result.rows[0];
+      }
+
+      // Full close
       const result = await client.query(
         `UPDATE sim_positions
          SET status = 'CLOSED', closed_at = NOW(), current_price = $2
-         WHERE id = $1
+         WHERE id = $1 AND status = 'OPEN'
          RETURNING *`,
         [intent.positionId, fillPrice]
       );
+      if (result.rows.length === 0) {
+        throw new Error(`Position ${intent.positionId} is no longer OPEN (already closed)`);
+      }
       return result.rows[0];
     }
 
@@ -259,6 +353,19 @@ class SimExecutor {
       : Number(intent.strike).toString();
 
     return `${underlying} ${expDate} ${typeChar} ${strike}`;
+  }
+
+  /**
+   * Derive a stable 32-bit integer for pg_advisory_xact_lock from userId + symbol.
+   * Collisions are harmless (extra serialization, not correctness issues).
+   */
+  _advisoryLockKey(userId, symbol) {
+    const str = `${userId}:${symbol}`;
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+    }
+    return hash;
   }
 
   async _updateLedger(client, userId, intent, fillPrice, multiplier, commission, position) {
@@ -312,10 +419,10 @@ class SimExecutor {
                margin_used = GREATEST(0, margin_used - $4),
                realized_pnl = realized_pnl + $5,
                daily_pnl = CASE
-                 WHEN daily_pnl_reset_at < CURRENT_DATE THEN $5
+                 WHEN daily_pnl_reset_at < (NOW() AT TIME ZONE 'America/New_York')::date THEN $5
                  ELSE daily_pnl + $5
                END,
-               daily_pnl_reset_at = CURRENT_DATE,
+               daily_pnl_reset_at = (NOW() AT TIME ZONE 'America/New_York')::date,
                equity = cash_balance - $2 - $3 + unrealized_pnl,
                updated_at = NOW()
            WHERE user_id = $1`,
@@ -333,10 +440,10 @@ class SimExecutor {
                margin_used = GREATEST(0, margin_used - $4),
                realized_pnl = realized_pnl + $5,
                daily_pnl = CASE
-                 WHEN daily_pnl_reset_at < CURRENT_DATE THEN $5
+                 WHEN daily_pnl_reset_at < (NOW() AT TIME ZONE 'America/New_York')::date THEN $5
                  ELSE daily_pnl + $5
                END,
-               daily_pnl_reset_at = CURRENT_DATE,
+               daily_pnl_reset_at = (NOW() AT TIME ZONE 'America/New_York')::date,
                equity = cash_balance + $2 - $3 + unrealized_pnl,
                updated_at = NOW()
            WHERE user_id = $1`,

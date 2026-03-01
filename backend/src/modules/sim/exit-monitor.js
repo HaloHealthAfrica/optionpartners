@@ -8,6 +8,7 @@ const NotificationService = require('../../services/notificationService');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const marketContext = require('./market-context.service');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * Background exit monitor -- checks open positions for stop-loss,
@@ -36,6 +37,7 @@ class ExitMonitor {
         await this.checkAllPositions();
       } catch (error) {
         logger.error(`Exit monitor poll error: ${error.message}`, 'exit-monitor');
+        Sentry.captureException(error, { tags: { module: 'exit-monitor' } });
       }
     }, intervalMs);
   }
@@ -85,11 +87,17 @@ class ExitMonitor {
         userIds.add(pos.user_id);
       } catch (error) {
         logger.error(`Exit check failed for position ${pos.id}: ${error.message}`, 'exit-monitor');
+        Sentry.captureException(error, { tags: { module: 'exit-monitor' } });
       }
     }
 
     for (const uid of userIds) {
       await this._refreshUnrealizedPnl(uid);
+    }
+
+    // Run reconciliation periodically (every ~20 cycles = ~5 min at 15s interval)
+    if (this._checksRun % 20 === 0) {
+      await this._reconcilePositions();
     }
   }
 
@@ -134,6 +142,19 @@ class ExitMonitor {
         `UPDATE sim_positions SET ${updates.join(', ')} WHERE id = $1`,
         updateParams
       );
+    }
+
+    // 0. Gap risk detection — if price jumped significantly from last known level,
+    // log a gap event so analytics can track gap-through-stop scenarios.
+    const lastKnown = parseFloat(position.current_price || position.avg_price);
+    if (lastKnown > 0 && !isOption) {
+      const gapPct = Math.abs(underlyingPrice - lastKnown) / lastKnown;
+      if (gapPct > 0.05) {
+        logger.warn(
+          `[GAP_DETECTED] ${position.symbol}: price moved ${(gapPct * 100).toFixed(1)}% from ${lastKnown} to ${underlyingPrice}`,
+          'exit-monitor'
+        );
+      }
     }
 
     // 1. Stop-loss check (compare underlying price against underlying-based stop levels)
@@ -317,23 +338,31 @@ class ExitMonitor {
   }
 
   /**
-   * Get the latest price for a position. Checks:
-   * 1. Most recent webhook payload for the same symbol
-   * 2. Falls back to the position's current_price or avg_price
+   * Get the latest price for a position. Returns null if no fresh
+   * price is available (stale prices outside market hours are rejected
+   * to prevent false exit triggers).
    */
   async _getLatestPrice(position) {
+    const MAX_PRICE_AGE_MS = parseInt(process.env.SIM_MAX_PRICE_AGE_MS || '900000', 10); // 15 min default
+
     // Check price_cache first for the most reliable/recent price
     const cached = await db.query(
       'SELECT price, updated_at FROM price_cache WHERE symbol = $1',
       [position.symbol]
     );
     if (cached.rows.length > 0) {
+      const ageMs = Date.now() - new Date(cached.rows[0].updated_at).getTime();
+      if (ageMs > MAX_PRICE_AGE_MS) {
+        // Price is stale — likely outside market hours. Skip evaluation
+        // to avoid false exits on after-hours or weekend data.
+        return null;
+      }
       return parseFloat(cached.rows[0].price);
     }
 
     // Fall back to most recent webhook payload (check both symbol and ticker fields)
     const result = await db.query(
-      `SELECT raw_payload FROM webhook_events
+      `SELECT raw_payload, received_at FROM webhook_events
        WHERE user_id = $1
          AND status IN ('PROCESSED', 'RECEIVED')
          AND (raw_payload->>'symbol' = $2 OR raw_payload->>'ticker' = $2)
@@ -342,6 +371,9 @@ class ExitMonitor {
     );
 
     if (result.rows.length > 0) {
+      const ageMs = Date.now() - new Date(result.rows[0].received_at).getTime();
+      if (ageMs > MAX_PRICE_AGE_MS) return null;
+
       const payload = typeof result.rows[0].raw_payload === 'string'
         ? JSON.parse(result.rows[0].raw_payload)
         : result.rows[0].raw_payload;
@@ -351,9 +383,6 @@ class ExitMonitor {
       if (price) return parseFloat(price);
     }
 
-    // No fallback to position.current_price — it stores the option price (not
-    // the underlying) after our price separation fix, so using it here would
-    // produce incorrect stop/TP comparisons and garbled option estimates.
     return null;
   }
 
@@ -394,9 +423,25 @@ class ExitMonitor {
       const shortStrike = parseFloat(position.strike_short || position.strike);
       const longStrike = parseFloat(position.strike_long);
       if (!isNaN(shortStrike) && !isNaN(longStrike)) {
-        const shortIntrinsic = Math.max(0, shortStrike - underlyingPrice);
-        const longIntrinsic = Math.max(0, longStrike - underlyingPrice);
-        return Math.max(0.01, shortIntrinsic - longIntrinsic);
+        // Model both legs: short leg liability minus long leg value.
+        // For a put credit spread (short high strike, long low strike):
+        const isCallSpread = shortStrike < longStrike;
+        let shortIntrinsic, longIntrinsic;
+        if (isCallSpread) {
+          shortIntrinsic = Math.max(0, underlyingPrice - shortStrike);
+          longIntrinsic = Math.max(0, underlyingPrice - longStrike);
+        } else {
+          shortIntrinsic = Math.max(0, shortStrike - underlyingPrice);
+          longIntrinsic = Math.max(0, longStrike - underlyingPrice);
+        }
+        // Spread debit to close = short leg cost - long leg credit
+        const spreadValue = Math.max(0, shortIntrinsic - longIntrinsic);
+        // Add small extrinsic estimate (decays toward expiry)
+        const dte = position.expiration
+          ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
+          : 0;
+        const extrinsicEstimate = dte > 0 ? 0.02 * Math.sqrt(dte) : 0;
+        return Math.max(0.01, spreadValue + extrinsicEstimate);
       }
     }
 
@@ -451,6 +496,58 @@ class ExitMonitor {
       logger.info(`EXIT TRIGGERED [${reason}]: ${position.symbol} @ ${exitPrice} — ${message}`, 'exit-monitor');
     } catch (error) {
       logger.error(`Exit trigger failed for ${position.id}: ${error.message}`, 'exit-monitor');
+      Sentry.captureException(error, { tags: { module: 'exit-monitor' } });
+    }
+  }
+
+  /**
+   * Periodically verify ledger consistency. Detects orphaned positions
+   * (OPEN with no matching order) and logs margin/buying power drift.
+   */
+  async _reconcilePositions() {
+    try {
+      // Find orphaned OPEN positions with no matching order
+      const orphaned = await db.query(
+        `SELECT p.id, p.symbol, p.user_id
+         FROM sim_positions p
+         LEFT JOIN sim_orders o ON o.webhook_event_id = p.webhook_event_id AND o.status = 'FILLED'
+         WHERE p.status = 'OPEN' AND o.id IS NULL`
+      );
+      if (orphaned.rows.length > 0) {
+        logger.warn(
+          `[RECONCILIATION] Found ${orphaned.rows.length} orphaned OPEN position(s) with no matching filled order`,
+          'exit-monitor'
+        );
+        for (const pos of orphaned.rows) {
+          logger.warn(`[RECONCILIATION] Orphaned: position=${pos.id} symbol=${pos.symbol} user=${pos.user_id}`, 'exit-monitor');
+        }
+      }
+
+      // Check buying power consistency per user
+      const users = await db.query(
+        `SELECT a.user_id, a.cash_balance, a.buying_power, a.margin_used,
+                COALESCE(SUM(
+                  CASE WHEN p.contract_type = 'CREDIT_SPREAD'
+                    THEN (ABS(COALESCE(p.strike_short::numeric,0) - COALESCE(p.strike_long::numeric,0)) - p.avg_price) * p.quantity * 100
+                    ELSE p.avg_price * p.quantity * CASE WHEN p.contract_type = 'STOCK' THEN 1 ELSE 100 END
+                  END
+                ), 0) as expected_margin
+         FROM sim_account_state a
+         LEFT JOIN sim_positions p ON p.user_id = a.user_id AND p.status = 'OPEN'
+         GROUP BY a.user_id, a.cash_balance, a.buying_power, a.margin_used`
+      );
+
+      for (const row of users.rows) {
+        const drift = Math.abs(parseFloat(row.margin_used) - parseFloat(row.expected_margin));
+        if (drift > 1) {
+          logger.warn(
+            `[RECONCILIATION] Margin drift for user ${row.user_id}: recorded=$${parseFloat(row.margin_used).toFixed(2)} expected=$${parseFloat(row.expected_margin).toFixed(2)} drift=$${drift.toFixed(2)}`,
+            'exit-monitor'
+          );
+        }
+      }
+    } catch (err) {
+      logger.error(`Reconciliation failed: ${err.message}`, 'exit-monitor');
     }
   }
 
@@ -486,6 +583,7 @@ class ExitMonitor {
       );
     } catch (err) {
       logger.error(`Failed to refresh unrealized PnL for user ${userId}: ${err.message}`, 'exit-monitor');
+      Sentry.captureException(err, { tags: { module: 'exit-monitor' } });
     }
   }
 }

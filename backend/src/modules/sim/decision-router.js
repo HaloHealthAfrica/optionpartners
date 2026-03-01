@@ -1,5 +1,6 @@
 'use strict';
 
+const Sentry = require('@sentry/node');
 const { mapToSignal, mapIndicatorToSignal, validateSignal } = require('./signal.contract');
 const { detectIndicatorSource } = require('../webhooks/indicator-detector');
 const safetyGuards = require('./safety-guards');
@@ -56,6 +57,13 @@ class DecisionRouter {
     const indicatorSource = detectIndicatorSource(webhookPayload);
     const isKnownIndicator = indicatorSource !== 'UNKNOWN';
     const symbol = (webhookPayload.ticker || webhookPayload.symbol || '').toUpperCase();
+
+    Sentry.addBreadcrumb({
+      category: 'decision-router',
+      message: `evaluate: ${indicatorSource} ${symbol}`,
+      level: 'info',
+      data: { indicatorSource, symbol, webhookEventId, userId },
+    });
 
     // ── Phase 0: Update SymbolState with every webhook ──
     if (symbol && isKnownIndicator) {
@@ -182,6 +190,13 @@ class DecisionRouter {
       if (!adaptiveResult.allowed) {
         await this._logRejection(userId, webhookEventId, signal, 'ADAPTIVE_GUARD', adaptiveResult.reason);
         return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
+      }
+
+      // ── Phase 2.4: Portfolio-level Greeks guard ──
+      const greeksCheck = await this._checkPortfolioGreeks(userId, signal);
+      if (!greeksCheck.allowed) {
+        await this._logRejection(userId, webhookEventId, signal, 'PORTFOLIO_GREEKS', greeksCheck.reason);
+        return { approved: false, reason: greeksCheck.reason, signal, indicatorSource };
       }
 
       // ── Phase 2.5: Refresh chain data + volatility regime + market context ──
@@ -527,9 +542,21 @@ class DecisionRouter {
       const shortStrike = parseFloat(position.strike_short || position.strike);
       const longStrike = parseFloat(position.strike_long);
       if (!isNaN(shortStrike) && !isNaN(longStrike)) {
-        const shortIntrinsic = Math.max(0, shortStrike - underlyingPrice);
-        const longIntrinsic = Math.max(0, longStrike - underlyingPrice);
-        return Math.max(0.01, shortIntrinsic - longIntrinsic);
+        const isCallSpread = shortStrike < longStrike;
+        let shortIntrinsic, longIntrinsic;
+        if (isCallSpread) {
+          shortIntrinsic = Math.max(0, underlyingPrice - shortStrike);
+          longIntrinsic = Math.max(0, underlyingPrice - longStrike);
+        } else {
+          shortIntrinsic = Math.max(0, shortStrike - underlyingPrice);
+          longIntrinsic = Math.max(0, longStrike - underlyingPrice);
+        }
+        const spreadValue = Math.max(0, shortIntrinsic - longIntrinsic);
+        const dte = position.expiration
+          ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
+          : 0;
+        const extrinsicEstimate = dte > 0 ? 0.02 * Math.sqrt(dte) : 0;
+        return Math.max(0.01, spreadValue + extrinsicEstimate);
       }
     }
 
@@ -755,6 +782,54 @@ class DecisionRouter {
         'decision-router'
       );
       return null;
+    }
+  }
+
+  /**
+   * Portfolio-level Greeks guard. Blocks new entries when aggregate delta
+   * or total notional exposure exceeds configurable limits.
+   */
+  async _checkPortfolioGreeks(userId, signal) {
+    const MAX_NET_DELTA = parseFloat(process.env.SIM_MAX_NET_DELTA || '500');
+    const MAX_NOTIONAL = parseFloat(process.env.SIM_MAX_NOTIONAL || '500000');
+
+    try {
+      const result = await db.query(
+        `SELECT
+           COALESCE(SUM(CASE
+             WHEN contract_type IN ('CALL','STOCK') THEN COALESCE(delta_at_entry, 0.5) * quantity * 100
+             WHEN contract_type = 'PUT' THEN -COALESCE(delta_at_entry, 0.5) * quantity * 100
+             WHEN contract_type = 'CREDIT_SPREAD' THEN COALESCE(delta_at_entry, 0.1) * quantity * 100
+             ELSE 0
+           END), 0) as net_delta,
+           COALESCE(SUM(avg_price * quantity * CASE WHEN contract_type = 'STOCK' THEN 1 ELSE 100 END), 0) as total_notional
+         FROM sim_positions
+         WHERE user_id = $1 AND status = 'OPEN'`,
+        [userId]
+      );
+
+      const { net_delta, total_notional } = result.rows[0];
+      const netDelta = parseFloat(net_delta);
+      const totalNotional = parseFloat(total_notional);
+
+      if (Math.abs(netDelta) > MAX_NET_DELTA) {
+        return {
+          allowed: false,
+          reason: `Portfolio net delta ${netDelta.toFixed(0)} exceeds limit of ${MAX_NET_DELTA} — reduce directional exposure before adding positions`,
+        };
+      }
+
+      if (totalNotional > MAX_NOTIONAL) {
+        return {
+          allowed: false,
+          reason: `Portfolio notional exposure $${totalNotional.toFixed(0)} exceeds limit of $${MAX_NOTIONAL}`,
+        };
+      }
+
+      return { allowed: true, netDelta, totalNotional };
+    } catch (err) {
+      logger.warn(`Portfolio Greeks check failed: ${err.message} — allowing trade`, 'decision-router');
+      return { allowed: true };
     }
   }
 

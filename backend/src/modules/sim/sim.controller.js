@@ -8,6 +8,7 @@ const symbolStateService = require('./symbol-state.service');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * GET /api/sim/account
@@ -18,6 +19,7 @@ async function getAccountState(req, res) {
     res.json(account);
   } catch (error) {
     logger.error(`Get account state failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get account state' });
   }
 }
@@ -32,6 +34,7 @@ async function resetAccount(req, res) {
     res.json({ message: 'Account reset to initial state', account });
   } catch (error) {
     logger.error(`Reset account failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to reset account' });
   }
 }
@@ -50,6 +53,7 @@ async function getPositions(req, res) {
     res.json(result);
   } catch (error) {
     logger.error(`Get positions failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get positions' });
   }
 }
@@ -68,6 +72,7 @@ async function getOrders(req, res) {
     res.json(result);
   } catch (error) {
     logger.error(`Get orders failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get orders' });
   }
 }
@@ -106,6 +111,7 @@ async function getTrades(req, res) {
     });
   } catch (error) {
     logger.error(`Get trades failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get trades' });
   }
 }
@@ -125,6 +131,7 @@ async function getEquityCurve(req, res) {
     res.json(data);
   } catch (error) {
     logger.error(`Get equity curve failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get equity curve' });
   }
 }
@@ -154,17 +161,30 @@ async function getStrategyBreakdown(req, res) {
       [req.user.id]
     );
 
-    // Calculate drawdown per strategy
-    const strategies = result.rows.map(row => ({
-      ...row,
-      profit_factor: parseFloat(row.winning_trades) > 0 && parseFloat(row.losing_trades) > 0
-        ? Math.abs(parseFloat(row.best_trade) * parseFloat(row.winning_trades) / (parseFloat(row.worst_trade) * parseFloat(row.losing_trades)))
-        : null,
-    }));
+    // Fetch per-strategy win/loss totals for correct profit factor
+    const pfResult = await db.query(
+      `SELECT strategy,
+              COALESCE(SUM(pnl) FILTER (WHERE pnl > 0), 0) as total_win_pnl,
+              ABS(COALESCE(SUM(pnl) FILTER (WHERE pnl <= 0), 0)) as total_loss_pnl
+       FROM sim_trades WHERE user_id = $1 GROUP BY strategy`,
+      [req.user.id]
+    );
+    const pfMap = new Map(pfResult.rows.map(r => [r.strategy, r]));
+
+    const strategies = result.rows.map(row => {
+      const pf = pfMap.get(row.strategy);
+      return {
+        ...row,
+        profit_factor: pf && parseFloat(pf.total_loss_pnl) > 0
+          ? parseFloat(pf.total_win_pnl) / parseFloat(pf.total_loss_pnl)
+          : null,
+      };
+    });
 
     res.json(strategies);
   } catch (error) {
     logger.error(`Get strategy breakdown failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get strategy breakdown' });
   }
 }
@@ -200,6 +220,7 @@ async function getDteBreakdown(req, res) {
     res.json(result.rows);
   } catch (error) {
     logger.error(`Get DTE breakdown failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get DTE breakdown' });
   }
 }
@@ -214,6 +235,7 @@ async function processPending(req, res) {
     res.json({ processed: results.length, results });
   } catch (error) {
     logger.error(`Process pending failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to process pending webhooks' });
   }
 }
@@ -233,6 +255,7 @@ async function toggleKillSwitch(req, res) {
     res.json({ killSwitchActive: account.kill_switch_active, account });
   } catch (error) {
     logger.error(`Toggle kill switch failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to toggle kill switch' });
   }
 }
@@ -257,6 +280,7 @@ async function startReplay(req, res) {
     res.status(202).json({ message: 'Replay started', run });
   } catch (error) {
     logger.error(`Start replay failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to start replay' });
   }
 }
@@ -285,6 +309,7 @@ async function getSimRuns(req, res) {
     });
   } catch (error) {
     logger.error(`Get sim runs failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
     res.status(500).json({ error: 'Failed to get simulation runs' });
   }
 }

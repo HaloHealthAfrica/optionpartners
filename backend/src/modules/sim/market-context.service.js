@@ -2,6 +2,7 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * Queries the shared Neon Postgres database for the latest IV, GEX,
@@ -31,6 +32,7 @@ class MarketContextService {
       return rows[0] || null;
     } catch (err) {
       logger.error(`[MarketContext] IV fetch failed for ${symbol}: ${err.message}`, 'market-context');
+      Sentry.captureException(err, { tags: { module: 'market-context' } });
       return null;
     }
   }
@@ -51,6 +53,7 @@ class MarketContextService {
       return rows[0] || null;
     } catch (err) {
       logger.error(`[MarketContext] GEX fetch failed for ${symbol}: ${err.message}`, 'market-context');
+      Sentry.captureException(err, { tags: { module: 'market-context' } });
       return null;
     }
   }
@@ -72,6 +75,7 @@ class MarketContextService {
       return rows[0] || null;
     } catch (err) {
       logger.error(`[MarketContext] Flow fetch failed for ${symbol}: ${err.message}`, 'market-context');
+      Sentry.captureException(err, { tags: { module: 'market-context' } });
       return null;
     }
   }
@@ -90,6 +94,7 @@ class MarketContextService {
       return rows[0] || null;
     } catch (err) {
       logger.error(`[MarketContext] Macro fetch failed: ${err.message}`, 'market-context');
+      Sentry.captureException(err, { tags: { module: 'market-context' } });
       return null;
     }
   }
@@ -99,24 +104,26 @@ class MarketContextService {
    * Non-blocking — returns null for any piece that fails.
    */
   async getFullContext(symbol) {
-    const [iv, gex, flow] = await Promise.all([
+    const [iv, gex, flow, macro] = await Promise.all([
       this.getLatestIV(symbol),
       this.getLatestGEX(symbol),
       this.getLatestFlow(symbol),
+      this.getLatestMacro(),
     ]);
 
-    const hasData = !!(iv || gex || flow);
+    const hasData = !!(iv || gex || flow || macro);
 
     if (hasData) {
       logger.info(
         `[MarketContext] ${symbol}: IV=${iv ? `rank=${iv.iv_rank?.toFixed(0)}` : 'N/A'} ` +
         `GEX=${gex ? `net=${gex.net_gex?.toFixed(0)} flip=${gex.flip_price}` : 'N/A'} ` +
-        `Flow=${flow ? `sentiment=${flow.sentiment} pcr=${flow.put_call_ratio?.toFixed(2)}` : 'N/A'}`,
+        `Flow=${flow ? `sentiment=${flow.sentiment} pcr=${flow.put_call_ratio?.toFixed(2)}` : 'N/A'} ` +
+        `Macro=${macro ? `spread=${macro.yield_spread}` : 'N/A'}`,
         'market-context'
       );
     }
 
-    return { iv, gex, flow, hasData };
+    return { iv, gex, flow, macro, hasData };
   }
 
   /**

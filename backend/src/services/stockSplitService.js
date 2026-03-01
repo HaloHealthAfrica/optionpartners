@@ -2,6 +2,7 @@ const StockSplit = require('../models/StockSplit');
 const Trade = require('../models/Trade');
 const finnhub = require('../utils/finnhub');
 const db = require('../config/database');
+const Sentry = require('@sentry/node');
 
 class StockSplitService {
   constructor() {
@@ -59,6 +60,7 @@ class StockSplitService {
           
         } catch (error) {
           console.error(`[StockSplitService] Error checking ${symbol}:`, error.message);
+          Sentry.captureException(error, { tags: { module: 'stock-split' } });
           await StockSplit.updateCheckLog(symbol, 0, error.message);
         }
       }
@@ -71,6 +73,7 @@ class StockSplitService {
       
     } catch (error) {
       console.error('[StockSplitService] Error in checkForStockSplits:', error);
+      Sentry.captureException(error, { tags: { module: 'stock-split' } });
       throw error;
     }
   }
@@ -97,6 +100,7 @@ class StockSplitService {
       return split;
     } catch (error) {
       console.error(`[StockSplitService] Error processing split for ${symbol}:`, error);
+      Sentry.captureException(error, { tags: { module: 'stock-split' } });
       throw error;
     }
   }
@@ -176,6 +180,35 @@ class StockSplitService {
         console.log(`[StockSplitService] Adjusted trade ${trade.id}: Qty ${originalQuantity} -> ${adjustedTrade.quantity}, Price ${originalEntryPrice} -> ${adjustedTrade.entry_price}`);
       }
       
+      // Also adjust any open sim_positions for this symbol
+      const simPositions = await client.query(
+        `SELECT id, quantity, avg_price, strike, strike_short, strike_long,
+                highest_price, lowest_price, stop_loss, take_profit
+         FROM sim_positions
+         WHERE underlying_symbol = $1 AND status = 'OPEN'
+           AND opened_at <= $2`,
+        [split.symbol, split.split_date]
+      );
+
+      for (const pos of simPositions.rows) {
+        const ratio = split.ratio || (split.to_factor / split.from_factor);
+        await client.query(
+          `UPDATE sim_positions
+           SET quantity = CEIL(quantity * $2),
+               avg_price = avg_price / $2,
+               strike = CASE WHEN strike IS NOT NULL THEN strike / $2 ELSE NULL END,
+               strike_short = CASE WHEN strike_short IS NOT NULL THEN strike_short / $2 ELSE NULL END,
+               strike_long = CASE WHEN strike_long IS NOT NULL THEN strike_long / $2 ELSE NULL END,
+               highest_price = CASE WHEN highest_price IS NOT NULL THEN highest_price * $2 ELSE NULL END,
+               lowest_price = CASE WHEN lowest_price IS NOT NULL THEN lowest_price * $2 ELSE NULL END,
+               stop_loss = CASE WHEN stop_loss IS NOT NULL THEN stop_loss * $2 ELSE NULL END,
+               take_profit = CASE WHEN take_profit IS NOT NULL THEN take_profit * $2 ELSE NULL END
+           WHERE id = $1`,
+          [pos.id, ratio]
+        );
+        console.log(`[StockSplitService] Adjusted sim_position ${pos.id} for ${split.symbol} split (ratio=${ratio})`);
+      }
+
       // Mark split as processed
       await StockSplit.markAsProcessed(split.id);
       
@@ -186,6 +219,7 @@ class StockSplitService {
     } catch (error) {
       await client.query('ROLLBACK');
       console.error(`[StockSplitService] Error adjusting trades for split:`, error);
+      Sentry.captureException(error, { tags: { module: 'stock-split' } });
       throw error;
     } finally {
       client.release();
@@ -199,6 +233,7 @@ class StockSplitService {
     // Run immediately on startup
     this.checkForStockSplits().catch(error => {
       console.error('[StockSplitService] Initial check failed:', error);
+      Sentry.captureException(error, { tags: { module: 'stock-split' } });
     });
     
     // Then run daily at 2 AM
@@ -218,13 +253,15 @@ class StockSplitService {
     setTimeout(() => {
       this.checkForStockSplits().catch(error => {
         console.error('[StockSplitService] Scheduled check failed:', error);
+        Sentry.captureException(error, { tags: { module: 'stock-split' } });
       });
       
       // Then schedule daily checks
       this.checkInterval = setInterval(() => {
-        this.checkForStockSplits().catch(error => {
-          console.error('[StockSplitService] Daily check failed:', error);
-        });
+      this.checkForStockSplits().catch(error => {
+        console.error('[StockSplitService] Daily check failed:', error);
+        Sentry.captureException(error, { tags: { module: 'stock-split' } });
+      });
       }, 24 * 60 * 60 * 1000); // 24 hours
       
     }, timeUntilCheck);
@@ -283,6 +320,7 @@ class StockSplitService {
       return splits || [];
     } catch (error) {
       console.error(`[StockSplitService] Error in manual check for ${symbol}:`, error);
+      Sentry.captureException(error, { tags: { module: 'stock-split' } });
       await StockSplit.updateCheckLog(symbol, 0, error.message);
       throw error;
     }
