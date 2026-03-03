@@ -6,6 +6,7 @@ import type { DataOrchestrator } from '../services/data-orchestrator';
 import type { MarketDataAdapter } from '../providers/marketdata/adapter';
 import type { CacheManager } from '../cache/cache-manager';
 import type { CircuitBreaker } from '../services/circuit-breaker';
+import { ServiceUnavailableError } from '../providers/base-provider';
 
 import {
   symbolParamSchema,
@@ -400,6 +401,12 @@ export function createV1Routes(ctx: V1RouteContext): Router {
 function handleRouteError(res: Response, err: unknown): void {
   if (err instanceof ZodError) {
     errorJson(res, 400, err.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; '));
+    return;
+  }
+
+  // Handle ServiceUnavailableError with explicit 503 status
+  if (err instanceof ServiceUnavailableError) {
+    errorJson(res, 503, err.message);
     return;
   }
 

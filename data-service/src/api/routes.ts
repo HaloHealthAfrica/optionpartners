@@ -4,7 +4,11 @@ import type { SnapshotStore } from '../persistence/snapshot-store';
 import type { CboeClient } from '../providers/cboe-client';
 import type { FredClient } from '../providers/fred-client';
 import type { WorkerManager } from '../workers/worker-manager';
-import type { Timeframe } from '../types';
+import type { Timeframe, ProviderName } from '../types';
+import { circuitBreaker } from '../services/circuit-breaker';
+import { ServiceUnavailableError } from '../providers/base-provider';
+
+const VALID_PROVIDERS: ProviderName[] = ['twelvedata', 'unusual_whales', 'polygon', 'cboe', 'fred'];
 
 type SymbolParams = { symbol: string };
 
@@ -455,10 +459,71 @@ export function createRoutes(
     });
   });
 
+  // --- Circuit breaker management endpoints ---
+
+  router.post('/admin/circuit-breaker/reset', (req: Request, res: Response) => {
+    try {
+      const { provider } = req.body as { provider?: string };
+      
+      if (provider) {
+        if (!VALID_PROVIDERS.includes(provider as ProviderName)) {
+          res.status(400).json({ error: `Invalid provider: ${provider}. Valid: ${VALID_PROVIDERS.join(', ')}` });
+          return;
+        }
+        circuitBreaker.reset(provider as ProviderName);
+        res.json({
+          message: `Circuit breaker reset for provider: ${provider}`,
+          provider,
+          timestamp: Date.now(),
+        });
+      } else {
+        // Reset all circuit breakers
+        circuitBreaker.resetAll();
+        res.json({
+          message: 'All circuit breakers reset',
+          timestamp: Date.now(),
+        });
+      }
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  router.get('/admin/circuit-breaker/status', (_req: Request, res: Response) => {
+    try {
+      const allStates = circuitBreaker.getAllStates();
+      const states: Record<string, any> = {};
+      
+      for (const [provider, stats] of allStates.entries()) {
+        states[provider] = {
+          state: stats.state,
+          failures: stats.failures,
+          successes: stats.successes,
+          lastFailureTime: stats.lastFailureTime,
+          lastSuccessTime: stats.lastSuccessTime,
+          halfOpenAttempts: stats.halfOpenAttempts,
+        };
+      }
+      
+      res.json({
+        circuitBreakers: states,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
   return router;
 }
 
 function handleError(res: Response, err: unknown): void {
+  // Handle ServiceUnavailableError with explicit 503 status
+  if (err instanceof ServiceUnavailableError) {
+    res.status(503).json({ error: err.message, timestamp: Date.now() });
+    return;
+  }
+  
   const message = err instanceof Error ? err.message : 'Unknown error';
   const status = message.includes('CIRCUIT_OPEN') ? 503 : message.includes('RATE_LIMITED') ? 429 : 500;
   res.status(status).json({ error: message, timestamp: Date.now() });

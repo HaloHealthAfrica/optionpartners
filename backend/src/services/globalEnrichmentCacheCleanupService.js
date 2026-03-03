@@ -1,5 +1,6 @@
 const globalEnrichmentCache = require('./globalEnrichmentCacheService');
 const logger = require('../utils/logger');
+const Sentry = require('@sentry/node');
 
 class GlobalEnrichmentCacheCleanupService {
     constructor() {
@@ -57,6 +58,7 @@ class GlobalEnrichmentCacheCleanupService {
             }
         } catch (error) {
             logger.logError('Error during global enrichment cache cleanup:', error);
+            Sentry.captureException(error, { tags: { module: 'enrichment-cache-cleanup' } });
         }
     }
 

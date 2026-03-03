@@ -7,6 +7,7 @@ const calibrationStore = require('./calibration-store.service');
 const signalQuality = require('./signal-quality.service');
 const guardEffectiveness = require('./guard-effectiveness.service');
 const logger = require('../../../utils/logger');
+const Sentry = require('@sentry/node');
 
 async function getCalibration(req, res) {
   try {
@@ -21,6 +22,7 @@ async function getCalibration(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Calibration failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -38,6 +40,7 @@ async function getRegimeEdge(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Regime edge analysis failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -55,6 +58,7 @@ async function getTemporalEdge(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Temporal edge analysis failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -90,6 +94,7 @@ async function getSummary(req, res) {
     });
   } catch (err) {
     logger.error(`Adaptive intelligence summary failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -100,6 +105,7 @@ async function getCalibrationStatus(req, res) {
     res.json(status);
   } catch (err) {
     logger.error(`Calibration status failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -110,6 +116,7 @@ async function getActiveWeights(req, res) {
     res.json({ weights: weights || [], hasActiveWeights: !!weights });
   } catch (err) {
     logger.error(`Get active weights failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -127,6 +134,7 @@ async function applyCalibration(req, res) {
     res.json({ ...result, calibration: calResult });
   } catch (err) {
     logger.error(`Apply calibration failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -137,6 +145,7 @@ async function revertCalibration(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Revert calibration failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -151,6 +160,7 @@ async function toggleAutoCalibration(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Toggle auto-calibration failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -165,6 +175,7 @@ async function setCalibrationThreshold(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Set threshold failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -176,6 +187,7 @@ async function getCalibrationLog(req, res) {
     res.json({ log, count: log.length });
   } catch (err) {
     logger.error(`Get calibration log failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -188,6 +200,7 @@ async function getSignalQuality(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Signal quality analysis failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }
@@ -199,6 +212,7 @@ async function getGuardEffectiveness(req, res) {
     res.json(result);
   } catch (err) {
     logger.error(`Guard effectiveness analysis failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
     res.status(500).json({ error: err.message });
   }
 }

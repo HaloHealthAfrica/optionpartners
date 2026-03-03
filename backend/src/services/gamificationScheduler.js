@@ -3,6 +3,7 @@ const ChallengeService = require('./challengeService');
 const LeaderboardService = require('./leaderboardService');
 const PeerGroupService = require('./peerGroupService');
 const db = require('../config/database');
+const Sentry = require('@sentry/node');
 
 class GamificationScheduler {
   
@@ -33,6 +34,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('[ERROR] Error running gamification scheduled tasks:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -48,6 +50,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error updating challenge progress:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -76,6 +79,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error updating trading streaks:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -106,6 +110,7 @@ class GamificationScheduler {
           achievementsAwarded += newAchievements.length;
         } catch (error) {
           console.error(`Error checking achievements for user ${user.user_id}:`, error);
+          Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
         }
       }
       
@@ -113,6 +118,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error checking achievements:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -146,6 +152,7 @@ class GamificationScheduler {
           await PeerGroupService.assignUserToPeerGroups(user.id);
         } catch (error) {
           console.error(`Error assigning user ${user.id} to peer groups:`, error);
+          Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
         }
       }
       
@@ -153,6 +160,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error assigning users to peer groups:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -189,6 +197,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error creating weekly challenges:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -223,6 +232,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error running maintenance:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -239,6 +249,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error updating user levels:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -268,6 +279,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error cleaning up notifications:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
     }
   }
   
@@ -333,6 +345,7 @@ class GamificationScheduler {
       
     } catch (error) {
       console.error('Error generating weekly report:', error);
+      Sentry.captureException(error, { tags: { module: 'gamification-scheduler' } });
       return null;
     }
   }

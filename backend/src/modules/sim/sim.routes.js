@@ -38,8 +38,9 @@ router.post('/kill-switch', simController.toggleKillSwitch);
 router.post('/replay', simController.startReplay);
 router.get('/runs', simController.getSimRuns);
 
-// Status
+// Status & health
 router.get('/status', simController.getStatus);
+router.get('/health/state', simController.getStateHealth);
 
 // Warmup: seed symbol state with price + chain data from data service
 router.post('/warmup/:symbol', simController.warmupSymbol);

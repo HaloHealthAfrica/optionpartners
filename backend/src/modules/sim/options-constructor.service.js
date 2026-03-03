@@ -3,6 +3,7 @@
 const db = require('../../config/database');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * Deterministic Options Constructor.
@@ -78,6 +79,7 @@ class OptionsConstructor {
       return this._constructSingleLeg(signal, recipe, expirationContracts, expiration, regimeContext);
     } catch (err) {
       logger.error(`Options constructor error: ${err.message}`, 'options-constructor');
+      Sentry.captureException(err, { tags: { module: 'options-constructor' } });
       return { success: false, reason: `Constructor error: ${err.message}` };
     }
   }

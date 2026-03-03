@@ -1,7 +1,7 @@
-import { createChildLogger } from '../utils/logger';
+import { createChildLogger, logger } from '../utils/logger';
 import { circuitBreaker } from './circuit-breaker';
 import { rateLimiter } from './rate-limiter';
-import { ProviderError } from '../providers/base-provider';
+import { ProviderError, ServiceUnavailableError } from '../providers/base-provider';
 import { cacheManager } from '../cache';
 import { snapshotStore } from '../persistence';
 import type { MacroRegimeService, MacroData } from './macro-regime';
@@ -37,11 +37,26 @@ export class DataOrchestrator {
   private inflightRequests = new Map<string, Promise<unknown>>();
   private requestMetrics = new Map<ProviderName, { successes: number; failures: number; totalLatencyMs: number }>();
   private macroRegime: MacroRegimeService | null = null;
+  private providerRegistrationInfo = new Map<ProviderName, { registered: boolean; reason?: string; apiKeyConfigured: boolean }>();
+  private lastErrors = new Map<ProviderName, string>();
 
   registerProvider(provider: MarketDataProvider): void {
     this.providers.push(provider);
     this.requestMetrics.set(provider.name, { successes: 0, failures: 0, totalLatencyMs: 0 });
+    this.providerRegistrationInfo.set(provider.name, { registered: true, apiKeyConfigured: true });
     log.info({ provider: provider.name }, 'Provider registered');
+  }
+
+  trackProviderRegistrationFailure(providerName: ProviderName, reason: string, apiKeyConfigured: boolean): void {
+    this.providerRegistrationInfo.set(providerName, { registered: false, reason, apiKeyConfigured });
+  }
+
+  getAllProviderNames(): ProviderName[] {
+    const names = new Set<ProviderName>(this.providers.map(p => p.name));
+    for (const name of this.providerRegistrationInfo.keys()) {
+      names.add(name);
+    }
+    return Array.from(names);
   }
 
   setMacroRegimeService(service: MacroRegimeService): void {
@@ -158,22 +173,64 @@ export class DataOrchestrator {
   // --- Health & metrics ---
 
   getProviderHealths(): ProviderHealth[] {
-    return this.providers.map((p) => {
-      const metrics = this.requestMetrics.get(p.name);
+    // Get all possible provider names (registered and unregistered)
+    const allProviderNames = this.getAllProviderNames();
+    
+    // Log diagnostic warnings if no providers are registered
+    if (this.providers.length === 0) {
+      // Check if any providers failed to register
+      const failedProviders = Array.from(this.providerRegistrationInfo.entries())
+        .filter(([_, info]) => !info.registered);
+      
+      if (failedProviders.length > 0) {
+        failedProviders.forEach(([providerName, info]) => {
+          logger.warn(
+            { provider: providerName, reason: info.reason, apiKeyConfigured: info.apiKeyConfigured },
+            `Provider ${providerName} failed to register - ${info.reason}`,
+          );
+        });
+        
+        logger.warn('Zero data providers registered - service will not be able to fetch real market data');
+      }
+    }
+    
+    return allProviderNames.map((providerName) => {
+      const provider = this.providers.find(p => p.name === providerName);
+      const registrationInfo = this.providerRegistrationInfo.get(providerName);
+      const metrics = this.requestMetrics.get(providerName);
       const total = (metrics?.successes ?? 0) + (metrics?.failures ?? 0);
-      const cbStats = circuitBreaker.getStats(p.name);
+      const cbStats = circuitBreaker.getStats(providerName);
+      const circuitState = circuitBreaker.getState(providerName);
+      const lastError = this.lastErrors.get(providerName);
+
+      // Determine circuit breaker reason if OPEN
+      let circuitBreakerReason: string | undefined;
+      if (circuitState === 'open') {
+        const failures = circuitBreaker.getConsecutiveFailures(providerName);
+        if (lastError) {
+          circuitBreakerReason = `${failures} consecutive failures - ${lastError}`;
+        } else {
+          circuitBreakerReason = `${failures} consecutive failures`;
+        }
+      }
 
       return {
-        name: p.name,
-        healthy: circuitBreaker.canExecute(p.name),
-        circuitState: circuitBreaker.getState(p.name),
-        successRate: total > 0 ? (metrics!.successes / total) * 100 : 100,
-        avgLatencyMs: total > 0 ? Math.round(metrics!.totalLatencyMs / total) : 0,
-        rateLimitRemaining: rateLimiter.getRemaining(p.name),
-        rateLimitMax: rateLimiter.getMax(p.name),
+        name: providerName,
+        healthy: provider ? circuitBreaker.canExecute(providerName) : false,
+        circuitState,
+        successRate: total > 0 && metrics ? (metrics.successes / total) * 100 : 100,
+        avgLatencyMs: total > 0 && metrics ? Math.round(metrics.totalLatencyMs / total) : 0,
+        rateLimitRemaining: rateLimiter.getRemaining(providerName),
+        rateLimitMax: rateLimiter.getMax(providerName),
         lastSuccess: cbStats?.lastSuccessTime ?? null,
         lastFailure: cbStats?.lastFailureTime ?? null,
-        consecutiveFailures: circuitBreaker.getConsecutiveFailures(p.name),
+        consecutiveFailures: circuitBreaker.getConsecutiveFailures(providerName),
+        // Enhanced diagnostics
+        registered: registrationInfo?.registered ?? false,
+        registrationReason: registrationInfo?.reason,
+        apiKeyConfigured: registrationInfo?.apiKeyConfigured ?? false,
+        circuitBreakerReason,
+        lastErrorMessage: lastError,
       };
     });
   }
@@ -249,6 +306,15 @@ export class DataOrchestrator {
     );
 
     if (eligible.length === 0) {
+      // Check if no providers are registered at all
+      const totalProviders = this.providers.length;
+      if (totalProviders === 0) {
+        throw new ServiceUnavailableError(
+          'Market data service unavailable - no data providers configured',
+        );
+      }
+      
+      // Providers exist but all have circuit breakers open or don't support this capability
       throw new ProviderError(
         'twelvedata',
         'CIRCUIT_OPEN',
@@ -279,6 +345,10 @@ export class DataOrchestrator {
 
         const error = err instanceof Error ? err : new Error(String(err));
         errors.push(error);
+        
+        // Store last error message for diagnostics (sanitize sensitive data)
+        const errorMessage = this.sanitizeErrorMessage(error.message);
+        this.lastErrors.set(provider.name, errorMessage);
 
         log.warn(
           { provider: provider.name, capability, error: error.message, latencyMs },
@@ -305,5 +375,14 @@ export class DataOrchestrator {
       metrics.failures++;
       metrics.totalLatencyMs += latencyMs;
     }
+  }
+
+  private sanitizeErrorMessage(message: string): string {
+    // Remove potential API keys or tokens from error messages
+    return message
+      .replace(/apikey[=:]\s*[a-zA-Z0-9_-]+/gi, 'apikey=***')
+      .replace(/token[=:]\s*[a-zA-Z0-9_-]+/gi, 'token=***')
+      .replace(/authorization:\s*bearer\s+[a-zA-Z0-9_-]+/gi, 'authorization: bearer ***')
+      .substring(0, 200); // Limit length to avoid huge error messages
   }
 }

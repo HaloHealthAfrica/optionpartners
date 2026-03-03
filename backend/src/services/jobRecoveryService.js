@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const jobQueue = require('../utils/jobQueue');
 const logger = require('../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * Service to automatically recover from stuck enrichment jobs
@@ -31,6 +32,7 @@ class JobRecoveryService {
         await this.runRecovery();
       } catch (error) {
         logger.logError('Job recovery failed:', error.message);
+        Sentry.captureException(error, { tags: { module: 'job-recovery' } });
       }
     }, 5 * 60 * 1000); // 5 minutes
 
@@ -101,6 +103,7 @@ class JobRecoveryService {
 
     } catch (error) {
       logger.logError('Recovery process failed:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
     }
   }
 
@@ -124,6 +127,7 @@ class JobRecoveryService {
       return stuckJobs.rows.length;
     } catch (error) {
       logger.logError('Failed to reset stuck jobs:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
       return 0;
     }
   }
@@ -174,12 +178,14 @@ class JobRecoveryService {
           logger.logImport(`Created jobs for trade ${trade.id} (${trade.symbol})`);
         } catch (error) {
           logger.logError(`Failed to create jobs for trade ${trade.id}:`, error.message);
+          Sentry.captureException(error, { tags: { module: 'job-recovery' } });
         }
       }
 
       return jobsCreated;
     } catch (error) {
       logger.logError('Failed to create missing jobs:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
       return 0;
     }
   }
@@ -210,6 +216,7 @@ class JobRecoveryService {
       return orphanedJobs.rows.length;
     } catch (error) {
       logger.logError('Failed to cleanup orphaned jobs:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
       return 0;
     }
   }
@@ -249,6 +256,7 @@ class JobRecoveryService {
       return completedTrades.rows.length;
     } catch (error) {
       logger.logError('Failed to fix inconsistent trades:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
       return 0;
     }
   }
@@ -273,6 +281,7 @@ class JobRecoveryService {
       return oldFailedJobs.rows.length;
     } catch (error) {
       logger.logError('Failed to cleanup old failed jobs:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
       return 0;
     }
   }
@@ -292,6 +301,7 @@ class JobRecoveryService {
       }
     } catch (error) {
       logger.logError('Failed to ensure background worker is running:', error.message);
+      Sentry.captureException(error, { tags: { module: 'job-recovery' } });
     }
   }
 

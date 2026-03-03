@@ -3,6 +3,7 @@
 const db = require('../../config/database');
 const { normalizeDirection, STRAT_PLAN_EVENTS } = require('../webhooks/indicator-detector');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 const PLAN_EVENT_SET = STRAT_PLAN_EVENTS;
 
@@ -133,6 +134,9 @@ class SymbolStateService {
         break;
       case 'PIVOT_MB':
         this._applyPivotMb(state, rawPayload);
+        break;
+      case 'SQUEEZE_PRO':
+        this._applySqueezePro(state, rawPayload);
         break;
       default:
         break;
@@ -572,6 +576,87 @@ class SymbolStateService {
     state.entry_signal_at = new Date().toISOString();
   }
 
+  // ── SQUEEZE_PRO: squeeze release entry/exit signal ──────────────────
+
+  _applySqueezePro(state, payload) {
+    const direction = normalizeDirection(payload.direction);
+    const signalType = (payload.signal_type || '').toUpperCase();
+    const isExit = signalType === 'EXIT';
+
+    const squeeze = payload.squeeze || {};
+    const levels = payload.levels || {};
+    const trend = payload.trend || {};
+    const volumeFilter = payload.volume_filter || {};
+
+    const entry = parseFloat(levels.entry || payload.close) || null;
+    const slowEma = parseFloat(trend.slow_ema) || null;
+    const swingStop = parseFloat(levels.swing_stop) || null;
+
+    let stopLoss = null;
+    if (slowEma && swingStop && entry) {
+      stopLoss = Math.abs(entry - slowEma) < Math.abs(entry - swingStop) ? slowEma : swingStop;
+    } else {
+      stopLoss = slowEma || swingStop || null;
+    }
+
+    if (entry) state.last_price = entry;
+
+    // Update local bias from price vs macro EMA
+    const macroEma = parseFloat(trend.macro_ema) || null;
+    if (macroEma && entry) {
+      if (entry > macroEma) state.local_bias = 'BULLISH';
+      else if (entry < macroEma) state.local_bias = 'BEARISH';
+      else state.local_bias = 'NEUTRAL';
+      state.local_updated_at = new Date().toISOString();
+    }
+
+    if (!isExit) {
+      const compressionScore = parseFloat(squeeze.compression_score) || 0;
+      const targets = [];
+      const t1 = parseFloat(levels.target_1);
+      const t2 = parseFloat(levels.target_2);
+      if (!isNaN(t1)) targets.push(t1);
+      if (!isNaN(t2)) targets.push(t2);
+
+      let confidence;
+      if (compressionScore >= 80) {
+        confidence = Math.min(95, 60 + Math.round(compressionScore * 0.4));
+      } else if (compressionScore >= 60) {
+        confidence = Math.min(80, 50 + Math.round(compressionScore * 0.35));
+      } else {
+        confidence = Math.min(65, 40 + Math.round(compressionScore * 0.3));
+      }
+
+      const volumeRatio = parseFloat(volumeFilter.volume_ratio) || 0;
+      if (volumeRatio >= 1.5) {
+        confidence = Math.min(100, confidence + 5);
+      }
+
+      state.latest_entry_signal = {
+        direction,
+        confidence,
+        score: compressionScore,
+        entry_price: entry,
+        stop_loss: stopLoss,
+        target_1: targets[0] || null,
+        target_2: targets[1] || null,
+        rr_ratio: (entry && stopLoss && targets[0])
+          ? parseFloat((Math.abs(targets[0] - entry) / Math.abs(entry - stopLoss)).toFixed(2))
+          : null,
+        max_loss: null,
+        market_session: null,
+        volume_vs_avg: volumeRatio || null,
+        atr: null,
+        pattern: 'SQUEEZE_PRO',
+        strategy: 'squeeze_pro',
+        trend_alignment: trend.alignment || null,
+        timeframe: payload.interval || null,
+      };
+
+      state.entry_signal_at = new Date().toISOString();
+    }
+  }
+
   // ── MARKET_CONTEXT: rich context data (regime, levels, market bias) ──
 
   _applyMarketContext(state, payload) {
@@ -749,6 +834,7 @@ class SymbolStateService {
       );
     } catch (err) {
       logger.error(`Failed to persist symbol state for ${symbol}: ${err.message}`, 'symbol-state');
+      Sentry.captureException(err, { tags: { module: 'symbol-state' } });
     }
   }
 

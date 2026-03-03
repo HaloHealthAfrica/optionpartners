@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const backupService = require('./backup.service');
 const db = require('../config/database');
+const Sentry = require('@sentry/node');
 
 /**
  * Backup Scheduler Service
@@ -38,6 +39,7 @@ class BackupScheduler {
       console.log('[BACKUP SCHEDULER] Initialized successfully');
     } catch (error) {
       console.error('[BACKUP SCHEDULER] Error initializing:', error);
+      Sentry.captureException(error, { tags: { module: 'backup-scheduler' } });
     }
   }
 
@@ -67,6 +69,7 @@ class BackupScheduler {
       console.log(`[BACKUP SCHEDULER] Schedule reloaded: ${settings.schedule} backups, ${settings.retention_days} days retention`);
     } catch (error) {
       console.error('[BACKUP SCHEDULER] Error reloading schedule:', error);
+      Sentry.captureException(error, { tags: { module: 'backup-scheduler' } });
     }
   }
 
@@ -122,6 +125,7 @@ class BackupScheduler {
         console.log(`[BACKUP SCHEDULER] Cleanup complete: ${deletedCount} old backup(s) deleted`);
       } catch (error) {
         console.error('[BACKUP SCHEDULER] Error during cleanup:', error);
+        Sentry.captureException(error, { tags: { module: 'backup-scheduler' } });
       }
     });
 
@@ -151,6 +155,7 @@ class BackupScheduler {
       console.log(`[BACKUP SCHEDULER] Backup completed: ${result.filename} (${result.size} bytes)`);
     } catch (error) {
       console.error('[BACKUP SCHEDULER] Error executing backup:', error);
+      Sentry.captureException(error, { tags: { module: 'backup-scheduler' } });
     }
   }
 

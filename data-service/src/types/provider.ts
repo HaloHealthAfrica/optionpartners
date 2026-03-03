@@ -35,6 +35,12 @@ export interface ProviderHealth {
   lastSuccess: number | null;
   lastFailure: number | null;
   consecutiveFailures: number;
+  // Enhanced diagnostics for configuration issues
+  registered: boolean;
+  registrationReason?: string;
+  apiKeyConfigured: boolean;
+  circuitBreakerReason?: string;
+  lastErrorMessage?: string;
 }
 
 export interface ProviderConfig {

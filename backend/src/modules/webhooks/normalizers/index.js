@@ -8,11 +8,12 @@ const orb = require('./orb.normalizer');
 const signals = require('./signals.normalizer');
 const mtfBias = require('./mtf-bias.normalizer');
 const pivotMb = require('./pivot-mb.normalizer');
+const squeezePro = require('./squeeze-pro.normalizer');
 const generic = require('./generic.normalizer');
 
 /**
  * @typedef {Object} NormalizedIndicatorSignal
- * @property {string} source           - Indicator source ID (SATY_PHASE, STRAT, MTF_BIAS, TREND, ORB, SIGNALS, UNKNOWN)
+ * @property {string} source           - Indicator source ID (SATY_PHASE, STRAT, MTF_BIAS, TREND, ORB, SIGNALS, SQUEEZE_PRO, UNKNOWN)
  * @property {string} symbol           - Ticker symbol (uppercased)
  * @property {'long'|'short'|null} direction - Normalized direction
  * @property {'BUY'|'SELL'|'CLOSE'|null} action - Mapped from direction
@@ -35,6 +36,7 @@ const NORMALIZERS = {
   ORB: orb,
   SIGNALS: signals,
   PIVOT_MB: pivotMb,
+  SQUEEZE_PRO: squeezePro,
   UNKNOWN: generic,
 };
 

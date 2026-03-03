@@ -9,6 +9,7 @@
  */
 
 const DividendService = require('./dividendService');
+const Sentry = require('@sentry/node');
 
 // Run daily at 6 AM (in milliseconds from midnight)
 const SCHEDULER_HOUR = 6; // 6 AM
@@ -59,6 +60,7 @@ class DividendScheduler {
       return summary;
     } catch (error) {
       console.error(`${logPrefix} [ERROR] Scheduler error:`, error);
+      Sentry.captureException(error, { tags: { module: 'dividend-scheduler' } });
     } finally {
       this.isRunning = false;
     }
@@ -84,12 +86,14 @@ class DividendScheduler {
     // Check immediately on start (in case we missed today's run)
     this.checkAndRun().catch(error => {
       console.error('[DIVIDEND-SCHEDULER] Initial check failed:', error);
+      Sentry.captureException(error, { tags: { module: 'dividend-scheduler' } });
     });
 
     // Schedule hourly checks
     this.interval = setInterval(() => {
       this.checkAndRun().catch(error => {
         console.error('[DIVIDEND-SCHEDULER] Scheduled check failed:', error);
+        Sentry.captureException(error, { tags: { module: 'dividend-scheduler' } });
       });
     }, CHECK_INTERVAL);
 

@@ -7,6 +7,7 @@
 
 const BrokerConnection = require('../../models/BrokerConnection');
 const brokerSyncService = require('./index');
+const Sentry = require('@sentry/node');
 
 const SCHEDULER_INTERVAL = 15 * 60 * 1000; // 15 minutes
 const MAX_CONCURRENT_SYNCS = 3;
@@ -102,6 +103,7 @@ class BrokerSyncScheduler {
 
     } catch (error) {
       console.error(`${logPrefix} [ERROR] Scheduler error:`, error);
+      Sentry.captureException(error, { tags: { module: 'broker-sync-scheduler' } });
     } finally {
       this.isRunning = false;
     }
@@ -121,6 +123,7 @@ class BrokerSyncScheduler {
       return result;
     } catch (error) {
       console.error(`[BROKER-SCHEDULER] Sync failed for ${connection.id}:`, error.message);
+      Sentry.captureException(error, { tags: { module: 'broker-sync-scheduler' } });
 
       // Update connection failure status
       await BrokerConnection.updateAfterFailure(connection.id, error.message);
@@ -142,12 +145,14 @@ class BrokerSyncScheduler {
     // Run immediately on start
     this.processDueSyncs().catch(error => {
       console.error('[BROKER-SCHEDULER] Initial run failed:', error);
+      Sentry.captureException(error, { tags: { module: 'broker-sync-scheduler' } });
     });
 
     // Schedule regular runs
     this.interval = setInterval(() => {
       this.processDueSyncs().catch(error => {
         console.error('[BROKER-SCHEDULER] Scheduled run failed:', error);
+        Sentry.captureException(error, { tags: { module: 'broker-sync-scheduler' } });
       });
     }, SCHEDULER_INTERVAL);
 

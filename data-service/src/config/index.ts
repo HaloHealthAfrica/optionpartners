@@ -110,3 +110,54 @@ function loadConfig(): AppConfig {
 }
 
 export const config = loadConfig();
+
+/**
+ * Validates provider API key configuration at startup
+ * Returns summary of which API keys are present/missing
+ */
+export function validateProviderConfiguration(): {
+  isValid: boolean;
+  summary: {
+    twelveData: boolean;
+    unusualWhales: boolean;
+    polygon: boolean;
+    fred: boolean;
+  };
+  configuredCount: number;
+  message: string;
+} {
+  const summary = {
+    twelveData: !!config.twelveData.apiKey && config.twelveData.apiKey.length > 0,
+    unusualWhales: !!config.unusualWhales.apiKey && config.unusualWhales.apiKey.length > 0,
+    polygon: !!config.polygon.apiKey && config.polygon.apiKey.length > 0,
+    fred: !!config.fred.apiKey && config.fred.apiKey.length > 0,
+  };
+
+  const configuredCount = Object.values(summary).filter(Boolean).length;
+  const isValid = configuredCount > 0;
+
+  const presentKeys = Object.entries(summary)
+    .filter(([_, present]) => present)
+    .map(([key]) => key);
+  
+  const missingKeys = Object.entries(summary)
+    .filter(([_, present]) => !present)
+    .map(([key]) => key);
+
+  let message = '';
+  if (configuredCount === 0) {
+    message = 'CRITICAL: No provider API keys configured. Service will not be able to fetch real market data. Please configure at least one of: TWELVE_DATA_API_KEY, UNUSUAL_WHALES_API_KEY, POLYGON_API_KEY';
+  } else {
+    message = `Configuration valid: ${configuredCount} provider API key(s) configured (${presentKeys.join(', ')})`;
+    if (missingKeys.length > 0) {
+      message += `. Missing: ${missingKeys.join(', ')}`;
+    }
+  }
+
+  return {
+    isValid,
+    summary,
+    configuredCount,
+    message,
+  };
+}

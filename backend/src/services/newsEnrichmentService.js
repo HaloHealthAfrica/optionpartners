@@ -3,6 +3,7 @@ const finnhub = require('../utils/finnhub');
 const TierService = require('./tierService');
 const logger = require('../utils/logger');
 const globalEnrichmentCache = require('./globalEnrichmentCacheService');
+const Sentry = require('@sentry/node');
 
 class NewsEnrichmentService {
   constructor() {
@@ -28,6 +29,7 @@ class NewsEnrichmentService {
       return userTier === 'pro';
     } catch (error) {
       logger.logError(`Error checking news enrichment eligibility: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
       return false;
     }
   }
@@ -99,6 +101,7 @@ class NewsEnrichmentService {
 
     } catch (error) {
       logger.logError(`Error getting news for ${symbol} on ${date}: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
       return {
         hasNews: false,
         newsEvents: [],
@@ -168,6 +171,7 @@ class NewsEnrichmentService {
 
     } catch (error) {
       logger.logError(`Error fetching news from API for ${symbol}: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
       throw error;
     }
   }
@@ -201,6 +205,7 @@ class NewsEnrichmentService {
       ]);
     } catch (error) {
       logger.logError(`Error caching legacy news data: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
       // Don't throw - this is just for backward compatibility
     }
   }
@@ -454,6 +459,7 @@ class NewsEnrichmentService {
 
     } catch (error) {
       logger.logError(`Error enriching trade ${tradeId} with news: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
       return false;
     }
   }
@@ -582,6 +588,7 @@ class NewsEnrichmentService {
 
           } catch (error) {
             logger.logError(`Error processing ${item.symbol} on ${item.trade_date}: ${error.message}`);
+            Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
           }
         }
 
@@ -596,6 +603,7 @@ class NewsEnrichmentService {
 
     } catch (error) {
       logger.logError(`Error during news backfill: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
     } finally {
       this.isProcessing = false;
     }
@@ -638,6 +646,7 @@ class NewsEnrichmentService {
 
     } catch (error) {
       logger.logError(`Error getting news stats: ${error.message}`);
+      Sentry.captureException(error, { tags: { module: 'news-enrichment' } });
       return null;
     }
   }

@@ -7,6 +7,7 @@
 
 const cron = require('node-cron');
 const StockScannerService = require('./stockScannerService');
+const Sentry = require('@sentry/node');
 
 class StockScannerScheduler {
   constructor() {
@@ -35,6 +36,7 @@ class StockScannerScheduler {
 
     } catch (error) {
       console.error('[SCANNER SCHEDULER] Error initializing:', error);
+      Sentry.captureException(error, { tags: { module: 'stock-scanner-scheduler' } });
     }
   }
 
@@ -56,6 +58,7 @@ class StockScannerScheduler {
 
     } catch (error) {
       console.error('[SCANNER SCHEDULER] Error during quarterly scan:', error.message);
+      Sentry.captureException(error, { tags: { module: 'stock-scanner-scheduler' } });
     }
   }
 

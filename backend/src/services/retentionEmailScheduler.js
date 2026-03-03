@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const EmailService = require('./emailService');
+const Sentry = require('@sentry/node');
 
 function maskEmail(email) {
   if (!email || !email.includes('@')) return '***';
@@ -27,6 +28,7 @@ class RetentionEmailScheduler {
       console.log('[SUCCESS] Retention email tasks completed');
     } catch (error) {
       console.error('[ERROR] Error running retention email tasks:', error);
+      Sentry.captureException(error, { tags: { module: 'retention-email-scheduler' } });
     }
   }
 
@@ -77,11 +79,13 @@ class RetentionEmailScheduler {
           );
         } catch (err) {
           console.error(`Failed to send weekly digest to ${maskEmail(row.email)}:`, err.message);
+          Sentry.captureException(err, { tags: { module: 'retention-email-scheduler' } });
         }
       }
       console.log(`Weekly digests sent: ${result.rows.length}`);
     } catch (error) {
       console.error('Error sending weekly digests:', error);
+      Sentry.captureException(error, { tags: { module: 'retention-email-scheduler' } });
     }
   }
 
@@ -122,11 +126,13 @@ class RetentionEmailScheduler {
           );
         } catch (err) {
           console.error(`Failed to send re-engagement to ${maskEmail(row.email)}:`, err.message);
+          Sentry.captureException(err, { tags: { module: 'retention-email-scheduler' } });
         }
       }
       console.log(`Re-engagement emails sent: ${result.rows.length}`);
     } catch (error) {
       console.error('Error sending re-engagement emails:', error);
+      Sentry.captureException(error, { tags: { module: 'retention-email-scheduler' } });
     }
   }
 

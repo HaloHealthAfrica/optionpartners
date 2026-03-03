@@ -2,6 +2,7 @@ const apn = require('@parse/node-apn');
 const db = require('../config/database');
 const logger = require('../utils/logger');
 const NotificationPreferenceService = require('./notificationPreferenceService');
+const Sentry = require('@sentry/node');
 
 class PushNotificationService {
   constructor() {
@@ -48,6 +49,7 @@ class PushNotificationService {
       console.log(`[SUCCESS] APNS initialized for ${apnsConfig.production ? 'production' : 'development'}`);
     } catch (error) {
       logger.logError('Failed to initialize APNS:', error);
+      Sentry.captureException(error, { tags: { module: 'push-notification' } });
       this.isEnabled = false;
     }
   }
@@ -123,6 +125,7 @@ class PushNotificationService {
           }
         } catch (deviceError) {
           logger.logError(`Error sending push notification to device ${device.device_token.substring(0, 8)}...:`, deviceError);
+          Sentry.captureException(deviceError, { tags: { module: 'push-notification' } });
           results.push({ success: false, device: device.device_token, error: deviceError.message });
         }
       }
@@ -136,6 +139,7 @@ class PushNotificationService {
 
     } catch (error) {
       logger.logError('Error in sendPushNotification:', error);
+      Sentry.captureException(error, { tags: { module: 'push-notification' } });
       return { success: false, error: error.message };
     }
   }
@@ -149,6 +153,7 @@ class PushNotificationService {
       logger.info(`Marked device token as inactive: ${deviceToken.substring(0, 8)}...`);
     } catch (error) {
       logger.logError('Error marking device token inactive:', error);
+      Sentry.captureException(error, { tags: { module: 'push-notification' } });
     }
   }
 

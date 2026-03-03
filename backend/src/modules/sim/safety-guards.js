@@ -2,6 +2,7 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const { isWithinTradingHours, getETDate } = require('../../utils/timezone');
 
 /**
  * @typedef {Object} SafetyConfig
@@ -37,15 +38,20 @@ class SafetyGuards {
   async evaluate(signal, accountState, userId) {
     const violations = [];
 
-    // Kill switch
-    if (this.config.killSwitchActive || accountState?.kill_switch_active) {
+    // Kill switch — auto-reset at start of new trading day
+    const isStaleDay = accountState?.daily_pnl_reset_at
+      && getETDate() > String(accountState.daily_pnl_reset_at).slice(0, 10);
+    const effectiveKillSwitch = isStaleDay ? false : (accountState?.kill_switch_active || false);
+
+    if (this.config.killSwitchActive || effectiveKillSwitch) {
       violations.push('Kill switch is active');
       return { safe: false, violations };
     }
 
-    // Max daily loss
+    // Max daily loss — treat stale daily_pnl as 0 for a new trading day
     if (accountState) {
-      const dailyLoss = Math.abs(Math.min(0, accountState.daily_pnl || 0));
+      const effectiveDailyPnl = isStaleDay ? 0 : (accountState.daily_pnl || 0);
+      const dailyLoss = Math.abs(Math.min(0, effectiveDailyPnl));
       if (dailyLoss >= this.config.maxDailyLoss) {
         violations.push(`Daily loss limit reached: $${dailyLoss.toFixed(2)} >= $${this.config.maxDailyLoss}`);
       }
@@ -174,48 +180,7 @@ class SafetyGuards {
   }
 
   _checkTradingHours() {
-    const now = new Date();
-
-    // Robust UTC → ET conversion (handles EST/EDT without relying on ICU)
-    const utcMonth = now.getUTCMonth(); // 0-11
-    const utcDay = now.getUTCDate();
-    const utcDow = now.getUTCDay(); // 0=Sun
-
-    // DST: second Sunday of March to first Sunday of November
-    let isDST = false;
-    if (utcMonth > 2 && utcMonth < 10) {
-      isDST = true; // Apr-Oct always DST
-    } else if (utcMonth === 2) {
-      // March: DST starts second Sunday at 2 AM ET (7 AM UTC)
-      const secondSunday = 14 - new Date(now.getUTCFullYear(), 2, 1).getDay();
-      isDST = utcDay > secondSunday || (utcDay === secondSunday && now.getUTCHours() >= 7);
-    } else if (utcMonth === 10) {
-      // November: DST ends first Sunday at 2 AM ET (6 AM UTC)
-      const firstSunday = 7 - new Date(now.getUTCFullYear(), 10, 1).getDay();
-      if (firstSunday === 7) isDST = utcDay < 7;
-      else isDST = utcDay < firstSunday || (utcDay === firstSunday && now.getUTCHours() < 6);
-    }
-
-    const offsetHours = isDST ? -4 : -5;
-    const etMs = now.getTime() + offsetHours * 3600000;
-    const etDate = new Date(etMs);
-    const hours = etDate.getUTCHours();
-    const minutes = etDate.getUTCMinutes();
-    const currentMinutes = hours * 60 + minutes;
-
-    const [startH, startM] = this.config.tradingStartTime.split(':').map(Number);
-    const [endH, endM] = this.config.tradingEndTime.split(':').map(Number);
-    const startMinutes = startH * 60 + startM;
-    const endMinutes = endH * 60 + endM;
-
-    if (currentMinutes < startMinutes || currentMinutes > endMinutes) {
-      return {
-        allowed: false,
-        reason: `Outside trading hours (ET): current ${hours}:${String(minutes).padStart(2, '0')}, allowed ${this.config.tradingStartTime}-${this.config.tradingEndTime}`,
-      };
-    }
-
-    return { allowed: true };
+    return isWithinTradingHours(this.config.tradingStartTime, this.config.tradingEndTime);
   }
 
   /**

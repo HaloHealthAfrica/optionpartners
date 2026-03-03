@@ -6,6 +6,7 @@ const marketIntelligence = require('./market-intelligence');
 const exitMonitor = require('./exit-monitor');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 /**
  * GET /api/sim/intelligence/scorecard
@@ -16,6 +17,7 @@ async function getScorecard(req, res) {
     res.json(scorecards);
   } catch (error) {
     logger.error(`Get scorecard failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get strategy scorecard' });
   }
 }
@@ -29,6 +31,7 @@ async function recalculateScorecard(req, res) {
     res.json({ recalculated: results.length, scorecards: results });
   } catch (error) {
     logger.error(`Recalculate scorecard failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to recalculate scorecard' });
   }
 }
@@ -42,6 +45,7 @@ async function getCooldowns(req, res) {
     res.json(cooldowns);
   } catch (error) {
     logger.error(`Get cooldowns failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get cooldowns' });
   }
 }
@@ -58,6 +62,7 @@ async function clearCooldown(req, res) {
     res.json({ message: `Cooldown cleared for ${req.params.strategy}` });
   } catch (error) {
     logger.error(`Clear cooldown failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to clear cooldown' });
   }
 }
@@ -94,6 +99,7 @@ async function getRejections(req, res) {
     });
   } catch (error) {
     logger.error(`Get rejections failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get signal rejections' });
   }
 }
@@ -124,6 +130,7 @@ async function getLivePositions(req, res) {
     res.json(result.rows);
   } catch (error) {
     logger.error(`Get live positions failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get live positions' });
   }
 }
@@ -148,6 +155,7 @@ async function getConfig(req, res) {
     res.json(result.rows[0]);
   } catch (error) {
     logger.error(`Get intelligence config failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get intelligence config' });
   }
 }
@@ -203,6 +211,7 @@ async function updateConfig(req, res) {
     res.json(result.rows[0]);
   } catch (error) {
     logger.error(`Update intelligence config failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to update intelligence config' });
   }
 }
@@ -254,6 +263,7 @@ async function getIntelligenceStatus(req, res) {
     });
   } catch (error) {
     logger.error(`Get intelligence status failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get intelligence status' });
   }
 }
@@ -291,6 +301,7 @@ async function getVerdicts(req, res) {
     });
   } catch (error) {
     logger.error(`Get verdicts failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get intelligence verdicts' });
   }
 }
@@ -306,6 +317,7 @@ async function getSymbolSnapshot(req, res) {
     res.json(snapshot);
   } catch (error) {
     logger.error(`Get symbol snapshot failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get symbol snapshot' });
   }
 }
@@ -342,6 +354,7 @@ async function getEquityByStrategy(req, res) {
     res.json(grouped);
   } catch (error) {
     logger.error(`Get equity by strategy failed: ${error.message}`, 'intelligence');
+    Sentry.captureException(error, { tags: { module: 'intelligence-controller' } });
     res.status(500).json({ error: 'Failed to get equity by strategy' });
   }
 }

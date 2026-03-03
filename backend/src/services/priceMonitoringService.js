@@ -7,6 +7,7 @@ const nodemailer = require('nodemailer');
 const { v4: uuidv4 } = require('uuid');
 const TierService = require('./tierService');
 const NotificationPreferenceService = require('./notificationPreferenceService');
+const Sentry = require('@sentry/node');
 
 function maskEmail(email) {
   if (!email || !email.includes('@')) return '***';
@@ -63,6 +64,7 @@ class PriceMonitoringService {
         await this.monitorPrices();
       } catch (error) {
         console.error('Error in price monitoring interval:', error);
+        Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
       }
     }, this.intervalMs);
 
@@ -164,6 +166,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.error('Error in monitorPrices:', error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
     }
   }
 
@@ -262,6 +265,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.error(`Error updating price for ${symbol}:`, error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
       return false;
     }
   }
@@ -316,6 +320,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.logError('Error checking alerts:', error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
     }
   }
 
@@ -415,6 +420,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.logError('Error triggering alert:', error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
     }
   }
 
@@ -456,6 +462,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.logError('Error sending email notification:', error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
       
       // Log failed notification
       await this.logNotification(alert.id, alert.user_id, symbol, 'email', message, alert, 'failed', error.message);
@@ -490,6 +497,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.logError('Error creating browser notification:', error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
       await this.logNotification(alert.id, alert.user_id, alert.symbol, 'browser', message, alert, 'failed', error.message);
     }
   }
@@ -513,6 +521,7 @@ class PriceMonitoringService {
 
     } catch (error) {
       logger.logError('Error logging notification:', error);
+      Sentry.captureException(error, { tags: { module: 'price-monitoring' } });
     }
   }
 

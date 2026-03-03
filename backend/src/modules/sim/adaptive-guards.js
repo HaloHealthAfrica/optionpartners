@@ -2,6 +2,23 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const { getETDate } = require('../../utils/timezone');
+
+const CORRELATION_GROUPS = {
+  BROAD_INDEX: ['SPY', 'QQQ', 'IWM', 'DIA', 'VOO', 'SPX', 'ES', 'NQ', 'RTY', 'YM'],
+  MEGA_TECH: ['AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'META', 'NVDA', 'TSLA'],
+  SEMIS: ['NVDA', 'AMD', 'INTC', 'SMH', 'AVGO', 'MU', 'QCOM', 'SOXX'],
+  FINANCIALS: ['JPM', 'BAC', 'GS', 'MS', 'WFC', 'C', 'XLF'],
+  ENERGY: ['XOM', 'CVX', 'COP', 'SLB', 'XLE', 'OXY', 'USO'],
+};
+
+function getCorrelationGroup(symbol) {
+  const upper = (symbol || '').toUpperCase();
+  for (const [group, members] of Object.entries(CORRELATION_GROUPS)) {
+    if (members.includes(upper)) return group;
+  }
+  return null;
+}
 
 /**
  * Adaptive intelligence guards:
@@ -137,18 +154,21 @@ class AdaptiveGuards {
   async _checkSignalDedup(userId, signal, cooldownMs) {
     const underlying = signal.underlyingSymbol || signal.symbol?.replace(/\d{6}[CP]\d+/, '') || signal.symbol;
     const direction = signal.direction || (signal.action === 'BUY' ? 'long' : 'short');
+    const side = direction === 'long' ? 'BUY' : 'SELL';
 
+    // Check actual filled orders, not just approved verdicts — a verdict that
+    // was approved but rejected by the executor shouldn't block re-entry.
     const result = await db.query(
-      `SELECT iv.created_at
-       FROM intelligence_verdicts iv
-       WHERE iv.user_id = $1
-         AND iv.symbol = $2
-         AND iv.direction = $3
-         AND iv.allowed = TRUE
-         AND iv.created_at > NOW() - ($4 || ' milliseconds')::interval
-       ORDER BY iv.created_at DESC
+      `SELECT o.created_at
+       FROM sim_orders o
+       WHERE o.user_id = $1
+         AND o.symbol = $2
+         AND o.side = $3
+         AND o.status = 'FILLED'
+         AND o.created_at > NOW() - ($4 || ' milliseconds')::interval
+       ORDER BY o.created_at DESC
        LIMIT 1`,
-      [userId, underlying, direction, cooldownMs]
+      [userId, underlying, side, cooldownMs]
     );
 
     if (result.rows.length > 0) {
@@ -156,7 +176,7 @@ class AdaptiveGuards {
       const agoSec = Math.round((Date.now() - new Date(lastAt).getTime()) / 1000);
       return {
         allowed: false,
-        reason: `SIGNAL_DEDUP: ${underlying} ${direction} already approved ${agoSec}s ago (cooldown ${Math.round(cooldownMs / 1000)}s)`,
+        reason: `SIGNAL_DEDUP: ${underlying} ${direction} already filled ${agoSec}s ago (cooldown ${Math.round(cooldownMs / 1000)}s)`,
       };
     }
 
@@ -166,6 +186,7 @@ class AdaptiveGuards {
   async _checkCorrelation(userId, signal, maxCorrelated) {
     const underlying = signal.underlyingSymbol || signal.symbol?.replace(/\d{6}[CP]\d+/, '') || signal.symbol;
 
+    // Same-symbol check
     const result = await db.query(
       `SELECT COUNT(*) as count FROM sim_positions
        WHERE user_id = $1 AND status = 'OPEN'
@@ -181,11 +202,34 @@ class AdaptiveGuards {
       };
     }
 
+    // Sector/group correlation check
+    const group = getCorrelationGroup(underlying);
+    if (group) {
+      const groupMembers = CORRELATION_GROUPS[group];
+      const maxGroupExposure = maxCorrelated + 1;
+      const placeholders = groupMembers.map((_, i) => `$${i + 2}`).join(', ');
+      const groupResult = await db.query(
+        `SELECT COUNT(*) as count FROM sim_positions
+         WHERE user_id = $1 AND status = 'OPEN'
+           AND underlying_symbol IN (${placeholders})`,
+        [userId, ...groupMembers]
+      );
+      const groupCount = parseInt(groupResult.rows[0].count, 10);
+      if (groupCount >= maxGroupExposure) {
+        return {
+          allowed: false,
+          reason: `CORRELATION_GUARD: ${groupCount} open positions in ${group} group (max ${maxGroupExposure})`,
+        };
+      }
+    }
+
     return { allowed: true };
   }
 
   _checkDrawdownThrottle(signal, accountState, config) {
-    const dailyPnl = parseFloat(accountState.daily_pnl || 0);
+    const isNewDay = accountState.daily_pnl_reset_at
+      && getETDate() > String(accountState.daily_pnl_reset_at).slice(0, 10);
+    const dailyPnl = isNewDay ? 0 : parseFloat(accountState.daily_pnl || 0);
     if (dailyPnl >= 0) return { allowed: true };
 
     const maxDailyLoss = parseFloat(process.env.SIM_MAX_DAILY_LOSS || '2000');

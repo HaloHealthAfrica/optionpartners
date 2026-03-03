@@ -110,3 +110,13 @@ export class ProviderError extends Error {
     this.name = 'ProviderError';
   }
 }
+
+export class ServiceUnavailableError extends Error {
+  public readonly statusCode = 503;
+  
+  constructor(message: string) {
+    super(message);
+    this.name = 'ServiceUnavailableError';
+  }
+}
+

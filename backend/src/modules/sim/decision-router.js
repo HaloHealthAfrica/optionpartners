@@ -24,7 +24,7 @@ const { assertSimMode } = require('../../config/tradingMode');
  * Sources that trigger trade evaluation.
  * All other sources update SymbolState only (context providers).
  */
-const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'UNKNOWN']);
+const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'SQUEEZE_PRO']);
 
 /**
  * @typedef {Object} DecisionResult
@@ -119,6 +119,13 @@ class DecisionRouter {
             orderIntent: intents[0],
           };
         }
+      }
+
+      if (indicatorSource === 'UNKNOWN') {
+        logger.warn(
+          `[UNKNOWN_SOURCE] ${symbol}: unrecognized payload shape — context update only (not trading)`,
+          'decision-router'
+        );
       }
 
       return {
@@ -893,7 +900,7 @@ class DecisionRouter {
     const params = [userId, 'OPEN', signal.symbol];
     let idx = 4;
 
-    if (signal.contractType !== 'STOCK') {
+    if (signal.contractType && signal.contractType !== 'STOCK') {
       conditions.push(`contract_type = $${idx++}`);
       params.push(signal.contractType);
     }

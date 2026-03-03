@@ -441,6 +441,83 @@ async function warmupSymbol(req, res) {
   });
 }
 
+/**
+ * GET /api/sim/health/state?symbol=SPY
+ * Diagnostic endpoint: shows freshness of every state component for a symbol.
+ */
+async function getStateHealth(req, res) {
+  try {
+    const symbol = (req.query.symbol || '').toUpperCase();
+    if (!symbol) return res.status(400).json({ error: 'symbol query parameter required' });
+
+    const state = await symbolStateService.getState(req.user.id, symbol);
+    const STATE_TTL_MS = parseInt(process.env.SIM_STATE_TTL_MS || '1800000', 10);
+    const now = Date.now();
+
+    function freshness(updatedAt, ttl = STATE_TTL_MS) {
+      if (!updatedAt) return { age_seconds: null, fresh: false, status: 'missing' };
+      const ageMs = now - new Date(updatedAt).getTime();
+      const ageSec = Math.round(ageMs / 1000);
+      const fresh = ageMs <= ttl;
+      return { age_seconds: ageSec, fresh, status: fresh ? 'ok' : 'stale' };
+    }
+
+    res.json({
+      symbol,
+      macro: {
+        bias: state.macro_bias,
+        strength: state.macro_strength,
+        regime: state.regime,
+        ...freshness(state.macro_updated_at),
+      },
+      trend: {
+        bias: state.local_bias,
+        alignment_score: state.alignment_score,
+        conflict_score: state.conflict_score,
+        ...freshness(state.local_updated_at),
+      },
+      chain: {
+        ok: state.chain_ok,
+        liquidity_ok: state.liquidity_ok,
+        open_interest: state.chain_open_interest,
+        bid_ask_spread_pct: state.bid_ask_spread_pct,
+        ...freshness(state.chain_updated_at),
+      },
+      price: {
+        last: state.last_price,
+        atr: state.atr,
+        ...freshness(state.price_updated_at, 5 * 60 * 1000),
+      },
+      saty: {
+        phase: state.latest_saty_signal?.phaseName || null,
+        direction: state.latest_saty_signal?.direction || null,
+        ...freshness(state.saty_signal_at, 600_000),
+      },
+      entry_signal: {
+        direction: state.latest_entry_signal?.direction || null,
+        confidence: state.latest_entry_signal?.confidence || null,
+        strategy: state.latest_entry_signal?.strategy || null,
+        ...freshness(state.entry_signal_at),
+      },
+      strat: {
+        direction: state.latest_strat_signal?.direction || null,
+        setup: state.latest_strat_signal?.setup || null,
+        pattern_kind: state.latest_strat_signal?.pattern_kind || null,
+        ...freshness(state.strat_signal_at),
+      },
+      flow: {
+        direction: state.latest_flow_signal?.direction || null,
+        unusual: state.latest_flow_signal?.unusual || false,
+        ...freshness(state.flow_signal_at),
+      },
+    });
+  } catch (error) {
+    logger.error(`State health check failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to get state health' });
+  }
+}
+
 module.exports = {
   getAccountState,
   resetAccount,
@@ -456,4 +533,5 @@ module.exports = {
   getSimRuns,
   getStatus,
   warmupSymbol,
+  getStateHealth,
 };

@@ -8,6 +8,7 @@ const strategyScorecardService = require('./strategy-scorecard.service');
 const adaptiveGuards = require('./adaptive-guards');
 const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
 const convictionCalibrator = require('./adaptive-intelligence/conviction-calibrator.service');
+const Sentry = require('@sentry/node');
 
 const CONTRACT_MULTIPLIER = 100;
 
@@ -107,6 +108,7 @@ class TradeFinalizerService {
         await adaptiveGuards.recordTradeResult(userId, position.strategy, pnl);
       } catch (err) {
         logger.error(`Intelligence layer post-trade update failed: ${err.message}`, 'sim-finalizer');
+        Sentry.captureException(err, { tags: { module: 'sim-finalizer' } });
       }
     }
 
@@ -122,6 +124,7 @@ class TradeFinalizerService {
       }
     } catch (err) {
       logger.error(`Calibration counter update failed: ${err.message}`, 'sim-finalizer');
+      Sentry.captureException(err, { tags: { module: 'sim-finalizer' } });
     }
 
     logger.info(

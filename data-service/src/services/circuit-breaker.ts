@@ -53,9 +53,10 @@ export class CircuitBreaker {
 
     if (stats.state === 'open') {
       if (stats.lastFailureTime && Date.now() - stats.lastFailureTime >= cfg.resetTimeoutMs) {
+        const oldState = stats.state;
         stats.state = 'half-open';
         stats.halfOpenAttempts = 0;
-        log.info({ provider }, 'Circuit transitioning to half-open');
+        log.info({ provider, transition: `${oldState} → half-open` }, 'Circuit breaker state transition: OPEN → HALF_OPEN');
         return true;
       }
       return false;
@@ -73,10 +74,11 @@ export class CircuitBreaker {
     stats.lastSuccessTime = Date.now();
 
     if (stats.state === 'half-open') {
+      const oldState = stats.state;
       stats.state = 'closed';
       stats.failures = 0;
       stats.halfOpenAttempts = 0;
-      log.info({ provider }, 'Circuit closed after successful half-open attempt');
+      log.info({ provider, transition: `${oldState} → closed` }, 'Circuit breaker state transition: HALF_OPEN → CLOSED');
     }
   }
 
@@ -91,15 +93,17 @@ export class CircuitBreaker {
     if (stats.state === 'half-open') {
       stats.halfOpenAttempts++;
       if (stats.halfOpenAttempts >= cfg.halfOpenMaxAttempts) {
+        const oldState = stats.state;
         stats.state = 'open';
-        log.warn({ provider }, 'Circuit re-opened after half-open failures');
+        log.warn({ provider, transition: `${oldState} → open` }, 'Circuit breaker state transition: HALF_OPEN → OPEN (re-opened after half-open failures)');
       }
       return;
     }
 
     if (stats.failures >= cfg.failureThreshold) {
+      const oldState = stats.state;
       stats.state = 'open';
-      log.warn({ provider, failures: stats.failures }, 'Circuit opened');
+      log.warn({ provider, failures: stats.failures, transition: `${oldState} → open` }, 'Circuit breaker state transition: CLOSED → OPEN');
     }
   }
 
@@ -130,11 +134,23 @@ export class CircuitBreaker {
   reset(provider: ProviderName): void {
     const stats = this.circuits.get(provider);
     if (stats) {
+      const oldState = stats.state;
       stats.state = 'closed';
       stats.failures = 0;
       stats.halfOpenAttempts = 0;
-      log.info({ provider }, 'Circuit manually reset');
+      log.info({ provider, transition: `${oldState} → closed` }, 'Circuit breaker manually reset');
     }
+  }
+
+  resetAll(): void {
+    for (const provider of this.circuits.keys()) {
+      this.reset(provider);
+    }
+    log.info('All circuit breakers manually reset');
+  }
+
+  getAllStates(): Map<ProviderName, CircuitStats> {
+    return new Map(this.circuits);
   }
 }
 

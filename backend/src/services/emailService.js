@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const unsubscribeService = require('./unsubscribeService');
+const Sentry = require('@sentry/node');
 
 function maskEmail(email) {
   if (!email || !email.includes('@')) return '***';
@@ -205,6 +206,7 @@ class EmailService {
       console.log('Verification email sent to:', maskEmail(email));
     } catch (error) {
       console.error('Failed to send verification email:', error);
+      Sentry.captureException(error, { tags: { module: 'email-service' } });
     }
   }
 
@@ -259,6 +261,7 @@ class EmailService {
       console.log('Password reset email sent to:', maskEmail(email));
     } catch (error) {
       console.error('Failed to send password reset email:', error);
+      Sentry.captureException(error, { tags: { module: 'email-service' } });
     }
   }
 
@@ -313,6 +316,7 @@ class EmailService {
       console.log('Email change verification email sent to:', maskEmail(email));
     } catch (error) {
       console.error('Failed to send email change verification email:', error);
+      Sentry.captureException(error, { tags: { module: 'email-service' } });
       throw error;
     }
   }
@@ -378,6 +382,7 @@ class EmailService {
       console.log(`Trial ${isExpired ? 'expiration' : 'reminder'} email sent successfully to ${maskEmail(email)}`);
     } catch (error) {
       console.error(`Error sending trial ${isExpired ? 'expiration' : 'reminder'} email:`, error);
+      Sentry.captureException(error, { tags: { module: 'email-service' } });
       throw error;
     }
   }
@@ -443,6 +448,7 @@ class EmailService {
       console.log('Weekly digest sent to', maskEmail(email));
     } catch (error) {
       console.error('Error sending weekly digest to', maskEmail(email), error);
+      Sentry.captureException(error, { tags: { module: 'email-service' } });
       throw error;
     }
   }
@@ -493,6 +499,7 @@ class EmailService {
       console.log('Re-engagement email sent to', maskEmail(email));
     } catch (error) {
       console.error('Error sending re-engagement email to', maskEmail(email), error);
+      Sentry.captureException(error, { tags: { module: 'email-service' } });
       throw error;
     }
   }

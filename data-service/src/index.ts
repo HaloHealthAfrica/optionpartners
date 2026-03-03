@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { config } from './config';
+import { config, validateProviderConfiguration } from './config';
 import { logger } from './utils/logger';
 import { DataOrchestrator } from './services/data-orchestrator';
 import { MacroRegimeService } from './services/macro-regime';
@@ -25,6 +25,17 @@ async function main() {
   app.use(cors());
   app.use(express.json());
 
+  // --- Validate provider configuration at startup ---
+  const configValidation = validateProviderConfiguration();
+  logger.info({
+    configuredProviders: configValidation.configuredCount,
+    apiKeys: configValidation.summary,
+  }, configValidation.message);
+
+  if (!configValidation.isValid) {
+    logger.error('Configuration validation failed: No provider API keys configured');
+  }
+
   // --- Initialize cache (Redis + memory fallback) ---
   await cacheManager.initialize();
 
@@ -40,20 +51,43 @@ async function main() {
 
   // --- Initialize providers ---
   const orchestrator = new DataOrchestrator();
+  let registeredProviderCount = 0;
 
+  // TwelveData provider registration
   if (config.twelveData.apiKey) {
     orchestrator.registerProvider(new TwelveDataClient());
-    logger.info('TwelveData provider registered (primary stock/candles)');
+    logger.info('TwelveData provider registered successfully (primary stock/candles) - API key present');
+    registeredProviderCount++;
+  } else {
+    orchestrator.trackProviderRegistrationFailure('twelvedata', 'API key missing or empty', false);
+    logger.warn('TwelveData provider failed to register - API key missing or empty');
   }
 
+  // Unusual Whales provider registration
   if (config.unusualWhales.apiKey) {
     orchestrator.registerProvider(new UnusualWhalesClient());
-    logger.info('Unusual Whales provider registered (primary options/GEX/flow)');
+    logger.info('Unusual Whales provider registered successfully (primary options/GEX/flow) - API key present');
+    registeredProviderCount++;
+  } else {
+    orchestrator.trackProviderRegistrationFailure('unusual_whales', 'API key missing or empty', false);
+    logger.warn('Unusual Whales provider failed to register - API key missing or empty');
   }
 
+  // Polygon provider registration
   if (config.polygon.apiKey) {
     orchestrator.registerProvider(new PolygonClient());
-    logger.info('Polygon provider registered (tertiary fallback)');
+    logger.info('Polygon provider registered successfully (tertiary fallback) - API key present');
+    registeredProviderCount++;
+  } else {
+    orchestrator.trackProviderRegistrationFailure('polygon', 'API key missing or empty', false);
+    logger.warn('Polygon provider failed to register - API key missing or empty');
+  }
+
+  // Provider registration validation summary
+  if (registeredProviderCount === 0) {
+    logger.error('CRITICAL: Zero data providers registered - service will not be able to fetch real market data. Please configure at least one provider API key (TWELVE_DATA_API_KEY, UNUSUAL_WHALES_API_KEY, or POLYGON_API_KEY)');
+  } else {
+    logger.info(`Provider registration complete: ${registeredProviderCount} provider(s) registered successfully`);
   }
 
   // --- Initialize MarketData.app adapter (IP-whitelisted, options authority) ---
@@ -82,9 +116,20 @@ async function main() {
   app.get('/api/health', async (_req, res) => {
     try {
       const providers = orchestrator.getProviderHealths();
-      res.json({ status: 'ok', providers });
+      const isReady = registeredProviderCount > 0;
+      
+      res.json({
+        status: isReady ? 'ok' : 'degraded',
+        ready: isReady,
+        providers,
+        configuration: {
+          apiKeysConfigured: configValidation.configuredCount,
+          providersRegistered: registeredProviderCount,
+          apiKeys: configValidation.summary,
+        },
+      });
     } catch {
-      res.status(503).json({ status: 'degraded' });
+      res.status(503).json({ status: 'degraded', ready: false });
     }
   });
 

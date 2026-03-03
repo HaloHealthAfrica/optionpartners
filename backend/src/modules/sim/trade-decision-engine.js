@@ -3,6 +3,7 @@
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
 const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
+const { getETMinutes, getETDate, deriveSessionPhase } = require('../../utils/timezone');
 
 /**
  * Deterministic Trade Decision Engine.
@@ -67,6 +68,11 @@ class TradeDecisionEngine {
     // ── PIVOT_MB: Self-contained mechanical evaluation ──
     if (signal.strategy === 'pivot_motherbar') {
       return this._evaluatePivotMotherBar(signal, symbolState, rationale);
+    }
+
+    // ── SQUEEZE_PRO: Self-contained mechanical evaluation ──
+    if (signal.strategy === 'squeeze_pro') {
+      return this._evaluateSqueezePro(signal, symbolState, rationale);
     }
 
     // ── Part 2: Signal preconditions ──
@@ -259,7 +265,10 @@ class TradeDecisionEngine {
     }
 
     if (accountState) {
-      const dailyLoss = Math.abs(Math.min(0, parseFloat(accountState.daily_pnl || 0)));
+      const isNewDay = accountState.daily_pnl_reset_at
+        && getETDate() > String(accountState.daily_pnl_reset_at).slice(0, 10);
+      const effectiveDailyPnl = isNewDay ? 0 : parseFloat(accountState.daily_pnl || 0);
+      const dailyLoss = Math.abs(Math.min(0, effectiveDailyPnl));
       const maxDailyLoss = parseFloat(process.env.SIM_MAX_DAILY_LOSS || '2000');
       if (dailyLoss >= maxDailyLoss) {
         rationale.push(`FAIL_CLOSED: Daily loss $${dailyLoss.toFixed(2)} >= max $${maxDailyLoss}`);
@@ -337,21 +346,7 @@ class TradeDecisionEngine {
     const failures = [];
 
     // ORB only valid within first 2 hours of session (09:30 - 11:30 ET)
-    const now = new Date();
-    const utcMonth = now.getUTCMonth();
-    let isDST = utcMonth > 2 && utcMonth < 10;
-    if (utcMonth === 2) {
-      const secSun = 14 - new Date(now.getUTCFullYear(), 2, 1).getDay();
-      isDST = now.getUTCDate() > secSun || (now.getUTCDate() === secSun && now.getUTCHours() >= 7);
-    } else if (utcMonth === 10) {
-      const firstSun = 7 - new Date(now.getUTCFullYear(), 10, 1).getDay();
-      isDST = now.getUTCDate() < firstSun || (now.getUTCDate() === firstSun && now.getUTCHours() < 6);
-    }
-    const etMs = now.getTime() + (isDST ? -4 : -5) * 3600000;
-    const etDate = new Date(etMs);
-    const etHour = etDate.getUTCHours();
-    const etMinute = etDate.getUTCMinutes();
-    const etTime = etHour * 60 + etMinute;
+    const etTime = getETMinutes();
     if (etTime > 11 * 60 + 30) {
       failures.push('ORB past 2-hour session window (after 11:30 ET)');
     }
@@ -699,7 +694,7 @@ class TradeDecisionEngine {
       }
     }
 
-    conviction = Math.max(0, Math.round(conviction));
+    conviction = Math.max(0, Math.min(100, Math.round(conviction)));
     rationale.push(`CONVICTION_FINAL: ${conviction}`);
     return conviction;
   }
@@ -966,12 +961,17 @@ class TradeDecisionEngine {
     const stop = signal.stopLoss;
 
     // ── 1. Session guard ──
-    const sessionPhase = (
-      symbolState.session_phase
-      || symbolState.sessionPhase
-      || symbolState.latest_saty_signal?.phaseName
-      || ''
-    ).toUpperCase();
+    // Prefer fresh SATY_PHASE data, fall back to clock-derived phase
+    let sessionPhase = '';
+    if (symbolState.latest_saty_signal?.phaseName && symbolState.saty_signal_at) {
+      const satyAgeMs = Date.now() - new Date(symbolState.saty_signal_at).getTime();
+      if (satyAgeMs < 600_000) {
+        sessionPhase = symbolState.latest_saty_signal.phaseName.toUpperCase();
+      }
+    }
+    if (!sessionPhase) {
+      sessionPhase = deriveSessionPhase();
+    }
 
     if (sessionPhase !== 'OPENING_DRIVE' && sessionPhase !== 'MORNING') {
       rationale.push(`PIVOT_MB_BLOCK: INVALID_SESSION (phase=${sessionPhase || 'UNKNOWN'})`);
@@ -1072,6 +1072,160 @@ class TradeDecisionEngine {
       risk_parameters: {
         stop_level: stop,
         stop_source: 'PIVOT_MB_SIGNAL',
+        max_loss: risk * 100,
+      },
+      contractType,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  SQUEEZE_PRO — Mechanical strategy evaluation
+  // ═══════════════════════════════════════════════════════════════════
+
+  _evaluateSqueezePro(signal, symbolState, rationale) {
+    const ticker = signal.symbol || symbolState.symbol;
+    const meta = signal.meta?.indicatorMeta;
+
+    if (!meta) {
+      rationale.push('SQUEEZE_PRO_BLOCK: Missing indicatorMeta');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const compressionScore = meta.compressionScore || signal.score || 0;
+    const entry = signal.limitPrice;
+    const stop = signal.stopLoss;
+    const targets = signal.meta?.targets || [];
+    const timeframe = signal.meta?.timeframe || '15';
+    const trendAlignment = meta.trend?.alignment;
+    const isLong = signal.direction === 'long';
+
+    // ── 1. Chop guard: flat macro EMA + chop regime = sit out ──
+    if (trendAlignment === 'neutral' && symbolState.regime === 'CHOP') {
+      rationale.push('SQUEEZE_PRO_BLOCK: Trend neutral + CHOP regime — sit out');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 2. Compression score guard ──
+    if (compressionScore < 40) {
+      rationale.push(`SQUEEZE_PRO_BLOCK: Compression score ${compressionScore} < 40 (weak squeeze)`);
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 3. Direction validation ──
+    if (!signal.direction) {
+      rationale.push('SQUEEZE_PRO_BLOCK: No valid direction');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    // ── 4. R:R validation ──
+    if (entry == null || stop == null) {
+      rationale.push('SQUEEZE_PRO_BLOCK: Missing entry or stop for R:R validation');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const risk = Math.abs(entry - stop);
+    if (risk <= 0) {
+      rationale.push('SQUEEZE_PRO_BLOCK: Zero risk distance (entry === stop)');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    if (targets.length > 0) {
+      const reward1 = Math.abs(targets[0] - entry);
+      const rrRatio = reward1 / risk;
+      if (rrRatio < 1.5) {
+        rationale.push(`SQUEEZE_PRO_BLOCK: R:R ${rrRatio.toFixed(2)} < 1.5 minimum`);
+        return this._blocked(ticker, 0, rationale);
+      }
+      rationale.push(`SQUEEZE_PRO_RR: ${rrRatio.toFixed(2)}:1`);
+    }
+
+    // ── 5. Build conviction from compression + volume + HTF ──
+    let conviction = signal.confidence || 0;
+
+    if (compressionScore >= 80) {
+      conviction += 10;
+      rationale.push(`CONVICTION +10: High compression (${compressionScore})`);
+    } else if (compressionScore >= 60) {
+      conviction += 5;
+      rationale.push(`CONVICTION +5: Moderate compression (${compressionScore})`);
+    }
+
+    const barsCompressed = meta.barsCompressed || 0;
+    if (barsCompressed >= 15) {
+      conviction += 5;
+      rationale.push(`CONVICTION +5: Extended squeeze (${barsCompressed} bars compressed)`);
+    }
+
+    const volumeRatio = meta.volume?.ratio || 0;
+    if (volumeRatio >= 2.0) {
+      conviction += 5;
+      rationale.push(`CONVICTION +5: Strong volume (${volumeRatio.toFixed(2)}x avg)`);
+    }
+
+    const htfBias = (meta.htf?.bias || '').toLowerCase();
+    if ((isLong && htfBias === 'bullish') || (!isLong && htfBias === 'bearish')) {
+      conviction += 5;
+      rationale.push(`CONVICTION +5: HTF bias aligns (${htfBias})`);
+    }
+
+    conviction = Math.max(0, Math.min(100, conviction));
+
+    if (conviction < 40) {
+      rationale.push(`SQUEEZE_PRO_BLOCK: Conviction ${conviction} < 40`);
+      return this._blocked(ticker, conviction, rationale);
+    }
+
+    // ── 6. Trade type and parameters ──
+    const action = isLong ? 'BUY_CALL' : 'BUY_PUT';
+    const contractType = isLong ? 'CALL' : 'PUT';
+    const deltaTargets = this._selectDeltaTargets(conviction, contractType, rationale);
+    const sizeMultiplier = this._convictionToSize(conviction);
+
+    // High compression squeezes produce more explosive moves — scale up
+    const finalSize = compressionScore >= 80
+      ? Math.min(2.0, sizeMultiplier * 1.25)
+      : sizeMultiplier;
+
+    // Timeframe-aware DTE: scalp → short DTE, swing → medium, position → long
+    const intervalNum = parseInt(timeframe, 10) || 15;
+    let dteTarget, dteMin, dteMax;
+    if (intervalNum <= 5) {
+      dteTarget = 5; dteMin = 3; dteMax = 7;
+      rationale.push('DTE: Scalp timeframe (5min) → 3-7 DTE');
+    } else if (intervalNum <= 15) {
+      dteTarget = 10; dteMin = 7; dteMax = 14;
+      rationale.push('DTE: Day trade timeframe (15min) → 7-14 DTE');
+    } else if (intervalNum <= 60) {
+      dteTarget = 21; dteMin = 14; dteMax = 30;
+      rationale.push('DTE: Swing timeframe (1hr) → 14-30 DTE');
+    } else {
+      dteTarget = 35; dteMin = 21; dteMax = 45;
+      rationale.push('DTE: Position timeframe (4hr+) → 21-45 DTE');
+    }
+
+    rationale.push(
+      `SQUEEZE_PRO_APPROVED: compression=${compressionScore} conviction=${conviction} ` +
+      `bars=${barsCompressed} vol_ratio=${volumeRatio.toFixed(2)} htf=${htfBias}`
+    );
+    rationale.push(`SIZE: ${finalSize}x (conviction=${conviction}${compressionScore >= 80 ? ', high-compression 1.25x boost' : ''})`);
+
+    return {
+      action,
+      ticker,
+      strike: null,
+      expiry: null,
+      delta_target: deltaTargets.target,
+      delta_min: deltaTargets.min,
+      delta_max: deltaTargets.max,
+      dte_target: dteTarget,
+      dte_min: dteMin,
+      dte_max: dteMax,
+      size_multiplier: finalSize,
+      conviction_score: conviction,
+      rationale,
+      risk_parameters: {
+        stop_level: stop,
+        stop_source: 'SQUEEZE_PRO_SIGNAL',
         max_loss: risk * 100,
       },
       contractType,

@@ -1,6 +1,6 @@
+const Sentry = require('@sentry/node');
+
 const errorHandler = (err, req, res, next) => {
-  // Skip logging for benign client disconnect errors
-  // These occur when users navigate away, close browser, or network drops
   const isClientDisconnect = err.message === 'aborted' ||
                               err.code === 'ECONNRESET' ||
                               err.code === 'EPIPE' ||
@@ -10,7 +10,6 @@ const errorHandler = (err, req, res, next) => {
     console.error(err.stack);
   }
 
-  // If client disconnected, no point sending response
   if (isClientDisconnect) {
     return;
   }
@@ -29,14 +28,14 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
-  if (err.code === '23505') { // PostgreSQL unique violation
+  if (err.code === '23505') {
     return res.status(409).json({
       error: 'Conflict',
       message: 'Resource already exists'
     });
   }
 
-  if (err.code === '23503') { // PostgreSQL foreign key violation
+  if (err.code === '23503') {
     return res.status(400).json({
       error: 'Bad Request',
       message: 'Invalid reference'

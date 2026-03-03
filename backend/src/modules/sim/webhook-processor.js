@@ -13,6 +13,13 @@ const NotificationService = require('../../services/notificationService');
 const logger = require('../../utils/logger');
 const { assertSimMode } = require('../../config/tradingMode');
 
+// Context sources should be processed before trade triggers within each batch
+// so that state is fresh when trade decisions are evaluated.
+const SOURCE_PRIORITY = {
+  MTF_BIAS: 0, TREND: 1, SATY_PHASE: 2, MARKET_CONTEXT: 3,
+  OPTIONS_FLOW: 4, PRICE_TICK: 5, CHAIN_SNAPSHOT: 6,
+};
+
 /**
  * Webhook processor -- picks up RECEIVED events and runs them through the sim pipeline.
  * Pipeline: webhook -> decision router -> executor -> trade finalizer
@@ -154,6 +161,18 @@ class WebhookProcessor {
   async processPending() {
     const pending = await webhookService.getPending(50);
     if (pending.length === 0) return [];
+
+    // Sort batch: context sources first, then trade triggers, preserving received_at order within each group
+    pending.sort((a, b) => {
+      const payloadA = typeof a.raw_payload === 'string' ? JSON.parse(a.raw_payload) : a.raw_payload;
+      const payloadB = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload;
+      const srcA = a._detectedSource || (a._detectedSource = detectIndicatorSource(payloadA));
+      const srcB = b._detectedSource || (b._detectedSource = detectIndicatorSource(payloadB));
+      const prioA = SOURCE_PRIORITY[srcA] ?? 10;
+      const prioB = SOURCE_PRIORITY[srcB] ?? 10;
+      if (prioA !== prioB) return prioA - prioB;
+      return new Date(a.received_at) - new Date(b.received_at);
+    });
 
     // Phase 1: Run all through decision router to get approvals
     const evaluated = [];

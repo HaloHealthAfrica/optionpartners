@@ -4,3 +4,5 @@ sdk
 .env
 *.log
 .git
+src/__tests__
+scripts

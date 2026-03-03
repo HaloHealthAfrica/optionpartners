@@ -2,6 +2,7 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
+const Sentry = require('@sentry/node');
 
 class LedgerService {
   /**
@@ -62,6 +63,7 @@ class LedgerService {
       logger.info(`Sim account reset for user ${userId}`, 'sim-ledger');
     } catch (error) {
       await client.query('ROLLBACK');
+      Sentry.captureException(error, { tags: { module: 'sim-ledger' } });
       throw error;
     } finally {
       client.release();

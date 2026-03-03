@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const EmailService = require('./emailService');
+const Sentry = require('@sentry/node');
 
 function maskEmail(email) {
   if (!email || !email.includes('@')) return '***';
@@ -28,6 +29,7 @@ class TrialScheduler {
       
     } catch (error) {
       console.error('[ERROR] Error running trial scheduled tasks:', error);
+      Sentry.captureException(error, { tags: { module: 'trial-scheduler' } });
     }
   }
   
@@ -84,11 +86,13 @@ class TrialScheduler {
           console.log(`Trial reminder sent to ${maskEmail(user.email)} (${daysRemaining} days)`);
         } catch (error) {
           console.error(`Failed to send trial reminder to ${maskEmail(user.email)}:`, error);
+          Sentry.captureException(error, { tags: { module: 'trial-scheduler' } });
         }
       }
       
     } catch (error) {
       console.error(`Error sending trial reminders for ${daysRemaining} days:`, error);
+      Sentry.captureException(error, { tags: { module: 'trial-scheduler' } });
     }
   }
   
@@ -141,11 +145,13 @@ class TrialScheduler {
           console.log(`Trial expiration notice sent to ${maskEmail(user.email)}`);
         } catch (error) {
           console.error(`Failed to send trial expiration notice to ${maskEmail(user.email)}:`, error);
+          Sentry.captureException(error, { tags: { module: 'trial-scheduler' } });
         }
       }
       
     } catch (error) {
       console.error('Error sending trial expiration notices:', error);
+      Sentry.captureException(error, { tags: { module: 'trial-scheduler' } });
     }
   }
   

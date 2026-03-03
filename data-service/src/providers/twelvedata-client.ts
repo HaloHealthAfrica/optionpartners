@@ -37,6 +37,12 @@ interface TDQuote {
   timestamp: number;
 }
 
+interface TDErrorResponse {
+  code: number;
+  message: string;
+  status: 'error';
+}
+
 interface TDMarketState {
   name: string;
   code: string;
@@ -102,6 +108,8 @@ export class TwelveDataClient extends BaseProvider implements MarketDataProvider
       apikey: config.twelveData.apiKey,
     });
 
+    this.checkApiError(data);
+
     if (!data || !data.close) {
       throw new ProviderError(this.name, 'PARSE_ERROR', `Empty quote response for ${symbol}`);
     }
@@ -129,6 +137,8 @@ export class TwelveDataClient extends BaseProvider implements MarketDataProvider
       outputsize: limit,
       apikey: config.twelveData.apiKey,
     });
+
+    this.checkApiError(data);
 
     if (!data?.values || !Array.isArray(data.values)) {
       throw new ProviderError(this.name, 'PARSE_ERROR', `Invalid candle response for ${symbol}`);
@@ -174,13 +184,22 @@ export class TwelveDataClient extends BaseProvider implements MarketDataProvider
 
   async healthCheck(): Promise<boolean> {
     try {
-      await this.request('GET', '/quote', {
+      const data = await this.request<TDQuote>('GET', '/quote', {
         symbol: 'SPY',
         apikey: config.twelveData.apiKey,
       });
+      this.checkApiError(data);
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private checkApiError(data: unknown): void {
+    const err = data as TDErrorResponse;
+    if (err && typeof err === 'object' && err.status === 'error') {
+      const code = err.code === 401 || err.code === 403 ? 'AUTH_ERROR' : 'API_ERROR';
+      throw new ProviderError(this.name, code, err.message || 'TwelveData API error', err.code);
     }
   }
 }

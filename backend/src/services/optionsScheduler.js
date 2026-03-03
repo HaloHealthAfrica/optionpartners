@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const Sentry = require('@sentry/node');
 
 class OptionsScheduler {
   constructor() {
@@ -81,6 +82,7 @@ class OptionsScheduler {
             `${logPrefix} Failed to close option ${option.id} (${option.symbol}):`,
             error.message
           );
+          Sentry.captureException(error, { tags: { module: 'options-scheduler' } });
         }
       }
 
@@ -92,6 +94,7 @@ class OptionsScheduler {
 
     } catch (error) {
       console.error(`${logPrefix} [ERROR] Error in automatic expired options closure:`, error);
+      Sentry.captureException(error, { tags: { module: 'options-scheduler' } });
     }
   }
 

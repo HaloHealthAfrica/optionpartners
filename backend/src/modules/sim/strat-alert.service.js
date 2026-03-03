@@ -3,6 +3,7 @@
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
 const { normalizeDirection, STRAT_PLAN_EVENTS } = require('../webhooks/indicator-detector');
+const Sentry = require('@sentry/node');
 
 const PLAN_EVENT_SET = STRAT_PLAN_EVENTS;
 
@@ -110,6 +111,7 @@ async function _handleV1(payload, userId, webhookEventId) {
     return alert;
   } catch (err) {
     logger.error(`[STRAT_ALERT] Insert failed: ${err.message}`, 'strat-alert');
+    Sentry.captureException(err, { tags: { module: 'strat-alert' } });
     return null;
   }
 }
@@ -176,6 +178,7 @@ async function _handleV2(payload, userId, webhookEventId) {
       }
     } catch (err) {
       logger.error(`[STRAT_ALERT] Lifecycle update failed: ${err.message}`, 'strat-alert');
+      Sentry.captureException(err, { tags: { module: 'strat-alert' } });
     }
   }
 
@@ -222,6 +225,7 @@ async function _handleV2(payload, userId, webhookEventId) {
     return alert;
   } catch (err) {
     logger.error(`[STRAT_ALERT] V2 insert failed: ${err.message}`, 'strat-alert');
+    Sentry.captureException(err, { tags: { module: 'strat-alert' } });
     return null;
   }
 }

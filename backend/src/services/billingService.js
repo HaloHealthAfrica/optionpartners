@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const TierService = require('./tierService');
 const User = require('../models/User');
+const Sentry = require('@sentry/node');
 
 // Conditionally load Stripe only if billing is enabled
 let stripe = null;
@@ -44,6 +45,7 @@ class BillingService {
       return true;
     } catch (error) {
       console.error('Failed to initialize Stripe:', error);
+      Sentry.captureException(error, { tags: { module: 'billing-service' } });
       return false;
     }
   }
@@ -191,6 +193,7 @@ class BillingService {
           return portalSession;
         } catch (configError) {
           console.error('Failed to create customer portal configuration:', configError);
+          Sentry.captureException(configError, { tags: { module: 'billing-service' } });
           throw new Error('Customer portal is not properly configured. Please contact support.');
         }
       } else {
@@ -241,6 +244,7 @@ class BillingService {
       };
     } catch (error) {
       console.error('Error fetching Stripe subscription:', error);
+      Sentry.captureException(error, { tags: { module: 'billing-service' } });
       // Return database info as fallback
       return {
         id: subscription.stripe_subscription_id,
@@ -367,6 +371,7 @@ class BillingService {
           }
         } catch (error) {
           console.error('Error fetching customer:', error);
+          Sentry.captureException(error, { tags: { module: 'billing-service' } });
           return;
         }
       } else {
@@ -622,12 +627,14 @@ class BillingService {
           });
         } catch (error) {
           console.error(`Error fetching price ${priceId}:`, error);
+          Sentry.captureException(error, { tags: { module: 'billing-service' } });
         }
       }
 
       return plans;
     } catch (error) {
       console.error('Error fetching pricing plans:', error);
+      Sentry.captureException(error, { tags: { module: 'billing-service' } });
       return [];
     }
   }

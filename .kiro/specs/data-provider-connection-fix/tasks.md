@@ -1,0 +1,125 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Fault Condition** - Provider Registration and Error Surfacing
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior - it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the bug exists
+  - **Scoped PBT Approach**: Scope the property to concrete failing cases: missing/empty API keys, no registered providers, stuck circuit breaker
+  - Test that service initialization with missing API keys fails to log diagnostic warnings (from Fault Condition in design)
+  - Test that quote requests with no registered providers return mock data instead of 503 errors
+  - Test that circuit breaker remains OPEN after underlying issue is resolved
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct - it proves the bug exists)
+  - Document counterexamples found:
+    - No diagnostic logging during provider registration
+    - Silent fallback to mock pricing instead of 503 error
+    - Circuit breaker state persists without recovery mechanism
+    - Health check doesn't surface configuration issues
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Healthy Provider Behavior
+  - **IMPORTANT**: Follow observation-first methodology
+  - Observe behavior on UNFIXED code for non-buggy inputs (valid API keys, healthy providers)
+  - Write property-based tests capturing observed behavior patterns from Preservation Requirements:
+    - Provider fallback priority (TwelveData → Unusual Whales → Polygon) works correctly
+    - Cache-first behavior returns cached data without external API calls
+    - Rate limiting respect and automatic fallback to alternative providers
+    - In-memory caching when database/Redis is unavailable
+    - Health check endpoint returns provider status, circuit breaker state, success rates
+  - Property-based testing generates many test cases for stronger guarantees
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
+
+- [ ] 3. Fix for data provider connection issues
+
+  - [x] 3.1 Add provider registration validation and diagnostic logging
+    - Modify provider registration logic in `data-service/src/index.ts` or equivalent initialization module
+    - Log INFO message for each provider that registers successfully with API key present
+    - Log WARN message for each provider that fails to register due to missing/empty API key
+    - Log ERROR message if zero providers register after initialization
+    - Add startup validation that logs provider registration summary
+    - _Bug_Condition: isBugCondition(input) where input.type == "initialization" AND API keys are missing/empty_
+    - _Expected_Behavior: System logs clear warning messages indicating which providers failed to register and why (Property 1)_
+    - _Preservation: Provider fallback priority and registration logic for valid keys must remain unchanged (Requirements 3.1)_
+    - _Requirements: 2.1, 2.4, 2.5_
+
+  - [x] 3.2 Implement circuit breaker reset endpoint and auto-recovery
+    - Add manual circuit breaker reset endpoint in `data-service/src/api/routes.ts`: POST /api/admin/circuit-breaker/reset
+    - Modify circuit breaker logic in `data-service/src/services/circuit-breaker.ts` to clear state on service restart
+    - Implement automatic recovery mechanism (half-open state testing) when underlying issue is resolved
+    - Add circuit breaker state transition logging (CLOSED → OPEN → HALF_OPEN → CLOSED)
+    - _Bug_Condition: isBugCondition(input) where circuitBreakerState == "OPEN" AND underlyingIssueResolved == true_
+    - _Expected_Behavior: Circuit breaker recovers automatically or via reset endpoint when configuration is corrected (Property 1)_
+    - _Preservation: Circuit breaker behavior for ongoing failures must remain unchanged (Requirements 3.4)_
+    - _Requirements: 2.6_
+
+  - [x] 3.3 Replace silent fallbacks with explicit 503 errors
+    - Modify DataOrchestrator in `data-service/src/services/data-orchestrator.ts` to throw ServiceUnavailableError when no providers are available
+    - Update backend proxy in `backend/src/services/dataServiceProxy.js` to return 503 status code instead of falling back to mock pricing
+    - Add error response body with actionable message: "Market data service unavailable - no data providers configured"
+    - Remove or disable silent fallback to mock pricing in error handling paths
+    - _Bug_Condition: isBugCondition(input) where input.type == "quoteRequest" AND registeredProviders.length == 0_
+    - _Expected_Behavior: System returns 503 Service Unavailable error instead of falling back to mock pricing (Property 1)_
+    - _Preservation: Error handling for transient provider failures (with fallback to secondary providers) must remain unchanged (Requirements 3.3)_
+    - _Requirements: 2.3_
+
+  - [x] 3.4 Enhance health check diagnostics
+    - Modify health check endpoint in `data-service/src/api/routes.ts` to include provider registration status
+    - Add fields: registered (true/false), registrationReason (e.g., "API key missing"), apiKeyConfigured (true/false)
+    - Include circuit breaker state and reason for OPEN state (e.g., "3 consecutive authentication failures")
+    - Add last error message for each provider to aid debugging (without exposing sensitive data)
+    - _Bug_Condition: Health check doesn't surface provider configuration issues when isBugCondition returns true_
+    - _Expected_Behavior: Health check provides actionable diagnostic information for configuration issues (Property 1)_
+    - _Preservation: Existing health check fields (provider status, circuit breaker state, success rates, rate limits) must remain unchanged (Requirements 3.7)_
+    - _Requirements: 2.4, 2.5_
+
+  - [x] 3.5 Add configuration validation at startup
+    - Add configuration validation in `data-service/src/config/index.ts` or equivalent config module
+    - Validate that at least one provider API key is configured (non-empty)
+    - Log configuration summary at startup showing which API keys are present/missing
+    - Add startup health check that validates provider registration before marking service as ready
+    - Create deployment verification documentation for Fly.io secrets (flyctl secrets list)
+    - _Bug_Condition: isBugCondition(input) where input.type == "initialization" AND all API keys are missing_
+    - _Expected_Behavior: System logs clear configuration status at startup (Property 1)_
+    - _Preservation: Service startup behavior when configuration is valid must remain unchanged_
+    - _Requirements: 2.1, 2.4_
+
+  - [x] 3.6 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Provider Registration and Error Surfacing
+    - **IMPORTANT**: Re-run the SAME test from task 1 - do NOT write a new test
+    - The test from task 1 encodes the expected behavior
+    - When this test passes, it confirms the expected behavior is satisfied
+    - Run bug condition exploration test from step 1
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed)
+    - Verify diagnostic logging appears for missing API keys
+    - Verify 503 errors are returned instead of mock pricing
+    - Verify circuit breaker recovery works correctly
+    - Verify health check includes diagnostic information
+    - _Requirements: 2.1, 2.3, 2.4, 2.5, 2.6_
+
+  - [x] 3.7 Verify preservation tests still pass
+    - **Property 2: Preservation** - Healthy Provider Behavior
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm provider fallback priority still works correctly
+    - Confirm cache-first behavior is unchanged
+    - Confirm rate limiting and provider rotation still work
+    - Confirm health check includes all original fields
+    - Confirm all tests still pass after fix (no regressions)
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
+
+- [-] 4. Checkpoint - Ensure all tests pass
+  - Run all exploration tests and verify they now pass (bug is fixed)
+  - Run all preservation tests and verify they still pass (no regressions)
+  - Run integration tests with Fly.io deployment to verify end-to-end functionality
+  - Verify real market data is returned for SPY, IWM, QQQ symbols
+  - Verify diagnostic logging appears in production logs
+  - Verify health check endpoint shows correct provider status
+  - Ask the user if questions arise or if additional verification is needed
