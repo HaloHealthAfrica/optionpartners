@@ -62,6 +62,52 @@ function parseOptionSymbol(optionSymbol: string): {
   };
 }
 
+/**
+ * Standard normal CDF approximation (Abramowitz & Stegun 26.2.17).
+ * Max error ~7.5e-8.
+ */
+function normCdf(x: number): number {
+  if (x > 6) return 1;
+  if (x < -6) return 0;
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const absX = Math.abs(x);
+  const t = 1.0 / (1.0 + p * absX);
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX / 2);
+  return 0.5 * (1.0 + sign * y);
+}
+
+/**
+ * Estimate option delta using Black-Scholes.
+ * @param type 'call' or 'put'
+ * @param S underlying price
+ * @param K strike price
+ * @param T time to expiry in years
+ * @param sigma implied volatility (annualized)
+ * @param r risk-free rate (default 0.045)
+ */
+function estimateDelta(
+  type: 'call' | 'put', S: number, K: number, T: number, sigma: number, r = 0.045,
+): { delta: number; gamma: number; theta: number; vega: number } {
+  if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) {
+    const intrinsic = type === 'call' ? (S > K ? 1 : 0) : (S < K ? -1 : 0);
+    return { delta: intrinsic, gamma: 0, theta: 0, vega: 0 };
+  }
+  const sqrtT = Math.sqrt(T);
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
+  const d2 = d1 - sigma * sqrtT;
+  const nd1 = normCdf(d1);
+  const nd1pdf = Math.exp(-0.5 * d1 * d1) / Math.sqrt(2 * Math.PI);
+
+  const delta = type === 'call' ? nd1 : nd1 - 1;
+  const gamma = nd1pdf / (S * sigma * sqrtT);
+  const theta = (-(S * nd1pdf * sigma) / (2 * sqrtT) - r * K * Math.exp(-r * T) * normCdf(type === 'call' ? d2 : -d2) * (type === 'call' ? 1 : -1)) / 365;
+  const vega = S * nd1pdf * sqrtT / 100;
+
+  return { delta, gamma, theta, vega };
+}
+
 interface UWGreeksResponse {
   data: Array<{
     date: string;
@@ -191,43 +237,96 @@ export class UnusualWhalesClient extends BaseProvider implements MarketDataProvi
 
     this.log.info({ symbol, rawCount: response.data.length }, 'Parsing UW option-contracts response');
 
-    const contracts: OptionsContract[] = [];
+    // First pass: parse all contracts and infer underlying price from put-call parity
+    const rawParsed: Array<{
+      raw: (typeof response.data)[0];
+      parsed: NonNullable<ReturnType<typeof parseOptionSymbol>>;
+      bid: number; ask: number; mid: number; iv: number;
+    }> = [];
     const expirationSet = new Set<string>();
 
     for (const c of response.data) {
       const parsed = parseOptionSymbol(c.option_symbol);
-      if (!parsed) {
-        this.log.debug({ optionSymbol: c.option_symbol }, 'Could not parse option symbol — skipping');
-        continue;
-      }
-
+      if (!parsed) continue;
       expirationSet.add(parsed.expiry);
-
       const bid = Number(c.nbbo_bid) || 0;
       const ask = Number(c.nbbo_ask) || 0;
+      const mid = bid && ask ? (bid + ask) / 2 : Number(c.last_price) || 0;
+      rawParsed.push({ raw: c, parsed, bid, ask, mid, iv: Number(c.implied_volatility) || 0 });
+    }
+
+    // Infer underlying price: find the strike where call and put mid prices
+    // are closest (ATM). Group by strike for the nearest expiry.
+    let underlyingPrice = 0;
+    const sortedExpiries = [...expirationSet].sort();
+    const nearestExpiry = sortedExpiries[0];
+    if (nearestExpiry) {
+      const nearExpContracts = rawParsed.filter(r => r.parsed.expiry === nearestExpiry);
+      const strikeMap = new Map<number, { callMid: number; putMid: number }>();
+      for (const r of nearExpContracts) {
+        const entry = strikeMap.get(r.parsed.strike) || { callMid: 0, putMid: 0 };
+        if (r.parsed.type === 'call') entry.callMid = r.mid;
+        else entry.putMid = r.mid;
+        strikeMap.set(r.parsed.strike, entry);
+      }
+      // ATM strike: where |callMid - putMid| is minimized (put-call parity)
+      let minDiff = Infinity;
+      for (const [strike, { callMid, putMid }] of strikeMap) {
+        if (callMid > 0 && putMid > 0) {
+          const diff = Math.abs(callMid - putMid);
+          if (diff < minDiff) {
+            minDiff = diff;
+            underlyingPrice = strike;
+          }
+        }
+      }
+      if (underlyingPrice === 0) {
+        // Fallback: use highest-volume strike as ATM proxy
+        let maxVol = 0;
+        for (const r of nearExpContracts) {
+          const vol = Number(r.raw.volume) || 0;
+          if (vol > maxVol) { maxVol = vol; underlyingPrice = r.parsed.strike; }
+        }
+      }
+    }
+
+    this.log.info({ symbol, inferredUnderlyingPrice: underlyingPrice }, 'Inferred underlying for delta estimation');
+
+    // Second pass: build contracts with estimated Greeks
+    const contracts: OptionsContract[] = [];
+    const now = Date.now();
+
+    for (const { raw, parsed, bid, ask, mid, iv } of rawParsed) {
+      const expiryDate = new Date(parsed.expiry + 'T16:00:00Z');
+      const T = Math.max(0, (expiryDate.getTime() - now) / (365.25 * 24 * 60 * 60 * 1000));
+
+      let greeks = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+      if (underlyingPrice > 0 && iv > 0 && T > 0) {
+        greeks = estimateDelta(parsed.type, underlyingPrice, parsed.strike, T, iv);
+      }
 
       contracts.push({
-        symbol: c.option_symbol,
+        symbol: raw.option_symbol,
         underlyingSymbol: parsed.underlying,
         type: parsed.type,
         strike: parsed.strike,
         expiration: parsed.expiry,
         bid,
         ask,
-        mid: bid && ask ? (bid + ask) / 2 : Number(c.last_price) || 0,
-        last: Number(c.last_price) || 0,
-        volume: Number(c.volume) || 0,
-        openInterest: Number(c.open_interest) || 0,
-        impliedVolatility: Number(c.implied_volatility) || 0,
-        delta: 0,
-        gamma: 0,
-        theta: 0,
-        vega: 0,
+        mid,
+        last: Number(raw.last_price) || 0,
+        volume: Number(raw.volume) || 0,
+        openInterest: Number(raw.open_interest) || 0,
+        impliedVolatility: iv,
+        delta: Math.round(greeks.delta * 10000) / 10000,
+        gamma: Math.round(greeks.gamma * 10000) / 10000,
+        theta: Math.round(greeks.theta * 10000) / 10000,
+        vega: Math.round(greeks.vega * 10000) / 10000,
       });
     }
 
     const expirations = [...expirationSet].sort();
-    this.log.info({ symbol, contracts: contracts.length, expirations: expirations.length }, 'Options chain parsed');
+    this.log.info({ symbol, contracts: contracts.length, expirations: expirations.length }, 'Options chain parsed with Greeks');
 
     return { symbol, expirations, contracts, timestamp: Date.now() };
   }
