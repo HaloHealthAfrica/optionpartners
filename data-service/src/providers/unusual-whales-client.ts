@@ -21,22 +21,45 @@ import type {
 interface UWOptionsChainResponse {
   data: Array<{
     option_symbol: string;
-    underlying_symbol: string;
-    option_type: string;
-    strike: number | string;
-    expiry: string;
-    bid: number | string;
-    ask: number | string;
-    mid_price: number | string;
-    last_price: number | string;
-    volume: number;
-    open_interest: number;
+    volume: number | string;
     implied_volatility: number | string;
-    delta: number | string;
-    gamma: number | string;
-    theta: number | string;
-    vega: number | string;
+    open_interest: number | string;
+    last_price: number | string;
+    nbbo_ask: number | string;
+    nbbo_bid: number | string;
+    ask_volume: number | string;
+    avg_price: number | string;
+    bid_volume: number | string;
+    floor_volume: number | string;
+    high_price: number | string;
+    low_price: number | string;
+    total_premium: number | string;
+    prev_oi: number | string;
   }>;
+}
+
+/**
+ * Parse OCC option symbol: e.g. "SPY260303C00680000"
+ * Format: SYMBOL + YYMMDD + C/P + strike*1000 (8 digits)
+ */
+function parseOptionSymbol(optionSymbol: string): {
+  underlying: string;
+  expiry: string;
+  type: 'call' | 'put';
+  strike: number;
+} | null {
+  const match = optionSymbol.match(/^([A-Z]+)(\d{6})([CP])(\d{8})$/);
+  if (!match) return null;
+  const [, underlying, dateStr, cp, strikeStr] = match;
+  const yy = dateStr.slice(0, 2);
+  const mm = dateStr.slice(2, 4);
+  const dd = dateStr.slice(4, 6);
+  return {
+    underlying,
+    expiry: `20${yy}-${mm}-${dd}`,
+    type: cp === 'C' ? 'call' : 'put',
+    strike: parseInt(strikeStr, 10) / 1000,
+  };
 }
 
 interface UWGreeksResponse {
@@ -166,37 +189,45 @@ export class UnusualWhalesClient extends BaseProvider implements MarketDataProvi
       throw new ProviderError(this.name, 'PARSE_ERROR', `Empty or invalid options chain for ${symbol}`);
     }
 
-    const rawCount = response.data.length;
-    if (rawCount > 0 && !response.data[0].option_type) {
-      const sample = response.data[0];
-      this.log.warn(
-        { symbol, rawCount, sampleKeys: Object.keys(sample), sample: JSON.stringify(sample).slice(0, 300) },
-        'Options chain entries missing option_type — inspecting structure',
-      );
+    this.log.info({ symbol, rawCount: response.data.length }, 'Parsing UW option-contracts response');
+
+    const contracts: OptionsContract[] = [];
+    const expirationSet = new Set<string>();
+
+    for (const c of response.data) {
+      const parsed = parseOptionSymbol(c.option_symbol);
+      if (!parsed) {
+        this.log.debug({ optionSymbol: c.option_symbol }, 'Could not parse option symbol — skipping');
+        continue;
+      }
+
+      expirationSet.add(parsed.expiry);
+
+      const bid = Number(c.nbbo_bid) || 0;
+      const ask = Number(c.nbbo_ask) || 0;
+
+      contracts.push({
+        symbol: c.option_symbol,
+        underlyingSymbol: parsed.underlying,
+        type: parsed.type,
+        strike: parsed.strike,
+        expiration: parsed.expiry,
+        bid,
+        ask,
+        mid: bid && ask ? (bid + ask) / 2 : Number(c.last_price) || 0,
+        last: Number(c.last_price) || 0,
+        volume: Number(c.volume) || 0,
+        openInterest: Number(c.open_interest) || 0,
+        impliedVolatility: Number(c.implied_volatility) || 0,
+        delta: 0,
+        gamma: 0,
+        theta: 0,
+        vega: 0,
+      });
     }
 
-    const expirations = [...new Set(response.data.map((c) => c.expiry).filter(Boolean))].sort();
-
-    const contracts: OptionsContract[] = response.data
-      .filter((c) => c.option_type)
-      .map((c) => ({
-        symbol: c.option_symbol,
-        underlyingSymbol: c.underlying_symbol,
-        type: (c.option_type || 'call').toLowerCase() as 'call' | 'put',
-        strike: Number(c.strike),
-        expiration: c.expiry,
-        bid: Number(c.bid),
-        ask: Number(c.ask),
-        mid: Number(c.mid_price),
-        last: Number(c.last_price),
-        volume: Number(c.volume),
-        openInterest: Number(c.open_interest),
-        impliedVolatility: Number(c.implied_volatility),
-        delta: Number(c.delta),
-        gamma: Number(c.gamma),
-        theta: Number(c.theta),
-        vega: Number(c.vega),
-      }));
+    const expirations = [...expirationSet].sort();
+    this.log.info({ symbol, contracts: contracts.length, expirations: expirations.length }, 'Options chain parsed');
 
     return { symbol, expirations, contracts, timestamp: Date.now() };
   }
