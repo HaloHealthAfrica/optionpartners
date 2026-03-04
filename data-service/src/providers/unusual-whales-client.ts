@@ -158,30 +158,32 @@ export class UnusualWhalesClient extends BaseProvider implements MarketDataProvi
       this.authHeaders,
     );
 
-    if (!response?.data) {
-      throw new ProviderError(this.name, 'PARSE_ERROR', `Empty options chain for ${symbol}`);
+    if (!response?.data || !Array.isArray(response.data)) {
+      throw new ProviderError(this.name, 'PARSE_ERROR', `Empty or invalid options chain for ${symbol}`);
     }
 
-    const expirations = [...new Set(response.data.map((c) => c.expiry))].sort();
+    const expirations = [...new Set(response.data.map((c) => c.expiry).filter(Boolean))].sort();
 
-    const contracts: OptionsContract[] = response.data.map((c) => ({
-      symbol: c.option_symbol,
-      underlyingSymbol: c.underlying_symbol,
-      type: c.option_type.toLowerCase() as 'call' | 'put',
-      strike: Number(c.strike),
-      expiration: c.expiry,
-      bid: Number(c.bid),
-      ask: Number(c.ask),
-      mid: Number(c.mid_price),
-      last: Number(c.last_price),
-      volume: Number(c.volume),
-      openInterest: Number(c.open_interest),
-      impliedVolatility: Number(c.implied_volatility),
-      delta: Number(c.delta),
-      gamma: Number(c.gamma),
-      theta: Number(c.theta),
-      vega: Number(c.vega),
-    }));
+    const contracts: OptionsContract[] = response.data
+      .filter((c) => c.option_type)
+      .map((c) => ({
+        symbol: c.option_symbol,
+        underlyingSymbol: c.underlying_symbol,
+        type: (c.option_type || 'call').toLowerCase() as 'call' | 'put',
+        strike: Number(c.strike),
+        expiration: c.expiry,
+        bid: Number(c.bid),
+        ask: Number(c.ask),
+        mid: Number(c.mid_price),
+        last: Number(c.last_price),
+        volume: Number(c.volume),
+        openInterest: Number(c.open_interest),
+        impliedVolatility: Number(c.implied_volatility),
+        delta: Number(c.delta),
+        gamma: Number(c.gamma),
+        theta: Number(c.theta),
+        vega: Number(c.vega),
+      }));
 
     return { symbol, expirations, contracts, timestamp: Date.now() };
   }
