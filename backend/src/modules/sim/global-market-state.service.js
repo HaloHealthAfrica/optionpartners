@@ -216,8 +216,8 @@ class GlobalMarketStateService {
     const results = {};
     for (const sym of symbols) {
       results[sym] = await this.refreshAll(sym);
-      // Small delay between symbols to avoid rate-limiting
-      await new Promise(r => setTimeout(r, 200));
+      // Delay between symbols to respect TwelveData rate limits (8 req/min free tier)
+      await new Promise(r => setTimeout(r, 1500));
     }
     return results;
   }

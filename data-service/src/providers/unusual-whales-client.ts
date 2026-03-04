@@ -159,7 +159,20 @@ export class UnusualWhalesClient extends BaseProvider implements MarketDataProvi
     );
 
     if (!response?.data || !Array.isArray(response.data)) {
+      this.log.warn(
+        { symbol, responseType: typeof response?.data, responseKeys: response ? Object.keys(response) : [] },
+        'Options chain response is not an array — check UW API format',
+      );
       throw new ProviderError(this.name, 'PARSE_ERROR', `Empty or invalid options chain for ${symbol}`);
+    }
+
+    const rawCount = response.data.length;
+    if (rawCount > 0 && !response.data[0].option_type) {
+      const sample = response.data[0];
+      this.log.warn(
+        { symbol, rawCount, sampleKeys: Object.keys(sample), sample: JSON.stringify(sample).slice(0, 300) },
+        'Options chain entries missing option_type — inspecting structure',
+      );
     }
 
     const expirations = [...new Set(response.data.map((c) => c.expiry).filter(Boolean))].sort();
