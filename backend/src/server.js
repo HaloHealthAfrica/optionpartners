@@ -581,10 +581,41 @@ async function startServer() {
       }
 
       // Start global market state poller (shared price + chain data for all users)
+      // Uses adaptive intervals: faster during market hours, slower off-hours,
+      // paused overnight/weekends. Freshness checks in GMS prevent redundant
+      // API calls when data-service pollers already keep the cache warm.
       if (process.env.ENABLE_MARKET_DATA_POLLER !== 'false') {
         const globalMarketState = require('./modules/sim/global-market-state.service');
-        const GMS_POLL_INTERVAL = parseInt(process.env.GMS_POLL_INTERVAL_MS || '60000', 10);
-        setInterval(async () => {
+        const { isMarketHours } = globalMarketState;
+        const GMS_RTH_INTERVAL = parseInt(process.env.GMS_POLL_INTERVAL_MS || '300000', 10);
+        const GMS_ETH_INTERVAL = parseInt(process.env.GMS_ETH_POLL_INTERVAL_MS || '900000', 10); // 15 min
+        const GMS_OVERNIGHT_INTERVAL = 30 * 60 * 1000; // 30 min
+
+        function getGmsSession() {
+          const now = new Date();
+          const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+          const day = et.getDay();
+          if (day === 0 || day === 6) return 'WEEKEND';
+          const mins = et.getHours() * 60 + et.getMinutes();
+          if (mins >= 570 && mins < 960) return 'RTH';
+          if ((mins >= 240 && mins < 570) || (mins >= 960 && mins < 1200)) return 'ETH';
+          return 'OVERNIGHT';
+        }
+
+        let gmsTimer = null;
+        let currentGmsSession = null;
+
+        async function gmsRefreshTick() {
+          const session = getGmsSession();
+          if (session === 'WEEKEND' || session === 'OVERNIGHT') {
+            if (currentGmsSession !== session) {
+              logger.info(`[GMS] Entering ${session} — reducing polling`, 'global-market-state');
+              currentGmsSession = session;
+              restartGmsTimer(GMS_OVERNIGHT_INTERVAL);
+            }
+            return;
+          }
+
           try {
             await globalMarketState.refreshAllSymbols();
             const alerts = await globalMarketState.detectDeadFeeds();
@@ -594,8 +625,26 @@ async function startServer() {
           } catch (err) {
             logger.error(`[GMS] Periodic refresh failed: ${err.message}`, 'global-market-state');
           }
-        }, GMS_POLL_INTERVAL);
-        console.log(`✓ Global market state poller started (every ${GMS_POLL_INTERVAL / 1000}s)`);
+
+          const newInterval = session === 'RTH' ? GMS_RTH_INTERVAL : GMS_ETH_INTERVAL;
+          if (session !== currentGmsSession) {
+            currentGmsSession = session;
+            restartGmsTimer(newInterval);
+            logger.info(`[GMS] Session=${session}, interval=${newInterval / 1000}s`, 'global-market-state');
+          }
+        }
+
+        function restartGmsTimer(intervalMs) {
+          if (gmsTimer) clearInterval(gmsTimer);
+          gmsTimer = setInterval(gmsRefreshTick, intervalMs);
+        }
+
+        const startSession = getGmsSession();
+        const startInterval = startSession === 'RTH' ? GMS_RTH_INTERVAL
+          : (startSession === 'ETH' ? GMS_ETH_INTERVAL : GMS_OVERNIGHT_INTERVAL);
+        currentGmsSession = startSession;
+        gmsTimer = setInterval(gmsRefreshTick, startInterval);
+        console.log(`✓ Global market state poller started (session=${startSession}, interval=${startInterval / 1000}s)`);
       }
     } else {
       console.log('Webhook processor disabled (ENABLE_WEBHOOK_PROCESSOR=false)');

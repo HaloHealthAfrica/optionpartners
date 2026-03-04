@@ -6,6 +6,7 @@ import { MacroPoller } from './macro-poller';
 import { VolatilityPoller } from './volatility-poller';
 import { IvPoller } from './iv-poller';
 import { ChainPricePoller } from './chain-price-poller';
+import { MarketSession, getCurrentSession, isActiveSession } from './market-session';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 import type { MacroRegimeService } from '../services/macro-regime';
 
@@ -34,7 +35,7 @@ export class WorkerManager {
   readonly chainPricePoller: ChainPricePoller;
 
   private marketHoursTimer: ReturnType<typeof setInterval> | null = null;
-  private isRTH = false;
+  private currentSession: MarketSession = MarketSession.OVERNIGHT;
 
   constructor(
     orchestrator: DataOrchestrator,
@@ -63,7 +64,6 @@ export class WorkerManager {
     if (config.enableIv !== false) this.ivPoller.start();
     if (config.enableChainPrice !== false) this.chainPricePoller.start();
 
-    // Check market hours every minute and adjust poller intervals
     this.startMarketHoursMonitor();
 
     log.info({
@@ -116,39 +116,50 @@ export class WorkerManager {
     return this.gexPoller.getSymbols();
   }
 
-  getStatus(): Record<string, { running: boolean; symbols?: string[]; metrics?: unknown }> {
+  getCurrentSession(): MarketSession {
+    return this.currentSession;
+  }
+
+  getStatus(): Record<string, { running: boolean; paused?: boolean; symbols?: string[]; metrics?: unknown }> {
     return {
-      gex: { running: this.gexPoller.isRunning(), symbols: this.gexPoller.getSymbols() },
-      flow: { running: this.flowPoller.isRunning(), symbols: this.flowPoller.getSymbols() },
-      vix: { running: this.vixPoller.isRunning() },
-      macro: { running: this.macroPoller.isRunning() },
-      volatility: { running: this.volatilityPoller.isRunning(), symbols: this.volatilityPoller.getSymbols() },
-      iv: { running: this.ivPoller.isRunning(), symbols: this.ivPoller.getSymbols() },
-      chainPrice: { running: this.chainPricePoller.isRunning(), symbols: this.chainPricePoller.getSymbols(), metrics: this.chainPricePoller.getMetrics() },
+      gex: { running: this.gexPoller.isRunning(), paused: this.gexPoller.isPaused(), symbols: this.gexPoller.getSymbols() },
+      flow: { running: this.flowPoller.isRunning(), paused: this.flowPoller.isPaused(), symbols: this.flowPoller.getSymbols() },
+      vix: { running: this.vixPoller.isRunning(), paused: this.vixPoller.isPaused() },
+      macro: { running: this.macroPoller.isRunning(), paused: this.macroPoller.isPaused() },
+      volatility: { running: this.volatilityPoller.isRunning(), paused: this.volatilityPoller.isPaused(), symbols: this.volatilityPoller.getSymbols() },
+      iv: { running: this.ivPoller.isRunning(), paused: this.ivPoller.isPaused(), symbols: this.ivPoller.getSymbols() },
+      chainPrice: { running: this.chainPricePoller.isRunning(), paused: this.chainPricePoller.isPaused(), symbols: this.chainPricePoller.getSymbols(), metrics: this.chainPricePoller.getMetrics() },
     };
   }
 
   private startMarketHoursMonitor(): void {
-    this.checkMarketHours();
-    this.marketHoursTimer = setInterval(() => this.checkMarketHours(), 60_000);
+    this.applySession(getCurrentSession());
+    this.marketHoursTimer = setInterval(() => {
+      const session = getCurrentSession();
+      if (session !== this.currentSession) {
+        this.applySession(session);
+      }
+    }, 60_000);
   }
 
-  private checkMarketHours(): void {
-    const now = new Date();
-    const utcHour = now.getUTCHours();
-    const utcMin = now.getUTCMinutes();
-    const totalUtcMin = utcHour * 60 + utcMin;
-    const day = now.getUTCDay();
+  private applySession(session: MarketSession): void {
+    const prev = this.currentSession;
+    this.currentSession = session;
 
-    // NYSE RTH: 9:30-16:00 ET = 14:30-21:00 UTC (approx, DST shifts this)
-    const isWeekday = day >= 1 && day <= 5;
-    const isRTH = isWeekday && totalUtcMin >= 870 && totalUtcMin < 1260;
+    log.info({ session, previousSession: prev }, 'Market session changed — adjusting pollers');
 
-    if (isRTH !== this.isRTH) {
-      this.isRTH = isRTH;
-      this.gexPoller.setMarketHoursInterval(isRTH);
-      this.chainPricePoller.setMarketHours(isRTH);
-      log.info({ isRTH }, 'Market hours state changed');
+    this.gexPoller.setSession(session);
+    this.flowPoller.setSession(session);
+    this.ivPoller.setSession(session);
+    this.chainPricePoller.setSession(session);
+
+    // VIX (CBOE) is cheap; keep it running but pause on weekends
+    if (session === MarketSession.WEEKEND) {
+      this.vixPoller.pause();
+    } else if (prev === MarketSession.WEEKEND) {
+      this.vixPoller.resume();
     }
   }
 }
+
+export { MarketSession } from './market-session';

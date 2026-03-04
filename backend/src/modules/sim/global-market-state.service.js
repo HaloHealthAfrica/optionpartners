@@ -78,10 +78,18 @@ class GlobalMarketStateService {
 
   /**
    * Refresh price for a symbol from the data-service.
-   * Updates global_market_state and price_cache atomically.
+   * Skips the API call if existing data is still fresh.
    */
-  async refreshPrice(symbol) {
+  async refreshPrice(symbol, { force = false } = {}) {
     const sym = symbol.toUpperCase();
+
+    if (!force) {
+      const existing = await this.getState(sym);
+      if (this.isPriceFresh(existing)) {
+        return existing.last_price ? parseFloat(existing.last_price) : null;
+      }
+    }
+
     try {
       const quote = await dataServiceProxy.getQuote(sym);
       const price = parseFloat(quote?.data?.price ?? quote?.data?.last ?? quote?.data?.close);
@@ -130,10 +138,18 @@ class GlobalMarketStateService {
 
   /**
    * Refresh options chain for a symbol from the data-service.
-   * Updates global_market_state with chain metrics.
+   * Skips the API call if existing data is still fresh.
    */
-  async refreshChain(symbol) {
+  async refreshChain(symbol, { force = false } = {}) {
     const sym = symbol.toUpperCase();
+
+    if (!force) {
+      const existing = await this.getState(sym);
+      if (this.isChainFresh(existing)) {
+        return existing.chain_ok ? { skipped: true } : null;
+      }
+    }
+
     try {
       const chainData = await dataServiceProxy.getOptionsChain(sym);
       const contracts = chainData?.data?.contracts || [];
@@ -194,11 +210,13 @@ class GlobalMarketStateService {
 
   /**
    * Refresh both price and chain for a symbol.
+   * Freshness checks prevent redundant API calls when data-service pollers
+   * have already updated the data recently.
    */
-  async refreshAll(symbol) {
+  async refreshAll(symbol, opts = {}) {
     const [price, chain] = await Promise.allSettled([
-      this.refreshPrice(symbol),
-      this.refreshChain(symbol),
+      this.refreshPrice(symbol, opts),
+      this.refreshChain(symbol, opts),
     ]);
     return {
       price: price.status === 'fulfilled' ? price.value : null,
@@ -208,17 +226,39 @@ class GlobalMarketStateService {
 
   /**
    * Refresh all tracked symbols. Called by the periodic poller.
+   * Freshness checks prevent duplicate API calls when data-service pollers
+   * are already keeping the cache warm.
    */
   async refreshAllSymbols() {
+    const mktHrs = isMarketHours();
     const result = await db.query('SELECT symbol FROM global_market_state ORDER BY symbol');
     const symbols = result.rows.map(r => r.symbol);
 
     const results = {};
+    let skipped = 0;
+    let refreshed = 0;
+
     for (const sym of symbols) {
-      results[sym] = await this.refreshAll(sym);
-      // Delay between symbols to respect TwelveData rate limits (8 req/min free tier)
-      await new Promise(r => setTimeout(r, 1500));
+      const res = await this.refreshAll(sym);
+      results[sym] = res;
+
+      const priceSkipped = res.price !== null && typeof res.price === 'number';
+      const chainSkipped = res.chain?.skipped;
+      if (priceSkipped || chainSkipped) skipped++;
+      else refreshed++;
+
+      if (mktHrs) {
+        await new Promise(r => setTimeout(r, 500));
+      } else {
+        await new Promise(r => setTimeout(r, 200));
+      }
     }
+
+    logger.info(
+      `[GMS] Refresh complete: ${refreshed} fetched, ${skipped} skipped (fresh), ${symbols.length} total`,
+      'global-market-state'
+    );
+
     return results;
   }
 

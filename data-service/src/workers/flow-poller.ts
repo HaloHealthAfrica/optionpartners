@@ -1,7 +1,12 @@
 import { BasePoller } from './base-poller';
+import { MarketSession, isActiveSession } from './market-session';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 
-const FLOW_INTERVAL = 2 * 60 * 1000; // 2 min
+const SESSION_INTERVALS: Record<string, number> = {
+  [MarketSession.RTH]:         2 * 60 * 1000,   // 2 min
+  [MarketSession.PRE_MARKET]:  10 * 60 * 1000,  // 10 min
+  [MarketSession.POST_MARKET]: 10 * 60 * 1000,  // 10 min
+};
 
 export class FlowPoller extends BasePoller {
   private symbols: Set<string>;
@@ -10,7 +15,7 @@ export class FlowPoller extends BasePoller {
     private orchestrator: DataOrchestrator,
     symbols: string[] = ['SPY', 'QQQ', 'IWM'],
   ) {
-    super({ name: 'flow', intervalMs: FLOW_INTERVAL });
+    super({ name: 'flow', intervalMs: SESSION_INTERVALS[MarketSession.RTH] });
     this.symbols = new Set(symbols.map((s) => s.toUpperCase()));
   }
 
@@ -25,6 +30,22 @@ export class FlowPoller extends BasePoller {
 
   getSymbols(): string[] {
     return [...this.symbols];
+  }
+
+  setSession(session: MarketSession): void {
+    if (!isActiveSession(session)) {
+      this.pause();
+      return;
+    }
+    if (this.isPaused()) this.resume();
+    const interval = SESSION_INTERVALS[session] ?? SESSION_INTERVALS[MarketSession.POST_MARKET];
+    this.updateInterval(interval);
+    this.log.info({ session, intervalMs: interval }, 'Flow poller interval updated');
+  }
+
+  /** @deprecated Use setSession instead */
+  setMarketHoursInterval(isRTH: boolean): void {
+    this.setSession(isRTH ? MarketSession.RTH : MarketSession.POST_MARKET);
   }
 
   protected async tick(): Promise<void> {

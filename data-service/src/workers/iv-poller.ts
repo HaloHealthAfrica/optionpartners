@@ -1,8 +1,13 @@
 import { BasePoller } from './base-poller';
+import { MarketSession, isActiveSession } from './market-session';
 import { snapshotStore } from '../persistence/snapshot-store';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 
-const IV_INTERVAL = 5 * 60 * 1000; // 5 min
+const SESSION_INTERVALS: Record<string, number> = {
+  [MarketSession.RTH]:         5 * 60 * 1000,   // 5 min
+  [MarketSession.PRE_MARKET]:  30 * 60 * 1000,  // 30 min
+  [MarketSession.POST_MARKET]: 30 * 60 * 1000,  // 30 min
+};
 
 export class IvPoller extends BasePoller {
   private symbols: Set<string>;
@@ -11,7 +16,7 @@ export class IvPoller extends BasePoller {
     private orchestrator: DataOrchestrator,
     symbols: string[] = ['SPY', 'QQQ', 'IWM'],
   ) {
-    super({ name: 'iv', intervalMs: IV_INTERVAL });
+    super({ name: 'iv', intervalMs: SESSION_INTERVALS[MarketSession.RTH] });
     this.symbols = new Set(symbols.map((s) => s.toUpperCase()));
   }
 
@@ -26,6 +31,17 @@ export class IvPoller extends BasePoller {
 
   getSymbols(): string[] {
     return [...this.symbols];
+  }
+
+  setSession(session: MarketSession): void {
+    if (!isActiveSession(session)) {
+      this.pause();
+      return;
+    }
+    if (this.isPaused()) this.resume();
+    const interval = SESSION_INTERVALS[session] ?? SESSION_INTERVALS[MarketSession.POST_MARKET];
+    this.updateInterval(interval);
+    this.log.info({ session, intervalMs: interval }, 'IV poller interval updated');
   }
 
   protected async tick(): Promise<void> {

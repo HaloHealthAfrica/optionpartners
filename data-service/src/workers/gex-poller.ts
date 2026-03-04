@@ -1,8 +1,12 @@
 import { BasePoller } from './base-poller';
+import { MarketSession, isActiveSession } from './market-session';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 
-const RTH_INTERVAL = 2 * 60 * 1000;  // 2 min
-const ETH_INTERVAL = 5 * 60 * 1000;  // 5 min
+const SESSION_INTERVALS: Record<string, number> = {
+  [MarketSession.RTH]:         2 * 60 * 1000,   // 2 min
+  [MarketSession.PRE_MARKET]:  10 * 60 * 1000,  // 10 min
+  [MarketSession.POST_MARKET]: 10 * 60 * 1000,  // 10 min
+};
 
 export class GexPoller extends BasePoller {
   private symbols: Set<string>;
@@ -11,7 +15,7 @@ export class GexPoller extends BasePoller {
     private orchestrator: DataOrchestrator,
     symbols: string[] = ['SPY', 'QQQ', 'IWM'],
   ) {
-    super({ name: 'gex', intervalMs: RTH_INTERVAL });
+    super({ name: 'gex', intervalMs: SESSION_INTERVALS[MarketSession.RTH] });
     this.symbols = new Set(symbols.map((s) => s.toUpperCase()));
   }
 
@@ -28,12 +32,20 @@ export class GexPoller extends BasePoller {
     return [...this.symbols];
   }
 
-  setMarketHoursInterval(isRTH: boolean): void {
-    const interval = isRTH ? RTH_INTERVAL : ETH_INTERVAL;
-    if (interval !== this.config.intervalMs) {
-      this.updateInterval(interval);
-      this.log.info({ isRTH, intervalMs: interval }, 'GEX poller interval updated');
+  setSession(session: MarketSession): void {
+    if (!isActiveSession(session)) {
+      this.pause();
+      return;
     }
+    if (this.isPaused()) this.resume();
+    const interval = SESSION_INTERVALS[session] ?? SESSION_INTERVALS[MarketSession.POST_MARKET];
+    this.updateInterval(interval);
+    this.log.info({ session, intervalMs: interval }, 'GEX poller interval updated');
+  }
+
+  /** @deprecated Use setSession instead */
+  setMarketHoursInterval(isRTH: boolean): void {
+    this.setSession(isRTH ? MarketSession.RTH : MarketSession.POST_MARKET);
   }
 
   protected async tick(): Promise<void> {

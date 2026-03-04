@@ -10,6 +10,7 @@ export abstract class BasePoller {
   protected log;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private paused = false;
   private tickInProgress = false;
 
   constructor(protected config: PollerConfig) {
@@ -24,9 +25,9 @@ export abstract class BasePoller {
     }
 
     this.running = true;
+    this.paused = false;
     this.log.info({ intervalMs: this.config.intervalMs }, 'Poller started');
 
-    // Run immediately, then on interval
     this.executeTick();
     this.timer = setInterval(() => this.executeTick(), this.config.intervalMs);
   }
@@ -34,11 +35,34 @@ export abstract class BasePoller {
   stop(): void {
     if (!this.running) return;
     this.running = false;
+    this.paused = false;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.log.info('Poller stopped');
+  }
+
+  pause(): void {
+    if (!this.running || this.paused) return;
+    this.paused = true;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.log.info('Poller paused (overnight/weekend)');
+  }
+
+  resume(): void {
+    if (!this.running || !this.paused) return;
+    this.paused = false;
+    this.log.info({ intervalMs: this.config.intervalMs }, 'Poller resumed');
+    this.executeTick();
+    this.timer = setInterval(() => this.executeTick(), this.config.intervalMs);
+  }
+
+  isPaused(): boolean {
+    return this.paused;
   }
 
   isRunning(): boolean {
@@ -47,9 +71,12 @@ export abstract class BasePoller {
 
   updateInterval(intervalMs: number): void {
     this.config.intervalMs = intervalMs;
-    if (this.running) {
-      this.stop();
-      this.start();
+    if (this.running && !this.paused) {
+      if (this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+      }
+      this.timer = setInterval(() => this.executeTick(), this.config.intervalMs);
     }
   }
 
