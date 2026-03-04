@@ -156,22 +156,33 @@ class OptionsConstructor {
       }
     } catch (_) { /* fall through to local snapshot */ }
 
-    // Fallback: most recent CHAIN_SNAPSHOT from webhook ingestion
+    // Fallback: most recent CHAIN_SNAPSHOT from webhook ingestion (with staleness check)
+    const chainMaxAgeMs = parseInt(process.env.SIM_CHAIN_SNAPSHOT_MAX_AGE_MS || '3600000', 10); // 1 hour
     try {
       const snap = await db.query(
-        `SELECT raw_payload FROM market_data_events
+        `SELECT raw_payload, received_at FROM market_data_events
          WHERE symbol = $1 AND event_type = 'CHAIN_SNAPSHOT'
          ORDER BY received_at DESC LIMIT 1`,
         [symbol]
       );
       if (snap.rows.length > 0) {
-        const payload = typeof snap.rows[0].raw_payload === 'string'
-          ? JSON.parse(snap.rows[0].raw_payload)
-          : snap.rows[0].raw_payload;
-        const contracts = payload.contracts || payload.chain || [];
-        if (contracts.length > 0) {
-          logger.info(`[OPTIONS_CONSTRUCTOR] Using cached chain snapshot for ${symbol} (${contracts.length} contracts)`, 'options-constructor');
-          return { success: true, chain: { contracts, expirations: payload.expirations || [] } };
+        const ageMs = Date.now() - new Date(snap.rows[0].received_at).getTime();
+        if (ageMs > chainMaxAgeMs) {
+          const ageMin = (ageMs / 60000).toFixed(0);
+          logger.warn(
+            `[OPTIONS_CONSTRUCTOR] Stale chain snapshot for ${symbol}: ${ageMin}min old (max ${(chainMaxAgeMs / 60000).toFixed(0)}min) — skipping`,
+            'options-constructor'
+          );
+        } else {
+          const payload = typeof snap.rows[0].raw_payload === 'string'
+            ? JSON.parse(snap.rows[0].raw_payload)
+            : snap.rows[0].raw_payload;
+          const contracts = payload.contracts || payload.chain || [];
+          if (contracts.length > 0) {
+            const ageMin = (ageMs / 60000).toFixed(0);
+            logger.info(`[OPTIONS_CONSTRUCTOR] Using cached chain snapshot for ${symbol} (${contracts.length} contracts, ${ageMin}min old)`, 'options-constructor');
+            return { success: true, chain: { contracts, expirations: payload.expirations || [] } };
+          }
         }
       }
     } catch (err) {
@@ -222,12 +233,30 @@ class OptionsConstructor {
     const daysToFri = (5 - dayOfWeek + 7) % 7 || 7;
     expDate.setDate(expDate.getDate() + daysToFri);
     const expiration = expDate.toISOString().slice(0, 10);
+    const actualDte = Math.ceil((expDate - Date.now()) / (1000 * 60 * 60 * 24));
 
-    // ATM strike rounded to nearest dollar
-    const strike = Math.round(underlyingPrice);
+    // Snap to realistic strike grid: $1 for sub-$50, $5 for $50-$500, $10 for $500+
+    const strikeIncrement = underlyingPrice < 50 ? 1 : underlyingPrice < 500 ? 5 : 10;
+    const strike = Math.round(underlyingPrice / strikeIncrement) * strikeIncrement;
 
-    // Estimate option price: ~2-3% of underlying for ATM weekly
-    const estimatedPremium = Math.round(underlyingPrice * 0.025 * 100) / 100;
+    // Black-Scholes-inspired premium estimate using sqrt(DTE) time-value scaling.
+    // Base: ATM premium ≈ 0.4 × IV × price × sqrt(DTE/365)
+    // Since IV is unknown, use a tiered estimate by price range:
+    //   Large-cap ($100-$500): ~25% annualised IV
+    //   High-vol ($500+): ~35% annualised IV
+    //   Small/mid (<$100): ~40% annualised IV
+    const impliedVolEstimate = underlyingPrice >= 500 ? 0.35
+      : underlyingPrice >= 100 ? 0.25
+      : 0.40;
+    const sqrtTimeYears = Math.sqrt(Math.max(1, actualDte) / 365);
+    const estimatedPremium = Math.max(
+      0.05,
+      Math.round(0.4 * impliedVolEstimate * underlyingPrice * sqrtTimeYears * 100) / 100
+    );
+
+    // Wider simulated spread to penalise synthetic fills (8% vs real market 1-5%)
+    const syntheticSpreadPct = parseFloat(process.env.SIM_SYNTHETIC_SPREAD_PCT || '0.08');
+    const halfSpread = estimatedPremium * syntheticSpreadPct / 2;
 
     const enrichedSignal = {
       ...signal,
@@ -236,8 +265,8 @@ class OptionsConstructor {
       expiration,
       strikeShort: null,
       strikeLong: null,
-      bidPrice: estimatedPremium * 0.97,
-      askPrice: estimatedPremium * 1.03,
+      bidPrice: Math.round((estimatedPremium - halfSpread) * 100) / 100,
+      askPrice: Math.round((estimatedPremium + halfSpread) * 100) / 100,
       midPrice: estimatedPremium,
       delta: direction === 'long' ? 0.50 : -0.50,
       quantity: signal.quantity || 1,
@@ -245,19 +274,27 @@ class OptionsConstructor {
         ...signal.meta,
         constructedBy: 'options-constructor-synthetic',
         synthetic: true,
+        syntheticWarning: 'Fill prices are estimated — results may not reflect real market conditions',
+        pricingModel: {
+          impliedVolEstimate,
+          sqrtTimeYears: Math.round(sqrtTimeYears * 1000) / 1000,
+          syntheticSpreadPct,
+        },
         recipe: {
           strategy: recipe.strategy,
           direction: recipe.direction,
           target_dte: targetDte,
           target_delta: recipe.target_delta || 0.50,
         },
-        selectedDte: targetDte,
+        selectedDte: actualDte,
         selectedDelta: direction === 'long' ? 0.50 : -0.50,
       },
     };
 
-    logger.info(
-      `[OPTIONS_CONSTRUCTOR] Synthetic ${contractType} $${strike} exp=${expiration} premium=$${estimatedPremium} for ${signal.symbol}`,
+    logger.warn(
+      `[OPTIONS_CONSTRUCTOR] SYNTHETIC ${contractType} $${strike} exp=${expiration} ` +
+      `premium=$${estimatedPremium} (IV~${(impliedVolEstimate * 100).toFixed(0)}%, DTE=${actualDte}) ` +
+      `spread=${(syntheticSpreadPct * 100).toFixed(0)}% — ${signal.symbol} (no chain data)`,
       'options-constructor'
     );
 

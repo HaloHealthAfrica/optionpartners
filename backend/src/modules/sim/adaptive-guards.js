@@ -80,7 +80,7 @@ class AdaptiveGuards {
 
     if (recentTrades.rows.length < maxLosses) return;
 
-    const allLosses = recentTrades.rows.every(t => parseFloat(t.pnl) <= 0);
+    const allLosses = recentTrades.rows.every(t => parseFloat(t.pnl) < 0);
     if (!allLosses) {
       // Clear any existing cooldown if streak is broken
       await db.query(
@@ -128,24 +128,20 @@ class AdaptiveGuards {
       };
     }
 
-    // Also check for consecutive losses even without an existing cooldown record
-    const maxLosses = config.cooldown_consecutive_losses || 3;
-    const recentTrades = await db.query(
-      `SELECT pnl FROM sim_trades
-       WHERE user_id = $1 AND strategy = $2
-       ORDER BY exit_time DESC LIMIT $3`,
-      [userId, strategy, maxLosses]
+    // If an expired cooldown exists, delete it and allow the strategy to trade.
+    // This prevents the infinite re-trigger loop where the same historical losses
+    // kept re-creating the cooldown after it expired.
+    const expired = await db.query(
+      `DELETE FROM strategy_cooldowns
+       WHERE user_id = $1 AND strategy = $2 AND cooldown_until <= NOW()
+       RETURNING *`,
+      [userId, strategy]
     );
-
-    if (recentTrades.rows.length >= maxLosses) {
-      const allLosses = recentTrades.rows.every(t => parseFloat(t.pnl) <= 0);
-      if (allLosses) {
-        await this.recordTradeResult(userId, strategy, -1);
-        return {
-          allowed: false,
-          reason: `STRATEGY_COOLDOWN: ${strategy} has ${maxLosses} consecutive losses — auto-paused`,
-        };
-      }
+    if (expired.rows.length > 0) {
+      logger.info(
+        `Strategy cooldown expired for ${strategy} — allowing trade (was paused since ${expired.rows[0].created_at})`,
+        'adaptive-guards'
+      );
     }
 
     return { allowed: true };

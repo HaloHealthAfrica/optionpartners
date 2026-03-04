@@ -11,12 +11,14 @@ const tradeDecisionEngine = require('./trade-decision-engine');
 const optionsConstructor = require('./options-constructor.service');
 const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
 const marketContext = require('./market-context.service');
+const marketIntelligence = require('./market-intelligence');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const regimeIntegration = require('../portfolio/regime-integration');
 const adaptiveParams = require('../strategy/adaptive-params');
 const riskScaler = require('./risk-scaler');
 const expectedMoveFilter = require('./expected-move-filter');
 const db = require('../../config/database');
+const globalMarketState = require('./global-market-state.service');
 const logger = require('../../utils/logger');
 const { assertSimMode } = require('../../config/tradingMode');
 
@@ -206,6 +208,19 @@ class DecisionRouter {
         return { approved: false, reason: greeksCheck.reason, signal, indicatorSource };
       }
 
+      // ── Phase 2.45: Market Intelligence (confluence, flow, price action) ──
+      const intelResult = await marketIntelligence.evaluate(signal, userId);
+      if (!intelResult.allowed) {
+        await this._logRejection(userId, webhookEventId, signal, 'MARKET_INTELLIGENCE', intelResult.reason);
+        return {
+          approved: false,
+          reason: `Market intelligence rejection: ${intelResult.reason}`,
+          signal,
+          indicatorSource,
+          intelligenceScore: intelResult.intelligenceScore,
+        };
+      }
+
       // ── Phase 2.5: Refresh chain data + volatility regime + market context ──
       const effectiveSymbol = signal.symbol || symbol;
       const [, volRegime, mktCtx] = await Promise.all([
@@ -223,7 +238,8 @@ class DecisionRouter {
         symState.volatility_regime = volRegime.regime;
         symState.volatility_metrics = volRegime.metrics;
       }
-      const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId, mktCtx);
+      const gmsState = await globalMarketState.getState(effectiveSymbol);
+      const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId, mktCtx, gmsState);
 
       // Build regime overrides (existing clamping logic)
       const regimeResult = this._regimeOverrides(volRegime);
@@ -366,16 +382,20 @@ class DecisionRouter {
           'decision-router'
         );
 
-        // ── Phase 5: Expected move filter ──
+        // ── Phase 5: Expected move filter (DTE-calibrated with gamma convexity) ──
         if (regimeMetrics?.atr14) {
           const targetPct = adaptedConfig.takeProfitReduction
             ? 0.50 - adaptedConfig.takeProfitReduction
             : 0.50;
+          const constructedDte = signal.meta?.selectedDte || adaptedConfig.dte_target || null;
+          const constructedGamma = signal.meta?.greeks?.gamma || null;
           const emFilter = expectedMoveFilter.validateExpectedMove({
             atr14: regimeMetrics.atr14,
             delta: signal.delta,
             optionPremium: signal.midPrice,
             targetPctMove: targetPct,
+            dte: constructedDte,
+            gamma: constructedGamma,
           });
           regimeAuditContext.expectedMoveCheck = emFilter.details;
           if (!emFilter.pass) {
@@ -577,7 +597,13 @@ class DecisionRouter {
   }
 
   async _getUnderlyingPrice(symbol) {
-    // 1. Try price_cache
+    // 1. Try global_market_state (shared, authoritative)
+    const gms = await globalMarketState.getState(symbol);
+    if (gms?.last_price && globalMarketState.isPriceFresh(gms)) {
+      return parseFloat(gms.last_price);
+    }
+
+    // 2. Try price_cache
     const cached = await db.query(
       'SELECT price, updated_at FROM price_cache WHERE symbol = $1',
       [symbol]
@@ -590,29 +616,17 @@ class DecisionRouter {
       }
     }
 
-    // 2. Active fetch from data-service (TwelveData / Polygon)
+    // 3. Active fetch via global market state (updates both GMS and price_cache)
     try {
-      const quote = await dataServiceProxy.getQuote(symbol);
-      const price = quote?.data?.price ?? quote?.data?.last ?? quote?.data?.close;
-      if (price) {
-        const parsed = parseFloat(price);
-        await db.query(
-          `INSERT INTO price_cache (symbol, price, updated_at)
-           VALUES ($1, $2, NOW())
-           ON CONFLICT (symbol) DO UPDATE SET price = $2, updated_at = NOW()`,
-          [symbol, parsed]
-        );
-        logger.info(`[PRICE_REFRESH] ${symbol}: fetched live quote $${parsed}`, 'decision-router');
-        return parsed;
-      }
+      const freshPrice = await globalMarketState.refreshPrice(symbol);
+      if (freshPrice) return freshPrice;
     } catch (err) {
       logger.warn(`[PRICE_REFRESH] ${symbol}: quote fetch failed (${err.message})`, 'decision-router');
     }
 
-    // 3. Last resort: stale cache
-    if (cached.rows.length > 0) {
-      return parseFloat(cached.rows[0].price);
-    }
+    // 4. Last resort: stale price (from GMS or cache)
+    if (gms?.last_price) return parseFloat(gms.last_price);
+    if (cached.rows.length > 0) return parseFloat(cached.rows[0].price);
 
     return null;
   }
@@ -704,37 +718,95 @@ class DecisionRouter {
   }
 
   /**
-   * Fetch fresh chain data from the data-service and update symbol_state
-   * so the trade decision engine has current options liquidity info.
-   * Skips refresh if chain data is still fresh (< 5 min old).
+   * Refresh chain and price data via global_market_state.
+   * Updates the shared global state so all users benefit.
+   * Also fans out chain data to the requesting user's symbol_state
+   * for backward compatibility.
    */
   async _refreshChainData(symbol, userId) {
-    const CHAIN_REFRESH_TTL_MS = parseInt(process.env.SIM_CHAIN_REFRESH_TTL_MS || '300000', 10); // 5 min
+    const CHAIN_REFRESH_TTL_MS = parseInt(process.env.SIM_CHAIN_REFRESH_TTL_MS || '300000', 10);
     try {
-      const currentState = await symbolStateService.getState(userId, symbol);
-      if (currentState.chain_updated_at) {
-        const ageMs = Date.now() - new Date(currentState.chain_updated_at).getTime();
-        if (ageMs < CHAIN_REFRESH_TTL_MS) {
-          logger.info(`[CHAIN_REFRESH] ${symbol}: chain data fresh (${Math.round(ageMs / 1000)}s old), skipping`, 'decision-router');
-          return;
+      // Check global market state first (shared across users)
+      const gms = await globalMarketState.getState(symbol);
+      if (gms && globalMarketState.isChainFresh(gms)) {
+        const ageMs = Date.now() - new Date(gms.chain_updated_at).getTime();
+        logger.info(`[CHAIN_REFRESH] ${symbol}: global chain fresh (${Math.round(ageMs / 1000)}s old), skipping`, 'decision-router');
+
+        // Ensure user's symbol_state has the chain data too
+        if (gms.chain_ok) {
+          await this._syncGlobalToUserState(symbol, userId, gms);
         }
+        return;
       }
 
-      const chainData = await dataServiceProxy.getOptionsChain(symbol);
-      const contracts = chainData?.data?.contracts || [];
-      if (contracts.length > 0) {
+      // Refresh both price and chain via global market state
+      const result = await globalMarketState.refreshAll(symbol);
+
+      if (result.chain) {
+        // Fan out to the requesting user's symbol_state for backward compat
         await symbolStateService.update('CHAIN_SNAPSHOT', {
           ticker: symbol,
-          contracts,
-          iv_percentile: chainData.data.iv_percentile || null,
+          contracts: result.chain.contracts || [],
+          iv_percentile: result.chain.ivPercentile || null,
         }, userId, symbol);
-        logger.info(`[CHAIN_REFRESH] ${symbol}: refreshed ${contracts.length} contracts from data-service`, 'decision-router');
+
+        // Also fan out to all other active users
+        await this._fanOutChainToAllUsers(symbol, result.chain, userId);
+
+        logger.info(`[CHAIN_REFRESH] ${symbol}: refreshed via global state — ${result.chain.contracts?.length || 0} contracts`, 'decision-router');
       } else {
-        logger.warn(`[CHAIN_REFRESH] ${symbol}: data-service returned no contracts`, 'decision-router');
+        logger.warn(`[CHAIN_REFRESH] ${symbol}: global refresh returned no chain data`, 'decision-router');
+      }
+
+      if (result.price) {
+        logger.info(`[PRICE_REFRESH] ${symbol}: global price refreshed $${result.price}`, 'decision-router');
       }
     } catch (err) {
-      logger.warn(`[CHAIN_REFRESH] ${symbol}: data-service unavailable (${err.message}) — using cached state`, 'decision-router');
+      logger.error(`[CHAIN_REFRESH] ${symbol}: refresh failed (${err.message}) — using cached state`, 'decision-router');
+      Sentry.captureException(err, { tags: { module: 'decision-router', source: 'refreshChainData' } });
     }
+  }
+
+  /**
+   * Sync global market state chain data into a user's symbol_state.
+   */
+  async _syncGlobalToUserState(symbol, userId, gms) {
+    try {
+      const state = await symbolStateService.getState(userId, symbol);
+      const userChainAge = state.chain_updated_at
+        ? Date.now() - new Date(state.chain_updated_at).getTime()
+        : Infinity;
+
+      if (userChainAge > 300_000 && gms.chain_ok) {
+        state.chain_ok = gms.chain_ok;
+        state.chain_open_interest = gms.chain_open_interest;
+        state.chain_volume = gms.chain_volume;
+        state.bid_ask_spread_pct = gms.bid_ask_spread_pct ? parseFloat(gms.bid_ask_spread_pct) : null;
+        state.liquidity_ok = gms.liquidity_ok;
+        state.iv_percentile = gms.iv_percentile ? parseFloat(gms.iv_percentile) : null;
+        state.chain_updated_at = gms.chain_updated_at;
+        symbolStateService.clearCache(userId, symbol);
+      }
+    } catch (_) { /* best effort */ }
+  }
+
+  /**
+   * Fan out chain data to all active users' symbol_states.
+   */
+  async _fanOutChainToAllUsers(symbol, chainResult, excludeUserId) {
+    try {
+      const users = await db.query(
+        `SELECT DISTINCT user_id FROM sim_account_state WHERE user_id != $1`,
+        [excludeUserId]
+      );
+      for (const row of users.rows) {
+        await symbolStateService.update('CHAIN_SNAPSHOT', {
+          ticker: symbol,
+          contracts: chainResult.contracts || [],
+          iv_percentile: chainResult.ivPercentile || null,
+        }, row.user_id, symbol);
+      }
+    } catch (_) { /* best effort */ }
   }
 
   /**

@@ -5,6 +5,7 @@ import { VixPoller } from './vix-poller';
 import { MacroPoller } from './macro-poller';
 import { VolatilityPoller } from './volatility-poller';
 import { IvPoller } from './iv-poller';
+import { ChainPricePoller } from './chain-price-poller';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 import type { MacroRegimeService } from '../services/macro-regime';
 
@@ -18,6 +19,7 @@ export interface WorkerManagerConfig {
   enableMacro?: boolean;
   enableVolatility?: boolean;
   enableIv?: boolean;
+  enableChainPrice?: boolean;
 }
 
 const DEFAULT_SYMBOLS = ['SPY', 'QQQ', 'IWM'];
@@ -29,6 +31,7 @@ export class WorkerManager {
   readonly macroPoller: MacroPoller;
   readonly volatilityPoller: VolatilityPoller;
   readonly ivPoller: IvPoller;
+  readonly chainPricePoller: ChainPricePoller;
 
   private marketHoursTimer: ReturnType<typeof setInterval> | null = null;
   private isRTH = false;
@@ -46,6 +49,7 @@ export class WorkerManager {
     this.macroPoller = new MacroPoller(macroRegime);
     this.volatilityPoller = new VolatilityPoller(orchestrator, symbols);
     this.ivPoller = new IvPoller(orchestrator, symbols);
+    this.chainPricePoller = new ChainPricePoller(orchestrator, symbols);
   }
 
   start(config: WorkerManagerConfig = {}): void {
@@ -57,8 +61,9 @@ export class WorkerManager {
     if (config.enableMacro !== false) this.macroPoller.start();
     if (config.enableVolatility !== false) this.volatilityPoller.start();
     if (config.enableIv !== false) this.ivPoller.start();
+    if (config.enableChainPrice !== false) this.chainPricePoller.start();
 
-    // Check market hours every minute and adjust GEX poller interval
+    // Check market hours every minute and adjust poller intervals
     this.startMarketHoursMonitor();
 
     log.info({
@@ -68,6 +73,7 @@ export class WorkerManager {
       macro: this.macroPoller.isRunning(),
       volatility: this.volatilityPoller.isRunning(),
       iv: this.ivPoller.isRunning(),
+      chainPrice: this.chainPricePoller.isRunning(),
       symbols: this.gexPoller.getSymbols(),
     }, 'Workers started');
   }
@@ -80,6 +86,7 @@ export class WorkerManager {
     this.macroPoller.stop();
     this.volatilityPoller.stop();
     this.ivPoller.stop();
+    this.chainPricePoller.stop();
 
     if (this.marketHoursTimer) {
       clearInterval(this.marketHoursTimer);
@@ -92,6 +99,7 @@ export class WorkerManager {
     this.flowPoller.addSymbol(symbol);
     this.volatilityPoller.addSymbol(symbol);
     this.ivPoller.addSymbol(symbol);
+    this.chainPricePoller.addSymbol(symbol);
     log.info({ symbol }, 'Symbol added to all pollers');
   }
 
@@ -100,6 +108,7 @@ export class WorkerManager {
     this.flowPoller.removeSymbol(symbol);
     this.volatilityPoller.removeSymbol(symbol);
     this.ivPoller.removeSymbol(symbol);
+    this.chainPricePoller.removeSymbol(symbol);
     log.info({ symbol }, 'Symbol removed from all pollers');
   }
 
@@ -107,7 +116,7 @@ export class WorkerManager {
     return this.gexPoller.getSymbols();
   }
 
-  getStatus(): Record<string, { running: boolean; symbols?: string[] }> {
+  getStatus(): Record<string, { running: boolean; symbols?: string[]; metrics?: unknown }> {
     return {
       gex: { running: this.gexPoller.isRunning(), symbols: this.gexPoller.getSymbols() },
       flow: { running: this.flowPoller.isRunning(), symbols: this.flowPoller.getSymbols() },
@@ -115,6 +124,7 @@ export class WorkerManager {
       macro: { running: this.macroPoller.isRunning() },
       volatility: { running: this.volatilityPoller.isRunning(), symbols: this.volatilityPoller.getSymbols() },
       iv: { running: this.ivPoller.isRunning(), symbols: this.ivPoller.getSymbols() },
+      chainPrice: { running: this.chainPricePoller.isRunning(), symbols: this.chainPricePoller.getSymbols(), metrics: this.chainPricePoller.getMetrics() },
     };
   }
 
@@ -137,6 +147,7 @@ export class WorkerManager {
     if (isRTH !== this.isRTH) {
       this.isRTH = isRTH;
       this.gexPoller.setMarketHoursInterval(isRTH);
+      this.chainPricePoller.setMarketHours(isRTH);
       log.info({ isRTH }, 'Market hours state changed');
     }
   }

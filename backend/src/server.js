@@ -579,6 +579,24 @@ async function startServer() {
         exitMonitor.start(parseInt(process.env.EXIT_MONITOR_INTERVAL || '15000', 10));
         console.log('✓ Exit monitor started (stop-loss, take-profit, DTE, trailing stops)');
       }
+
+      // Start global market state poller (shared price + chain data for all users)
+      if (process.env.ENABLE_MARKET_DATA_POLLER !== 'false') {
+        const globalMarketState = require('./modules/sim/global-market-state.service');
+        const GMS_POLL_INTERVAL = parseInt(process.env.GMS_POLL_INTERVAL_MS || '60000', 10);
+        setInterval(async () => {
+          try {
+            await globalMarketState.refreshAllSymbols();
+            const alerts = await globalMarketState.detectDeadFeeds();
+            if (alerts.length > 0) {
+              logger.warn(`[GMS] ${alerts.length} dead feed alert(s) detected`, 'global-market-state');
+            }
+          } catch (err) {
+            logger.error(`[GMS] Periodic refresh failed: ${err.message}`, 'global-market-state');
+          }
+        }, GMS_POLL_INTERVAL);
+        console.log(`✓ Global market state poller started (every ${GMS_POLL_INTERVAL / 1000}s)`);
+      }
     } else {
       console.log('Webhook processor disabled (ENABLE_WEBHOOK_PROCESSOR=false)');
     }

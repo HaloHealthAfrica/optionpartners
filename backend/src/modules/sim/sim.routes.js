@@ -41,6 +41,7 @@ router.get('/runs', simController.getSimRuns);
 // Status & health
 router.get('/status', simController.getStatus);
 router.get('/health/state', simController.getStateHealth);
+router.get('/health/global', simController.getGlobalHealth);
 
 // Warmup: seed symbol state with price + chain data from data service
 router.post('/warmup/:symbol', simController.warmupSymbol);

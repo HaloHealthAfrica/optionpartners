@@ -4,10 +4,21 @@ const db = require('../../config/database');
 const logger = require('../../utils/logger');
 const Sentry = require('@sentry/node');
 
+const DEFAULT_MAX_AGE = {
+  iv: parseInt(process.env.MKT_CTX_IV_MAX_AGE_MS || '1800000', 10),       // 30 min
+  gex: parseInt(process.env.MKT_CTX_GEX_MAX_AGE_MS || '600000', 10),      // 10 min
+  flow: parseInt(process.env.MKT_CTX_FLOW_MAX_AGE_MS || '900000', 10),     // 15 min
+  macro: parseInt(process.env.MKT_CTX_MACRO_MAX_AGE_MS || '14400000', 10), // 4 hours
+};
+
 /**
  * Queries the shared Neon Postgres database for the latest IV, GEX,
  * flow, and macro snapshots. Both the data-service and the backend
  * write to and read from the same database, so no proxy call is needed.
+ *
+ * All queries enforce a configurable max-age threshold — snapshots older
+ * than the threshold are treated as stale (returned with `stale: true`
+ * so consumers can degrade gracefully).
  *
  * Used by:
  *  - Decision Router: enriches SymbolState before trade evaluation
@@ -15,6 +26,25 @@ const Sentry = require('@sentry/node');
  *  - Adaptive Intelligence analytics: environment-bucketed performance
  */
 class MarketContextService {
+  /**
+   * Tag a snapshot row with staleness metadata.
+   * @returns the row with `stale` and `ageMs` fields added, or null.
+   */
+  _withStaleness(row, maxAgeMs, label, symbol = null) {
+    if (!row || !row.captured_at) return null;
+    const ageMs = Date.now() - new Date(row.captured_at).getTime();
+    const stale = ageMs > maxAgeMs;
+    if (stale) {
+      const ageMin = (ageMs / 60000).toFixed(1);
+      const maxMin = (maxAgeMs / 60000).toFixed(0);
+      logger.warn(
+        `[MarketContext] STALE ${label}${symbol ? ` for ${symbol}` : ''}: ${ageMin}min old (max ${maxMin}min)`,
+        'market-context'
+      );
+    }
+    return { ...row, stale, ageMs };
+  }
+
   /**
    * Fetch the most recent IV snapshot for a symbol.
    * Returns null if no data is available.
@@ -29,7 +59,7 @@ class MarketContextService {
          LIMIT 1`,
         [symbol.toUpperCase()]
       );
-      return rows[0] || null;
+      return this._withStaleness(rows[0], DEFAULT_MAX_AGE.iv, 'IV', symbol);
     } catch (err) {
       logger.error(`[MarketContext] IV fetch failed for ${symbol}: ${err.message}`, 'market-context');
       Sentry.captureException(err, { tags: { module: 'market-context' } });
@@ -50,7 +80,7 @@ class MarketContextService {
          LIMIT 1`,
         [symbol.toUpperCase()]
       );
-      return rows[0] || null;
+      return this._withStaleness(rows[0], DEFAULT_MAX_AGE.gex, 'GEX', symbol);
     } catch (err) {
       logger.error(`[MarketContext] GEX fetch failed for ${symbol}: ${err.message}`, 'market-context');
       Sentry.captureException(err, { tags: { module: 'market-context' } });
@@ -72,7 +102,7 @@ class MarketContextService {
          LIMIT 1`,
         [symbol.toUpperCase()]
       );
-      return rows[0] || null;
+      return this._withStaleness(rows[0], DEFAULT_MAX_AGE.flow, 'Flow', symbol);
     } catch (err) {
       logger.error(`[MarketContext] Flow fetch failed for ${symbol}: ${err.message}`, 'market-context');
       Sentry.captureException(err, { tags: { module: 'market-context' } });
@@ -91,7 +121,7 @@ class MarketContextService {
          ORDER BY captured_at DESC
          LIMIT 1`
       );
-      return rows[0] || null;
+      return this._withStaleness(rows[0], DEFAULT_MAX_AGE.macro, 'Macro');
     } catch (err) {
       logger.error(`[MarketContext] Macro fetch failed: ${err.message}`, 'market-context');
       Sentry.captureException(err, { tags: { module: 'market-context' } });
@@ -102,6 +132,7 @@ class MarketContextService {
   /**
    * Bundle all market context for a symbol in parallel.
    * Non-blocking — returns null for any piece that fails.
+   * Each piece is tagged with `stale` and `ageMs` metadata.
    */
   async getFullContext(symbol) {
     const [iv, gex, flow, macro] = await Promise.all([
@@ -112,18 +143,19 @@ class MarketContextService {
     ]);
 
     const hasData = !!(iv || gex || flow || macro);
+    const staleCount = [iv, gex, flow, macro].filter(d => d?.stale).length;
 
     if (hasData) {
       logger.info(
-        `[MarketContext] ${symbol}: IV=${iv ? `rank=${iv.iv_rank?.toFixed(0)}` : 'N/A'} ` +
-        `GEX=${gex ? `net=${gex.net_gex?.toFixed(0)} flip=${gex.flip_price}` : 'N/A'} ` +
-        `Flow=${flow ? `sentiment=${flow.sentiment} pcr=${flow.put_call_ratio?.toFixed(2)}` : 'N/A'} ` +
-        `Macro=${macro ? `spread=${macro.yield_spread}` : 'N/A'}`,
+        `[MarketContext] ${symbol}: IV=${iv ? `rank=${iv.iv_rank?.toFixed(0)}${iv.stale ? '(STALE)' : ''}` : 'N/A'} ` +
+        `GEX=${gex ? `net=${gex.net_gex?.toFixed(0)} flip=${gex.flip_price}${gex.stale ? '(STALE)' : ''}` : 'N/A'} ` +
+        `Flow=${flow ? `sentiment=${flow.sentiment} pcr=${flow.put_call_ratio?.toFixed(2)}${flow.stale ? '(STALE)' : ''}` : 'N/A'} ` +
+        `Macro=${macro ? `spread=${macro.yield_spread}${macro.stale ? '(STALE)' : ''}` : 'N/A'}`,
         'market-context'
       );
     }
 
-    return { iv, gex, flow, macro, hasData };
+    return { iv, gex, flow, macro, hasData, staleCount };
   }
 
   /**

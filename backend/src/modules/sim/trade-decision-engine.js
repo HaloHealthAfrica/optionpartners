@@ -55,14 +55,15 @@ class TradeDecisionEngine {
    * @param {Object} accountState - Account state row from sim_account_state
    * @param {string} userId
    * @param {Object} [marketContext] - Optional IV/GEX/flow context from market-context.service
+   * @param {Object} [globalState] - Optional global market state for chain/price staleness
    * @returns {Promise<TradeDecision>}
    */
-  async evaluate(signal, symbolState, accountState, userId, marketContext = null) {
+  async evaluate(signal, symbolState, accountState, userId, marketContext = null, globalState = null) {
     const rationale = [];
     const ticker = signal.symbol || symbolState.symbol;
 
     // ── Part 8: Fail-closed checks (run first — reject before any analysis) ──
-    const failClosed = this._checkFailClosed(symbolState, accountState, rationale);
+    const failClosed = this._checkFailClosed(symbolState, accountState, rationale, globalState);
     if (failClosed) return failClosed;
 
     // ── PIVOT_MB: Self-contained mechanical evaluation ──
@@ -104,6 +105,12 @@ class TradeDecisionEngine {
       calibratedWeights = await calibrationStore.getWeightMap(userId);
     } catch (_) { /* proceed with static weights */ }
     let conviction = this._computeConviction(signal, symbolState, rationale, calibratedWeights, marketContext);
+
+    // Apply macro penalty after conviction is computed
+    if (macroCheck.penalty > 0) {
+      conviction = Math.max(0, conviction - macroCheck.penalty);
+      rationale.push(`CONVICTION after macro penalty: ${conviction}`);
+    }
 
     // Apply trend penalty after conviction is computed
     if (trendCheck.penalty > 0) {
@@ -193,17 +200,21 @@ class TradeDecisionEngine {
   //  Part 8 — FAIL-CLOSED RULES
   // ═══════════════════════════════════════════════════════════════════
 
-  _checkFailClosed(state, accountState, rationale) {
+  _checkFailClosed(state, accountState, rationale, globalState) {
     const ticker = state.symbol;
     const STATE_TTL_MS = parseInt(process.env.SIM_STATE_TTL_MS || '1800000', 10); // 30 min default
 
-    // Chain data validation
+    // Chain data validation: check both user state and global market state.
+    // Global state is authoritative for market data.
     const requireChain = process.env.SIM_REQUIRE_CHAIN_DATA !== 'false';
-    if (state.chain_updated_at && !state.chain_ok) {
+    const chainUpdatedAt = globalState?.chain_updated_at || state.chain_updated_at;
+    const chainOk = globalState?.chain_ok ?? state.chain_ok;
+
+    if (chainUpdatedAt && !chainOk) {
       rationale.push('FAIL_CLOSED: Chain data present but no valid contracts');
       return this._blocked(ticker, 0, rationale);
     }
-    if (!state.chain_updated_at) {
+    if (!chainUpdatedAt) {
       if (requireChain) {
         rationale.push('FAIL_CLOSED: No chain data received — cannot validate options liquidity');
         return this._blocked(ticker, 0, rationale);
@@ -212,8 +223,8 @@ class TradeDecisionEngine {
     }
 
     // Chain staleness check
-    if (state.chain_updated_at) {
-      const chainAgeMs = Date.now() - new Date(state.chain_updated_at).getTime();
+    if (chainUpdatedAt) {
+      const chainAgeMs = Date.now() - new Date(chainUpdatedAt).getTime();
       if (chainAgeMs > STATE_TTL_MS) {
         if (requireChain) {
           rationale.push(`FAIL_CLOSED: Chain data stale (${Math.round(chainAgeMs / 1000)}s old, max ${STATE_TTL_MS / 1000}s)`);
@@ -223,12 +234,15 @@ class TradeDecisionEngine {
       }
     }
 
-    // Price data required (soft-gate: signal itself often carries price)
-    if (!state.price_updated_at && !state.last_price) {
+    // Price data: check global state first, then user state
+    const priceUpdatedAt = globalState?.price_updated_at || state.price_updated_at;
+    const lastPrice = (globalState?.last_price ? parseFloat(globalState.last_price) : null) || state.last_price;
+
+    if (!priceUpdatedAt && !lastPrice) {
       rationale.push('WARN: No dedicated price feed — will use signal-embedded price');
     }
-    if (state.price_updated_at) {
-      const priceAgeMs = Date.now() - new Date(state.price_updated_at).getTime();
+    if (priceUpdatedAt) {
+      const priceAgeMs = Date.now() - new Date(priceUpdatedAt).getTime();
       if (priceAgeMs > 5 * 60 * 1000) {
         rationale.push(`WARN: Price data stale (${Math.round(priceAgeMs / 1000)}s old)`);
       }
@@ -299,6 +313,7 @@ class TradeDecisionEngine {
     }
 
     const failures = [];
+    let convictionPenalty = 0;
 
     if ((entrySignal.confidence || 0) < 40) {
       failures.push(`confidence=${entrySignal.confidence} < 40`);
@@ -314,12 +329,22 @@ class TradeDecisionEngine {
       failures.push('ATR is zero or negative');
     }
 
+    // Counter-macro: penalize instead of hard-blocking. Very high-confidence
+    // signals (>= 85) are allowed through with a smaller penalty to capture
+    // mean-reversion opportunities at extremes.
     const signalDir = entrySignal.direction;
-    if (signalDir && state.macro_bias !== 'NEUTRAL') {
+    if (signalDir && state.macro_bias !== 'NEUTRAL' && state.macro_bias) {
       const macroDirLong = state.macro_bias === 'BULLISH';
       const signalIsLong = signalDir === 'long';
       if (macroDirLong !== signalIsLong) {
-        failures.push(`macro_bias=${state.macro_bias} conflicts with signal direction=${signalDir}`);
+        const confidence = entrySignal.confidence || 0;
+        if (confidence >= 85) {
+          convictionPenalty += 15;
+          rationale.push(`MACRO_CONFLICT_PENALTY -15: ${state.macro_bias} conflicts with ${signalDir} (high confidence ${confidence} — allowing with penalty)`);
+        } else {
+          convictionPenalty += 25;
+          rationale.push(`MACRO_CONFLICT_PENALTY -25: ${state.macro_bias} conflicts with ${signalDir} (confidence ${confidence} — heavy penalty)`);
+        }
       }
     }
 
@@ -329,7 +354,7 @@ class TradeDecisionEngine {
     }
 
     rationale.push('PRECONDITIONS: All SIGNALS checks passed');
-    return { valid: true, conviction: entrySignal.confidence || 0 };
+    return { valid: true, conviction: (entrySignal.confidence || 0) - convictionPenalty };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -388,6 +413,7 @@ class TradeDecisionEngine {
     }
 
     const failures = [];
+    let convictionPenalty = 0;
 
     if (!entrySignal.entry_price || entrySignal.entry_price <= 0) {
       failures.push('entry_price missing or <= 0');
@@ -407,12 +433,21 @@ class TradeDecisionEngine {
       failures.push(`rr_ratio=${entrySignal.rr_ratio} < 1.2`);
     }
 
+    // Counter-macro: penalize instead of hard-blocking.
+    // STRAT setups with strong levels can be valid counter-trend reversals.
     const signalDir = entrySignal.direction;
     if (signalDir && state.macro_bias !== 'NEUTRAL' && state.macro_bias) {
       const macroDirLong = state.macro_bias === 'BULLISH';
       const signalIsLong = signalDir === 'long';
       if (macroDirLong !== signalIsLong) {
-        failures.push(`macro_bias=${state.macro_bias} conflicts with STRAT direction=${signalDir}`);
+        const confidence = entrySignal.confidence || 0;
+        if (confidence >= 85) {
+          convictionPenalty += 15;
+          rationale.push(`STRAT_MACRO_CONFLICT_PENALTY -15: ${state.macro_bias} conflicts with ${signalDir} (high confidence ${confidence})`);
+        } else {
+          convictionPenalty += 25;
+          rationale.push(`STRAT_MACRO_CONFLICT_PENALTY -25: ${state.macro_bias} conflicts with ${signalDir} (confidence ${confidence})`);
+        }
       }
     }
 
@@ -435,7 +470,7 @@ class TradeDecisionEngine {
     }
 
     rationale.push('STRAT_PRECONDITIONS: All checks passed');
-    return { valid: true, conviction: entrySignal.confidence || 75 };
+    return { valid: true, conviction: (entrySignal.confidence || 75) - convictionPenalty };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -445,26 +480,30 @@ class TradeDecisionEngine {
   _applyMacroRules(signal, state, rationale) {
     const dir = signal.direction || state.latest_entry_signal?.direction;
     const isLong = dir === 'long';
+    let penalty = 0;
 
-    // Regime-based blocks
+    // Regime-based penalties
     if (state.regime === 'TREND' && state.macro_strength >= 65) {
       rationale.push(`MACRO: regime=TREND macro_strength=${state.macro_strength} — trend trades only`);
     }
 
     if (state.regime === 'CHOP') {
-      rationale.push('MACRO: regime=CHOP — breakout trades blocked, prefer spreads');
+      penalty += 10;
+      rationale.push('MACRO_PENALTY -10: regime=CHOP — breakout trades penalized, prefer spreads');
     }
 
-    // Room-to-move blocks
+    // Room-to-move penalties (applied directly to conviction)
     if (isLong && state.room_to_resistance === 'LOW') {
-      rationale.push('MACRO_PENALTY: room_to_resistance=LOW — CALL conviction -15');
+      penalty += 15;
+      rationale.push('MACRO_PENALTY -15: room_to_resistance=LOW — limited upside for CALL');
     }
 
     if (!isLong && state.room_to_support === 'LOW') {
-      rationale.push('MACRO_PENALTY: room_to_support=LOW — PUT conviction -15');
+      penalty += 15;
+      rationale.push('MACRO_PENALTY -15: room_to_support=LOW — limited downside for PUT');
     }
 
-    return { blocked: false };
+    return { blocked: false, penalty };
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -611,14 +650,8 @@ class TradeDecisionEngine {
       }
     }
 
-    // -Room penalty (low room to move in trade direction)
-    if (dir === 'long' && state.room_to_resistance === 'LOW') {
-      conviction -= 15;
-      rationale.push('CONVICTION -15: room_to_resistance=LOW');
-    } else if (dir === 'short' && state.room_to_support === 'LOW') {
-      conviction -= 15;
-      rationale.push('CONVICTION -15: room_to_support=LOW');
-    }
+    // Room and CHOP penalties are now applied via _applyMacroRules to avoid
+    // double-counting. Only CONTRACTION remains here since it's not macro-related.
 
     // +Macro strength modifier (macro_strength / 10)
     if (state.macro_strength > 0) {
@@ -627,11 +660,8 @@ class TradeDecisionEngine {
       rationale.push(`CONVICTION +${macroBonus}: macro_strength=${state.macro_strength}`);
     }
 
-    // -Regime mismatch penalties
-    if (state.regime === 'CHOP') {
-      conviction -= 10;
-      rationale.push('CONVICTION -10: CHOP regime penalty');
-    } else if (state.regime === 'CONTRACTION') {
+    // -Regime mismatch penalties (CHOP is handled by _applyMacroRules)
+    if (state.regime === 'CONTRACTION') {
       conviction -= 5;
       rationale.push('CONVICTION -5: CONTRACTION regime penalty');
     }
@@ -846,30 +876,65 @@ class TradeDecisionEngine {
     let stopLevel = null;
     let stopSource = null;
     let maxLoss = null;
+    const dir = signal.direction || entrySignal?.direction;
+    const isLong = dir === 'long';
 
     // Stop hierarchy:
     // 1. Structure invalidation (from MTF risk_context)
+    // The invalidation level is directional: for a long trade it must be
+    // BELOW current price (support break), for a short trade it must be
+    // ABOVE current price (resistance break). Ignore levels on the wrong
+    // side — they represent the *target* zone, not the stop.
     const macroRaw = state.latest_macro_raw;
     const structureStop = macroRaw?.riskContext?.invalidation?.level;
-    if (structureStop) {
+    if (structureStop && state.last_price) {
+      const level = parseFloat(structureStop);
+      const isBelow = level < state.last_price;
+      const isAbove = level > state.last_price;
+      if ((isLong && isBelow) || (!isLong && isAbove)) {
+        stopLevel = level;
+        stopSource = 'STRUCTURE_INVALIDATION';
+        rationale.push(`STOP: Structure invalidation from MTF @ ${stopLevel}`);
+      } else {
+        rationale.push(
+          `STOP_SKIP: Structure invalidation @ ${level} is on the wrong side ` +
+          `for ${dir} trade (price=${state.last_price}) — ignoring as stop`
+        );
+      }
+    } else if (structureStop && !state.last_price) {
       stopLevel = parseFloat(structureStop);
       stopSource = 'STRUCTURE_INVALIDATION';
-      rationale.push(`STOP: Structure invalidation from MTF @ ${stopLevel}`);
+      rationale.push(`STOP: Structure invalidation from MTF @ ${stopLevel} (no price to validate direction)`);
     }
 
-    // 2. SIGNALS stop_loss
+    // 2. SIGNALS stop_loss — validate direction consistency
     if (!stopLevel && entrySignal?.stop_loss) {
-      stopLevel = entrySignal.stop_loss;
-      stopSource = 'SIGNALS_STOP_LOSS';
-      rationale.push(`STOP: SIGNALS stop_loss @ ${stopLevel}`);
+      const signalStop = parseFloat(entrySignal.stop_loss);
+      if (state.last_price) {
+        const stopIsBelow = signalStop < state.last_price;
+        const stopIsAbove = signalStop > state.last_price;
+        if ((isLong && stopIsBelow) || (!isLong && stopIsAbove)) {
+          stopLevel = signalStop;
+          stopSource = 'SIGNALS_STOP_LOSS';
+          rationale.push(`STOP: SIGNALS stop_loss @ ${stopLevel}`);
+        } else {
+          rationale.push(
+            `STOP_SKIP: Signal stop @ ${signalStop} is ${stopIsAbove ? 'above' : 'below'} ` +
+            `price ${state.last_price} for a ${dir} trade — ignoring (likely target, not stop)`
+          );
+        }
+      } else {
+        stopLevel = signalStop;
+        stopSource = 'SIGNALS_STOP_LOSS';
+        rationale.push(`STOP: SIGNALS stop_loss @ ${stopLevel}`);
+      }
     }
 
     // 3. ATR trailing (2x ATR) — prefer strat plan ATR when available
     const effectiveAtr = state.latest_strat_signal?.atr || state.atr;
     if (!stopLevel && effectiveAtr && state.last_price) {
-      const dir = signal.direction || entrySignal?.direction;
       const atrMultiple = 2;
-      stopLevel = dir === 'long'
+      stopLevel = isLong
         ? state.last_price - (effectiveAtr * atrMultiple)
         : state.last_price + (effectiveAtr * atrMultiple);
       stopSource = 'ATR_TRAILING';

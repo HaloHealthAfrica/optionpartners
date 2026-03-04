@@ -6,9 +6,14 @@ const tradeFinalizer = require('./trade-finalizer');
 const ledgerService = require('./ledger.service');
 const NotificationService = require('../../services/notificationService');
 const dataServiceProxy = require('../../services/dataServiceProxy');
+const globalMarketState = require('./global-market-state.service');
 const marketContext = require('./market-context.service');
 const logger = require('../../utils/logger');
 const Sentry = require('@sentry/node');
+
+const MIN_HOLD_MS = parseInt(process.env.SIM_MIN_HOLD_MS || '60000', 10);
+const REQUIRE_FRESH_PRICE_FOR_EXITS = process.env.SIM_REQUIRE_FRESH_EXIT_PRICE !== 'false';
+const MAX_EXIT_PRICE_AGE_MS = parseInt(process.env.SIM_MAX_EXIT_PRICE_AGE_MS || '120000', 10);
 
 /**
  * Background exit monitor -- checks open positions for stop-loss,
@@ -102,19 +107,64 @@ class ExitMonitor {
   }
 
   async _evaluatePosition(position) {
-    const underlyingPrice = await this._getLatestPrice(position);
+    // Minimum hold period: skip stop/target evaluation for newly opened positions.
+    // Prevents instant stop-outs on stale or estimated prices.
+    const holdMs = Date.now() - new Date(position.opened_at).getTime();
+    if (holdMs < MIN_HOLD_MS) {
+      // Exception: DTE expiry is still checked (position expiring today)
+      if (position.expiration && (position.force_close_at_dte_zero !== false)) {
+        const dte = Math.ceil((new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24));
+        if (dte <= 0) {
+          const optionPrice = parseFloat(position.current_price || position.avg_price);
+          await this._triggerExit(position, optionPrice, 'DTE_EXPIRY', `Position expired during min-hold (DTE=${dte})`);
+          return;
+        }
+      }
+      return;
+    }
+
+    const { price: underlyingPrice, fresh: priceFresh, source: priceSource } = await this._getLatestPriceFresh(position);
     if (!underlyingPrice) return;
 
-    const isOption = position.contract_type !== 'STOCK';
-    const optionPrice = isOption
-      ? await this._estimateOptionPrice(position, underlyingPrice)
-      : underlyingPrice;
+    // If fresh price is required and we only have stale data, skip evaluation.
+    if (REQUIRE_FRESH_PRICE_FOR_EXITS && !priceFresh) {
+      const lookupSymbol = position.underlying_symbol || position.symbol;
+      logger.warn(
+        `[EXIT_SKIP] ${lookupSymbol}: price not fresh (source=${priceSource}) — skipping exit evaluation`,
+        'exit-monitor'
+      );
+      return;
+    }
 
-    // Store option price (not underlying) so unrealized PnL is correct
-    await db.query(
-      'UPDATE sim_positions SET current_price = $2 WHERE id = $1',
-      [position.id, optionPrice]
-    );
+    const isOption = position.contract_type !== 'STOCK';
+    const optionResult = isOption
+      ? await this._estimateOptionPrice(position, underlyingPrice)
+      : { price: underlyingPrice, greeks: null };
+
+    const optionPrice = typeof optionResult === 'number' ? optionResult : optionResult.price;
+    const liveGreeks = typeof optionResult === 'object' ? optionResult.greeks : null;
+
+    // Store option price and live Greeks so unrealized PnL and risk are current
+    if (isOption && liveGreeks) {
+      await db.query(
+        `UPDATE sim_positions
+         SET current_price = $2,
+             live_delta = $3, live_gamma = $4, live_theta = $5,
+             live_vega = $6, live_iv = $7, greeks_updated_at = NOW()
+         WHERE id = $1`,
+        [
+          position.id, optionPrice,
+          liveGreeks.delta ?? null, liveGreeks.gamma ?? null,
+          liveGreeks.theta ?? null, liveGreeks.vega ?? null,
+          liveGreeks.iv ?? null,
+        ]
+      );
+    } else {
+      await db.query(
+        'UPDATE sim_positions SET current_price = $2 WHERE id = $1',
+        [position.id, optionPrice]
+      );
+    }
 
     const isCreditSpread = position.contract_type === 'CREDIT_SPREAD';
     const isPut = position.contract_type === 'PUT';
@@ -170,7 +220,35 @@ class ExitMonitor {
       }
 
       if (breached) {
-        await this._triggerExit(position, optionPrice, 'STOP_LOSS', `Underlying ${underlyingPrice} breached stop-loss ${stopLoss}`);
+        // Sanity check: a stop-loss exit on a long position should be a loss,
+        // and on a credit spread should also be a loss. If the estimated exit
+        // price implies a profit, something is wrong with the price estimate —
+        // fall back to entry price to avoid phantom P&L.
+        const entryPrice = parseFloat(position.avg_price);
+        let exitPriceToUse = optionPrice;
+        if (!isCreditSpread) {
+          const impliedPnl = (optionPrice - entryPrice) * position.quantity * 100;
+          if (impliedPnl > 0) {
+            logger.warn(
+              `[STOP_LOSS_SANITY] ${position.symbol}: stop-loss exit implies profit ` +
+              `($${optionPrice} exit vs $${entryPrice} entry = +$${impliedPnl.toFixed(2)}). ` +
+              `Price estimate is likely wrong — using entry price as exit.`,
+              'exit-monitor'
+            );
+            exitPriceToUse = entryPrice;
+          }
+        } else {
+          const impliedPnl = (entryPrice - optionPrice) * position.quantity * 100;
+          if (impliedPnl > 0) {
+            logger.warn(
+              `[STOP_LOSS_SANITY] ${position.symbol}: credit spread stop-loss exit implies profit. ` +
+              `Price estimate is likely wrong — using entry price as exit.`,
+              'exit-monitor'
+            );
+            exitPriceToUse = entryPrice;
+          }
+        }
+        await this._triggerExit(position, exitPriceToUse, 'STOP_LOSS', `Underlying ${underlyingPrice} breached stop-loss ${stopLoss}`);
         return;
       }
     }
@@ -235,7 +313,48 @@ class ExitMonitor {
       }
     }
 
-    // 5. Max hold duration check (regime-adjusted)
+    // 5. Greeks-based exit checks (theta decay + delta collapse)
+    if (isOption && liveGreeks) {
+      // 5a. Theta decay exit — if daily theta bleed exceeds a threshold
+      // percentage of remaining position value, close before time value
+      // erodes further. Threshold is configurable; default 5% per day.
+      const thetaExitPct = parseFloat(process.env.SIM_THETA_EXIT_PCT || '0.05');
+      if (liveGreeks.theta != null && optionPrice > 0) {
+        const dailyThetaBleed = Math.abs(liveGreeks.theta);
+        const positionValue = optionPrice * position.quantity * 100;
+        const thetaRatio = positionValue > 0 ? dailyThetaBleed / positionValue : 0;
+        if (thetaRatio > thetaExitPct && positionValue > 0) {
+          await this._triggerExit(
+            position, optionPrice, 'THETA_DECAY',
+            `Daily theta $${dailyThetaBleed.toFixed(2)} = ${(thetaRatio * 100).toFixed(1)}% of position value $${positionValue.toFixed(2)} (threshold ${(thetaExitPct * 100).toFixed(0)}%)`
+          );
+          return;
+        }
+      }
+
+      // 5b. Delta collapse — if delta drops below a minimum threshold
+      // the option has very little sensitivity to the underlying and
+      // is unlikely to recover. Default threshold: |delta| < 0.05.
+      const minDelta = parseFloat(process.env.SIM_MIN_DELTA_EXIT || '0.05');
+      if (liveGreeks.delta != null) {
+        const absDelta = Math.abs(liveGreeks.delta);
+        if (absDelta < minDelta && absDelta > 0) {
+          const dte = position.expiration
+            ? Math.ceil((new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
+            : 999;
+          // Only trigger if DTE > 0 (DTE=0 is handled by expiry check)
+          if (dte > 0) {
+            await this._triggerExit(
+              position, optionPrice, 'DELTA_COLLAPSE',
+              `|delta|=${absDelta.toFixed(4)} below minimum ${minDelta} — option is deep OTM with ${dte} DTE remaining`
+            );
+            return;
+          }
+        }
+      }
+    }
+
+    // 6. Max hold duration check (regime-adjusted)
     const maxHoldHours = exitAdj.maxHoldHours;
     if (maxHoldHours) {
       const hoursOpen = (Date.now() - new Date(position.opened_at).getTime()) / (1000 * 60 * 60);
@@ -338,89 +457,71 @@ class ExitMonitor {
   }
 
   /**
-   * Get the latest price for a position. Returns null if no fresh
-   * price is available (stale prices outside market hours are rejected
-   * to prevent false exit triggers).
+   * Get the latest price for a position with freshness metadata.
+   * Tries: global_market_state → active fetch → price_cache (stale).
+   * Returns { price, fresh, source, ageMs }.
    */
-  async _getLatestPrice(position) {
-    const MAX_PRICE_AGE_MS = parseInt(process.env.SIM_MAX_PRICE_AGE_MS || '900000', 10); // 15 min default
+  async _getLatestPriceFresh(position) {
+    const lookupSymbol = (position.underlying_symbol || position.symbol).toUpperCase();
 
-    // For options, look up the underlying symbol (e.g. "SPY") not the
-    // contract symbol (e.g. "SPY 20260320 C 505") — price_cache only
-    // stores underlying prices.
-    const lookupSymbol = position.underlying_symbol || position.symbol;
+    // 1. Check global_market_state (authoritative, shared across users)
+    const gms = await globalMarketState.getState(lookupSymbol);
+    if (gms?.last_price && gms.price_updated_at) {
+      const ageMs = Date.now() - new Date(gms.price_updated_at).getTime();
+      if (ageMs <= MAX_EXIT_PRICE_AGE_MS) {
+        return { price: parseFloat(gms.last_price), fresh: true, source: 'global_market_state', ageMs };
+      }
+    }
 
-    // 1. Check price_cache
+    // 2. Check price_cache
     const cached = await db.query(
       'SELECT price, updated_at FROM price_cache WHERE symbol = $1',
       [lookupSymbol]
     );
     if (cached.rows.length > 0) {
       const ageMs = Date.now() - new Date(cached.rows[0].updated_at).getTime();
-      if (ageMs <= MAX_PRICE_AGE_MS) {
-        return parseFloat(cached.rows[0].price);
-      }
-      // Cache exists but is stale — try to refresh below
-    }
-
-    // 2. Check recent webhook payloads
-    const result = await db.query(
-      `SELECT raw_payload, received_at FROM webhook_events
-       WHERE user_id = $1
-         AND status IN ('PROCESSED', 'RECEIVED')
-         AND (raw_payload->>'symbol' = $2 OR raw_payload->>'ticker' = $2)
-       ORDER BY received_at DESC LIMIT 1`,
-      [position.user_id, lookupSymbol]
-    );
-
-    if (result.rows.length > 0) {
-      const ageMs = Date.now() - new Date(result.rows[0].received_at).getTime();
-      if (ageMs <= MAX_PRICE_AGE_MS) {
-        const payload = typeof result.rows[0].raw_payload === 'string'
-          ? JSON.parse(result.rows[0].raw_payload)
-          : result.rows[0].raw_payload;
-        const price = payload.close || payload.price || payload.mid_price
-          || payload.midPrice || payload.last;
-        if (price) return parseFloat(price);
+      if (ageMs <= MAX_EXIT_PRICE_AGE_MS) {
+        return { price: parseFloat(cached.rows[0].price), fresh: true, source: 'price_cache', ageMs };
       }
     }
 
-    // 3. Active fetch: pull a live quote from the data-service
-    //    (TwelveData / Polygon) and update price_cache so subsequent
-    //    lookups within the same cycle don't re-fetch.
+    // 3. Active fetch from data-service and update both stores
     try {
-      const quote = await dataServiceProxy.getQuote(lookupSymbol);
-      const price = quote?.data?.price ?? quote?.data?.last ?? quote?.data?.close;
-      if (price) {
-        const parsed = parseFloat(price);
-        await db.query(
-          `INSERT INTO price_cache (symbol, price, updated_at)
-           VALUES ($1, $2, NOW())
-           ON CONFLICT (symbol) DO UPDATE SET price = $2, updated_at = NOW()`,
-          [lookupSymbol, parsed]
-        );
-        logger.info(`[PRICE_REFRESH] ${lookupSymbol}: fetched live quote $${parsed} from data-service`, 'exit-monitor');
-        return parsed;
+      const freshPrice = await globalMarketState.refreshPrice(lookupSymbol);
+      if (freshPrice) {
+        return { price: freshPrice, fresh: true, source: 'data_service_live', ageMs: 0 };
       }
     } catch (err) {
-      logger.warn(`[PRICE_REFRESH] ${lookupSymbol}: live quote fetch failed (${err.message})`, 'exit-monitor');
+      logger.warn(`[PRICE_REFRESH] ${lookupSymbol}: live quote failed (${err.message})`, 'exit-monitor');
     }
 
-    // 4. Last resort: return stale cached price rather than null.
-    //    A slightly old price is better than skipping the position entirely.
-    if (cached.rows.length > 0) {
-      const stalePrice = parseFloat(cached.rows[0].price);
-      const ageMin = ((Date.now() - new Date(cached.rows[0].updated_at).getTime()) / 60000).toFixed(1);
-      logger.warn(`[PRICE_STALE] ${lookupSymbol}: using stale price $${stalePrice} (${ageMin}min old) — all live sources failed`, 'exit-monitor');
-      return stalePrice;
+    // 4. Last resort: return stale price with fresh=false
+    const stalePrice = gms?.last_price ? parseFloat(gms.last_price)
+      : (cached.rows.length > 0 ? parseFloat(cached.rows[0].price) : null);
+
+    if (stalePrice) {
+      const staleAt = gms?.price_updated_at || cached.rows[0]?.updated_at;
+      const ageMs = staleAt ? Date.now() - new Date(staleAt).getTime() : Infinity;
+      const ageMin = (ageMs / 60000).toFixed(1);
+      logger.warn(`[PRICE_STALE] ${lookupSymbol}: using stale $${stalePrice} (${ageMin}min old) — all live sources failed`, 'exit-monitor');
+      return { price: stalePrice, fresh: false, source: 'stale_cache', ageMs };
     }
 
-    return null;
+    return { price: null, fresh: false, source: 'none', ageMs: Infinity };
   }
 
   /**
-   * Estimate the current option price for a position.
+   * Legacy wrapper for backward compatibility.
+   */
+  async _getLatestPrice(position) {
+    const result = await this._getLatestPriceFresh(position);
+    return result.price;
+  }
+
+  /**
+   * Estimate the current option price and live Greeks for a position.
    * Tries live chain data first, falls back to intrinsic value.
+   * @returns {{ price: number, greeks: Object|null }}
    */
   async _estimateOptionPrice(position, underlyingPrice) {
     const lookupSymbol = position.underlying_symbol || position.symbol;
@@ -437,15 +538,27 @@ class ExitMonitor {
           parseFloat(c.strike) === parseFloat(position.strike)
           && c.type?.toLowerCase() === targetType
         );
-        if (match?.mid && match.mid > 0) {
-          logger.info(`[OPTION_PRICE] ${position.symbol}: chain mid=$${match.mid}`, 'exit-monitor');
-          return match.mid;
-        }
-        if (match?.last && match.last > 0) {
-          logger.info(`[OPTION_PRICE] ${position.symbol}: chain last=$${match.last} (no mid)`, 'exit-monitor');
-          return match.last;
-        }
         if (match) {
+          const greeks = {
+            delta: match.delta ?? null,
+            gamma: match.gamma ?? null,
+            theta: match.theta ?? null,
+            vega: match.vega ?? null,
+            iv: match.iv ?? match.impliedVolatility ?? null,
+          };
+          if (match.mid && match.mid > 0) {
+            logger.info(
+              `[OPTION_PRICE] ${position.symbol}: chain mid=$${match.mid} ` +
+              `Δ=${greeks.delta?.toFixed(3) ?? '?'} Γ=${greeks.gamma?.toFixed(4) ?? '?'} ` +
+              `Θ=${greeks.theta?.toFixed(3) ?? '?'} V=${greeks.vega?.toFixed(3) ?? '?'}`,
+              'exit-monitor'
+            );
+            return { price: match.mid, greeks };
+          }
+          if (match.last && match.last > 0) {
+            logger.info(`[OPTION_PRICE] ${position.symbol}: chain last=$${match.last} (no mid)`, 'exit-monitor');
+            return { price: match.last, greeks };
+          }
           logger.warn(`[OPTION_PRICE] ${position.symbol}: chain match found but mid=${match.mid} last=${match.last} — both zero/null`, 'exit-monitor');
         } else {
           logger.warn(`[OPTION_PRICE] ${position.symbol}: no chain match for strike=${position.strike} type=${targetType} in ${chainData.data.contracts.length} contracts`, 'exit-monitor');
@@ -456,26 +569,60 @@ class ExitMonitor {
     }
 
     const strike = parseFloat(position.strike);
-    if (!strike || isNaN(strike)) return parseFloat(position.avg_price);
+    if (!strike || isNaN(strike)) return { price: parseFloat(position.avg_price), greeks: null };
 
     const dte = position.expiration
       ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
       : 0;
+
+    // Intrinsic fallback is unreliable — only use if explicitly enabled.
+    const allowIntrinsicFallback = process.env.SIM_ALLOW_INTRINSIC_FALLBACK === 'true';
+    if (!allowIntrinsicFallback) {
+      logger.warn(
+        `[PRICE_FALLBACK_BLOCKED] ${position.symbol}: chain unavailable and intrinsic fallback disabled — using entry price as exit estimate`,
+        'exit-monitor'
+      );
+      return { price: parseFloat(position.avg_price), greeks: null, source: 'entry_price_fallback' };
+    }
 
     logger.warn(
       `[PRICE_FALLBACK] ${position.symbol}: chain unavailable, using intrinsic+extrinsic estimate (underlying=${underlyingPrice}, strike=${strike}, dte=${dte.toFixed(1)})`,
       'exit-monitor'
     );
 
+    const entryPrice = parseFloat(position.avg_price);
+
     if (position.contract_type === 'CALL') {
       const intrinsic = Math.max(0, underlyingPrice - strike);
       const extrinsic = this._estimateExtrinsicValue(underlyingPrice, strike, dte);
-      return Math.max(0.01, intrinsic + extrinsic);
+      let estimated = Math.max(0.01, intrinsic + extrinsic);
+      // Cap the estimated price change to a realistic max per DTE.
+      // Options rarely move more than 10x entry in < 30 DTE without chain confirmation.
+      const maxReasonablePrice = entryPrice * 10;
+      if (estimated > maxReasonablePrice && !position.greeks_updated_at) {
+        logger.warn(
+          `[PRICE_CAP] ${position.symbol}: estimated $${estimated.toFixed(2)} capped to $${maxReasonablePrice.toFixed(2)} ` +
+          `(10x entry $${entryPrice}) — no live chain confirmation`,
+          'exit-monitor'
+        );
+        estimated = maxReasonablePrice;
+      }
+      return { price: estimated, greeks: null };
     }
     if (position.contract_type === 'PUT') {
       const intrinsic = Math.max(0, strike - underlyingPrice);
       const extrinsic = this._estimateExtrinsicValue(underlyingPrice, strike, dte);
-      return Math.max(0.01, intrinsic + extrinsic);
+      let estimated = Math.max(0.01, intrinsic + extrinsic);
+      const maxReasonablePrice = entryPrice * 10;
+      if (estimated > maxReasonablePrice && !position.greeks_updated_at) {
+        logger.warn(
+          `[PRICE_CAP] ${position.symbol}: estimated $${estimated.toFixed(2)} capped to $${maxReasonablePrice.toFixed(2)} ` +
+          `(10x entry $${entryPrice}) — no live chain confirmation`,
+          'exit-monitor'
+        );
+        estimated = maxReasonablePrice;
+      }
+      return { price: estimated, greeks: null };
     }
     if (position.contract_type === 'CREDIT_SPREAD') {
       const shortStrike = parseFloat(position.strike_short || position.strike);
@@ -492,11 +639,11 @@ class ExitMonitor {
         }
         const spreadValue = Math.max(0, shortIntrinsic - longIntrinsic);
         const extrinsicEstimate = dte > 0 ? 0.02 * Math.sqrt(dte) : 0;
-        return Math.max(0.01, spreadValue + extrinsicEstimate);
+        return { price: Math.max(0.01, spreadValue + extrinsicEstimate), greeks: null };
       }
     }
 
-    return parseFloat(position.avg_price);
+    return { price: parseFloat(position.avg_price), greeks: null };
   }
 
   /**
@@ -513,17 +660,46 @@ class ExitMonitor {
   }
 
   async _triggerExit(position, exitPrice, reason, message) {
-    // Idempotency: verify position is still OPEN before attempting exit
-    const check = await db.query(
-      'SELECT status FROM sim_positions WHERE id = $1',
-      [position.id]
-    );
-    if (check.rows.length === 0 || check.rows[0].status !== 'OPEN') {
-      logger.info(`Exit skipped for ${position.id}: position is no longer OPEN`, 'exit-monitor');
-      return;
+    // Suspicious exit detection
+    const holdMs = Date.now() - new Date(position.opened_at).getTime();
+    const holdSec = holdMs / 1000;
+    const entryPrice = parseFloat(position.avg_price);
+    const multiplier = position.contract_type === 'STOCK' ? 1 : 100;
+    const impliedPnl = position.contract_type === 'CREDIT_SPREAD'
+      ? (entryPrice - exitPrice) * position.quantity * multiplier
+      : (exitPrice - entryPrice) * position.quantity * multiplier;
+    const impliedPnlPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 : 0;
+
+    let exitAnomalyReason = null;
+    if (holdSec < 60 && reason !== 'DTE_EXPIRY') {
+      exitAnomalyReason = `RAPID_EXIT: position held only ${holdSec.toFixed(0)}s`;
+      logger.warn(
+        `[EXIT_ANOMALY] ${position.symbol}: ${exitAnomalyReason} — PnL $${impliedPnl.toFixed(2)} (${impliedPnlPct.toFixed(1)}%)`,
+        'exit-monitor'
+      );
+    }
+    if (Math.abs(impliedPnlPct) > 50 && reason === 'STOP_LOSS') {
+      const msg = `EXTREME_STOP: ${impliedPnlPct.toFixed(1)}% move on stop-loss — pricing may be unreliable`;
+      exitAnomalyReason = exitAnomalyReason ? `${exitAnomalyReason}; ${msg}` : msg;
+      logger.warn(`[EXIT_ANOMALY] ${position.symbol}: ${msg}`, 'exit-monitor');
     }
 
+    const client = await db.connect();
     try {
+      await client.query('BEGIN');
+
+      const check = await client.query(
+        'SELECT status FROM sim_positions WHERE id = $1 FOR UPDATE',
+        [position.id]
+      );
+      if (check.rows.length === 0 || check.rows[0].status !== 'OPEN') {
+        await client.query('COMMIT');
+        logger.info(`Exit skipped for ${position.id}: position is no longer OPEN`, 'exit-monitor');
+        return;
+      }
+
+      await client.query('COMMIT');
+
       const intent = {
         symbol: position.symbol,
         side: 'SELL',
@@ -553,14 +729,21 @@ class ExitMonitor {
           symbol: position.symbol, contractType: position.contract_type,
           pnl: trade?.pnl, pnlPercent: trade?.pnl_percent,
           exitReason: reason, tradeId: trade?.id,
-        }).catch(() => {});
+        }).catch(err => logger.warn(`Exit notification failed: ${err.message}`, 'exit-monitor'));
       }
 
       this._exitsTriggered++;
       logger.info(`EXIT TRIGGERED [${reason}]: ${position.symbol} @ ${exitPrice} — ${message}`, 'exit-monitor');
     } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      if (error.message?.includes('no longer OPEN') || error.message?.includes('already closed')) {
+        logger.info(`Exit race resolved for ${position.id}: ${error.message}`, 'exit-monitor');
+        return;
+      }
       logger.error(`Exit trigger failed for ${position.id}: ${error.message}`, 'exit-monitor');
       Sentry.captureException(error, { tags: { module: 'exit-monitor' } });
+    } finally {
+      client.release();
     }
   }
 

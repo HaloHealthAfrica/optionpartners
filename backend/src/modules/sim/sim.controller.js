@@ -5,6 +5,7 @@ const webhookProcessor = require('./webhook-processor');
 const safetyGuards = require('./safety-guards');
 const replayService = require('./replay.service');
 const symbolStateService = require('./symbol-state.service');
+const globalMarketState = require('./global-market-state.service');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
@@ -518,6 +519,38 @@ async function getStateHealth(req, res) {
   }
 }
 
+/**
+ * GET /api/sim/health/global
+ * Shows global market state health for all symbols — dead feed detection,
+ * staleness, and provider status.
+ */
+async function getGlobalHealth(_req, res) {
+  try {
+    const [summary, alerts] = await Promise.all([
+      globalMarketState.getHealthSummary(),
+      globalMarketState.detectDeadFeeds(),
+    ]);
+
+    let dataServiceHealth = null;
+    try {
+      dataServiceHealth = await dataServiceProxy.getHealth();
+    } catch (err) {
+      dataServiceHealth = { error: err.message, reachable: false };
+    }
+
+    res.json({
+      globalMarketState: summary,
+      deadFeedAlerts: alerts,
+      dataService: dataServiceHealth,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error(`Global health check failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to get global health' });
+  }
+}
+
 module.exports = {
   getAccountState,
   resetAccount,
@@ -534,4 +567,5 @@ module.exports = {
   getStatus,
   warmupSymbol,
   getStateHealth,
+  getGlobalHealth,
 };

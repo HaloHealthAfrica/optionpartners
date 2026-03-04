@@ -116,12 +116,27 @@ async function main() {
   app.get('/api/health', async (_req, res) => {
     try {
       const providers = orchestrator.getProviderHealths();
+      const workerStatus = workerManager.getStatus();
+      const chainPriceMetrics = workerManager.chainPricePoller.getMetrics();
       const isReady = registeredProviderCount > 0;
-      
+
+      // Determine if any critical feeds are dead
+      const spyMetrics = chainPriceMetrics['SPY'];
+      const hasFreshPrice = spyMetrics && (Date.now() - spyMetrics.lastPriceAt) < 300_000;
+      const hasFreshChain = spyMetrics && (Date.now() - spyMetrics.lastChainAt) < 600_000;
+      const healthyFeeds = hasFreshPrice && hasFreshChain;
+
       res.json({
-        status: isReady ? 'ok' : 'degraded',
+        status: isReady ? (healthyFeeds ? 'ok' : 'degraded') : 'unhealthy',
         ready: isReady,
+        uptime: process.uptime(),
         providers,
+        workers: workerStatus,
+        feeds: {
+          price: { lastAt: spyMetrics?.lastPriceAt ? new Date(spyMetrics.lastPriceAt).toISOString() : null, fresh: hasFreshPrice, failures: spyMetrics?.priceFails ?? 0 },
+          chain: { lastAt: spyMetrics?.lastChainAt ? new Date(spyMetrics.lastChainAt).toISOString() : null, fresh: hasFreshChain, failures: spyMetrics?.chainFails ?? 0 },
+          allSymbols: chainPriceMetrics,
+        },
         configuration: {
           apiKeysConfigured: configValidation.configuredCount,
           providersRegistered: registeredProviderCount,
@@ -130,6 +145,24 @@ async function main() {
       });
     } catch {
       res.status(503).json({ status: 'degraded', ready: false });
+    }
+  });
+
+  // --- Readiness probe (Fly.io / k8s) ---
+  app.get('/api/readyz', async (_req, res) => {
+    try {
+      const metrics = workerManager.chainPricePoller.getMetrics();
+      const spyMetrics = metrics['SPY'];
+      const pollingActive = workerManager.chainPricePoller.isRunning();
+      const hasFreshData = spyMetrics && (Date.now() - spyMetrics.lastPriceAt) < 300_000;
+
+      if (pollingActive && registeredProviderCount > 0) {
+        res.json({ ready: true, pollingActive, hasFreshData, providers: registeredProviderCount });
+      } else {
+        res.status(503).json({ ready: false, pollingActive, hasFreshData, providers: registeredProviderCount });
+      }
+    } catch {
+      res.status(503).json({ ready: false });
     }
   });
 
