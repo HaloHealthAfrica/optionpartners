@@ -107,16 +107,16 @@ function generateDedupeKey(payload) {
     case 'SQUEEZE_PRO':
       discriminator = [
         payload.direction,
-        payload.timeframe,
-        payload.momentum,
-        payload.compression_score,
+        payload.interval || payload.timeframe,
+        payload.momentum?.value ?? payload.momentum?.direction,
+        payload.squeeze?.compression_score ?? payload.compression_score,
       ].join(':');
       break;
     case 'PIVOT_MB':
       discriminator = [
-        payload.direction || payload.signal_type,
+        payload.side || payload.direction || payload.signal_type,
         payload.timeframe,
-        payload.price,
+        payload.entry_price ?? payload.price,
       ].join(':');
       break;
     case 'MARKET_CONTEXT':
