@@ -216,7 +216,16 @@ app.use((req, res, next) => {
     req.on('data', (chunk) => { data += chunk; });
     req.on('end', () => {
       req.rawBody = data;
-      try { req.body = JSON.parse(data); } catch (e) { req.body = {}; }
+      try {
+        req.body = JSON.parse(data);
+      } catch (e) {
+        // Reject unparseable payloads immediately instead of silently continuing
+        // with an empty object (which would create a universal dedupe key collision)
+        return res.status(400).json({
+          error: 'Invalid JSON payload',
+          detail: e.message,
+        });
+      }
       next();
     });
   } else {

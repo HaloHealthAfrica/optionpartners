@@ -22,6 +22,8 @@ const MAX_AGE_BY_SOURCE = {
   STRAT:          30 * 60 * 1000,            // 30 minutes
   SIGNALS:        30 * 60 * 1000,
   ORB:            30 * 60 * 1000,
+  SQUEEZE_PRO:    30 * 60 * 1000,
+  PIVOT_MB:       30 * 60 * 1000,
 };
 
 /**
@@ -42,11 +44,16 @@ function verifySignature(payload, signature, secret) {
 /**
  * Generate idempotency/dedupe key from payload contents.
  * Indicator-aware: uses source-specific fields for better deduplication.
+ *
+ * The timestamp component is resolved with source-aware fallbacks so that
+ * payloads with nested timestamps (e.g. signal.bar_time) still produce
+ * unique keys across different bar periods.
  */
 function generateDedupeKey(payload) {
   const source = detectIndicatorSource(payload);
   const symbol = payload.ticker || payload.symbol || payload.meta?.symbol || '';
-  const ts = payload.time || payload.timestamp || payload.event_ts_ms || payload.meta?.ts || '';
+
+  const ts = _resolveTimestamp(payload, source);
 
   let discriminator;
   switch (source) {
@@ -97,6 +104,21 @@ function generateDedupeKey(payload) {
         payload.chart_tf,
       ].join(':');
       break;
+    case 'SQUEEZE_PRO':
+      discriminator = [
+        payload.direction,
+        payload.timeframe,
+        payload.momentum,
+        payload.compression_score,
+      ].join(':');
+      break;
+    case 'PIVOT_MB':
+      discriminator = [
+        payload.direction || payload.signal_type,
+        payload.timeframe,
+        payload.price,
+      ].join(':');
+      break;
     case 'MARKET_CONTEXT':
       discriminator = [
         payload.event,
@@ -115,6 +137,47 @@ function generateDedupeKey(payload) {
 
   const parts = [source, symbol, ts, discriminator].join('|');
   return crypto.createHash('sha256').update(parts).digest('hex').substring(0, 40);
+}
+
+/**
+ * Resolve the best available timestamp from a payload.
+ * Source-aware: checks nested timestamp locations that each indicator type uses,
+ * then falls back to wall-clock time to guarantee cross-day uniqueness.
+ */
+function _resolveTimestamp(payload, source) {
+  // Top-level timestamp fields (checked first for all sources)
+  const topLevel = payload.time || payload.timestamp || payload.event_ts_ms || payload.meta?.ts;
+  if (topLevel) return String(topLevel);
+
+  // Source-specific nested timestamp locations
+  switch (source) {
+    case 'SIGNALS':
+      if (payload.signal?.bar_time) return payload.signal.bar_time;
+      if (payload.entry?.bar_time) return payload.entry.bar_time;
+      break;
+    case 'STRAT':
+      if (payload.setup?.bar_time) return payload.setup.bar_time;
+      if (payload.plan?.created_at) return payload.plan.created_at;
+      break;
+    case 'SATY_PHASE':
+      if (payload.phase_timestamp) return payload.phase_timestamp;
+      break;
+    case 'SQUEEZE_PRO':
+      if (payload.bar_time) return payload.bar_time;
+      break;
+    case 'PIVOT_MB':
+      if (payload.bar_time) return payload.bar_time;
+      break;
+    case 'TREND':
+      if (payload.meta?.bar_time) return payload.meta.bar_time;
+      break;
+  }
+
+  // Final fallback: use current wall-clock minute to prevent cross-day dedup.
+  // Rounded to the minute so that exact-duplicate retries within 60s still dedup.
+  const now = new Date();
+  now.setSeconds(0, 0);
+  return now.toISOString();
 }
 
 /**

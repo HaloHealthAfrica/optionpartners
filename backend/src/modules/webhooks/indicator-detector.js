@@ -55,7 +55,7 @@ function detectIndicatorSource(payload) {
   if (payload.timeframes && payload.bias && payload.ticker) return 'TREND';
   if (payload.indicator && KNOWN_ORB_INDICATORS.includes(payload.indicator)) return 'ORB';
 
-  if (payload.source === 'SQUEEZE_PRO') return 'SQUEEZE_PRO';
+  if (payload.source === 'SQUEEZE_PRO' || payload.source === 'SQZ_ULTRA_PRO') return 'SQUEEZE_PRO';
 
   if (payload.source === 'PIVOT_MB' || payload.signal_type === 'PIVOT_MOTHERBAR') return 'PIVOT_MB';
 
