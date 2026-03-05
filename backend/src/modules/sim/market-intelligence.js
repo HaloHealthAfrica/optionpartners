@@ -204,9 +204,9 @@ class MarketIntelligence {
       `SELECT flow_type, strike, expiry, premium, size, sentiment, unusual
        FROM options_flow
        WHERE symbol = $1
-         AND created_at >= NOW() - INTERVAL '1 minute' * $2
+         AND received_at >= NOW() - INTERVAL '1 minute' * $2
          AND (user_id = $3 OR user_id IS NULL)
-       ORDER BY created_at DESC
+       ORDER BY received_at DESC
        LIMIT 100`,
       [signal.symbol, windowMinutes, userId]
     );
@@ -481,10 +481,10 @@ class MarketIntelligence {
   async getIntelligenceSnapshot(symbol, userId) {
     const [flowResult, priceResult, recentSignals] = await Promise.all([
       db.query(
-        `SELECT flow_type, strike, premium, size, sentiment, unusual, created_at
+        `SELECT flow_type, strike, premium, size, sentiment, unusual, received_at
          FROM options_flow
          WHERE symbol = $1 AND (user_id = $2 OR user_id IS NULL)
-         ORDER BY created_at DESC LIMIT 20`,
+         ORDER BY received_at DESC LIMIT 20`,
         [symbol, userId]
       ),
       db.query('SELECT * FROM price_cache WHERE symbol = $1', [symbol]),
