@@ -98,6 +98,20 @@ class GlobalMarketStateService {
         return null;
       }
 
+      // Price plausibility check: compare against last known price if available.
+      // A >50% intraday move is extremely unusual and likely a data error.
+      const existing = !force ? null : await this.getState(sym);
+      const lastKnown = existing?.last_price ? parseFloat(existing.last_price) : null;
+      if (lastKnown && lastKnown > 0) {
+        const changePct = Math.abs((price - lastKnown) / lastKnown);
+        if (changePct > 0.50) {
+          logger.warn(
+            `[GMS_PRICE_SUSPECT] ${sym}: new price $${price} is ${(changePct * 100).toFixed(1)}% different from last known $${lastKnown} — possible data error`,
+            'global-market-state'
+          );
+        }
+      }
+
       const high = parseFloat(quote?.data?.high) || null;
       const low = parseFloat(quote?.data?.low) || null;
       const open = parseFloat(quote?.data?.open) || null;

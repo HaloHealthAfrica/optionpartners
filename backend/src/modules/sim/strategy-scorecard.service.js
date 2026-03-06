@@ -42,7 +42,10 @@ class StrategyScorecardService {
 
     const grossWins = pnls.filter(p => p > 0).reduce((a, b) => a + b, 0);
     const grossLosses = Math.abs(pnls.filter(p => p < 0).reduce((a, b) => a + b, 0));
+    // PF=999 is a sentinel for "no losses" — must be handled as a special case,
+    // not as a literal 999x profit factor in sizing or filtering decisions.
     const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? 999 : 0);
+    const profitFactorIsReal = grossLosses > 0;
 
     const avgRMultiple = rMultiples.length > 0
       ? rMultiples.reduce((a, b) => a + b, 0) / rMultiples.length
@@ -180,10 +183,13 @@ class StrategyScorecardService {
       };
     }
 
-    if (profitFactor < minProfitFactor) {
+    // PF=999 is a sentinel for "no losses recorded" — treat as passing
+    // (infinite PF is not underperforming, just insufficient loss data)
+    const pf = parseFloat(scorecard.profit_factor);
+    if (pf !== 999 && pf < minProfitFactor) {
       return {
         allowed: false,
-        reason: `STRATEGY_UNDERPERFORMING: ${strategy} profit factor ${profitFactor.toFixed(2)} < min ${minProfitFactor.toFixed(2)}`,
+        reason: `STRATEGY_UNDERPERFORMING: ${strategy} profit factor ${pf.toFixed(2)} < min ${minProfitFactor.toFixed(2)}`,
       };
     }
 

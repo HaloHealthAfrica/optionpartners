@@ -217,6 +217,18 @@ async function getGuardEffectiveness(req, res) {
   }
 }
 
+async function getStrategySignalFrequency(req, res) {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || '90', 10);
+    const result = await guardEffectiveness.analyzeStrategySignalFrequency(req.user.id, { lookbackDays });
+    res.json({ strategies: result, lookbackDays });
+  } catch (err) {
+    logger.error(`Strategy signal frequency analysis failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+    res.status(500).json({ error: err.message });
+  }
+}
+
 // AI Insights — LLM interpretation of adaptive intelligence data
 const aiInsightsService = require('./ai-insights.service');
 const autoInsightService = require('./auto-insight.service');
@@ -355,6 +367,7 @@ module.exports = {
   getCalibrationLog,
   getSignalQuality,
   getGuardEffectiveness,
+  getStrategySignalFrequency,
   getAIInsights,
   streamAIInsights,
   getLiveContext,

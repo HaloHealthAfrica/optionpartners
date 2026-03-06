@@ -96,9 +96,15 @@ class LiveContextService {
       );
       if (result.rows.length === 0) return null;
       const row = result.rows[0];
+      let vix = row.current_iv ? parseFloat(row.current_iv) : null;
+      // VIX unit normalization: values < 2.0 are likely decimal format (0.259 = 25.9)
+      if (vix != null && vix > 0 && vix < 2.0) {
+        logger.warn(`LiveContext: VIX value ${vix} appears to be decimal format — correcting to ${vix * 100}`, 'live-context');
+        vix = vix * 100;
+      }
       return {
         regime: row.regime,
-        vix: row.current_iv ? parseFloat(row.current_iv) : null,
+        vix,
         hvPercentile: null,
         ivRank: row.iv_rank ? parseFloat(row.iv_rank) : null,
         updatedAt: row.captured_at,

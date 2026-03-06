@@ -44,7 +44,15 @@ class SafetyGuards {
     const effectiveKillSwitch = isStaleDay ? false : (accountState?.kill_switch_active || false);
 
     if (this.config.killSwitchActive || effectiveKillSwitch) {
+      const source = this.config.killSwitchActive ? 'ENV_CONFIG' : 'DB_ACCOUNT_STATE';
       violations.push('Kill switch is active');
+      logger.warn(
+        `[KILL_SWITCH] Triggered for user ${userId} — source=${source}, ` +
+        `symbol=${signal?.symbol || 'N/A'}, strategy=${signal?.strategy || 'N/A'}, ` +
+        `daily_pnl=${accountState?.daily_pnl || 'N/A'}, ` +
+        `isStaleDay=${isStaleDay}`,
+        'sim-safety'
+      );
       return { safe: false, violations };
     }
 
@@ -184,25 +192,44 @@ class SafetyGuards {
   }
 
   /**
-   * Activate kill switch for user
+   * Activate kill switch for user. Logs reason for audit trail.
    */
-  async activateKillSwitch(userId) {
+  async activateKillSwitch(userId, reason = 'manual') {
     await db.query(
       `UPDATE sim_account_state SET kill_switch_active = TRUE, updated_at = NOW() WHERE user_id = $1`,
       [userId]
     );
-    logger.warn(`Kill switch activated for user ${userId}`, 'sim-safety');
+
+    // Log to signal_rejections for audit trail
+    try {
+      await db.query(
+        `INSERT INTO signal_rejections (user_id, symbol, strategy, action, reason, gate, rejection_reason)
+         VALUES ($1, 'SYSTEM', 'KILL_SWITCH', 'ACTIVATE', $2, 'SAFETY_GUARD', 'kill_switch_activated')`,
+        [userId, `Kill switch activated: ${reason}`]
+      );
+    } catch (_) { /* best effort audit log */ }
+
+    logger.warn(`Kill switch activated for user ${userId}: ${reason}`, 'sim-safety');
   }
 
   /**
    * Deactivate kill switch for user
    */
-  async deactivateKillSwitch(userId) {
+  async deactivateKillSwitch(userId, reason = 'manual') {
     await db.query(
       `UPDATE sim_account_state SET kill_switch_active = FALSE, updated_at = NOW() WHERE user_id = $1`,
       [userId]
     );
-    logger.info(`Kill switch deactivated for user ${userId}`, 'sim-safety');
+
+    try {
+      await db.query(
+        `INSERT INTO signal_rejections (user_id, symbol, strategy, action, reason, gate, rejection_reason)
+         VALUES ($1, 'SYSTEM', 'KILL_SWITCH', 'DEACTIVATE', $2, 'SAFETY_GUARD', 'kill_switch_deactivated')`,
+        [userId, `Kill switch deactivated: ${reason}`]
+      );
+    } catch (_) { /* best effort audit log */ }
+
+    logger.info(`Kill switch deactivated for user ${userId}: ${reason}`, 'sim-safety');
   }
 }
 

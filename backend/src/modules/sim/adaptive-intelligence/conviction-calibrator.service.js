@@ -149,6 +149,7 @@ class ConvictionCalibratorService {
     const grossWins = wins.reduce((sum, t) => sum + parseFloat(t.pnl), 0);
     const grossLosses = Math.abs(losses.reduce((sum, t) => sum + parseFloat(t.pnl), 0));
     const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? 999 : 0);
+    const profitFactorIsSentinel = profitFactor === 999;
 
     return {
       sampleSize: trades.length,
@@ -157,6 +158,7 @@ class ConvictionCalibratorService {
       avgR: Math.round(avgR * 1000) / 1000,
       totalPnl: Math.round(totalPnl * 100) / 100,
       profitFactor: Math.round(profitFactor * 100) / 100,
+      profitFactorIsSentinel,
     };
   }
 }

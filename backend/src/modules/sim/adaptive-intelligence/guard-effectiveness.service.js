@@ -17,9 +17,10 @@ class GuardEffectivenessService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - lookbackDays);
 
-    const [gateBreakdown, exitQuality, exitReasons, latency, guardThresholds, gexEnv] =
+    const [gateBreakdown, tradeEngineBreakdown, exitQuality, exitReasons, latency, guardThresholds, gexEnv] =
       await Promise.all([
         this._gateRejectionBreakdown(userId, cutoff),
+        this._tradeEngineRejectionBreakdown(userId, cutoff),
         this._exitQualityAnalysis(userId, cutoff),
         this._exitReasonBreakdown(userId, cutoff),
         this._processingLatency(userId, cutoff),
@@ -32,6 +33,7 @@ class GuardEffectivenessService {
 
     return {
       gateBreakdown,
+      tradeEngineBreakdown,
       exitQuality,
       exitReasons,
       latency,
@@ -83,6 +85,43 @@ class GuardEffectivenessService {
   }
 
   /**
+   * TRADE_ENGINE sub-category rejection breakdown.
+   * Enables diagnosis of *why* the TRADE_ENGINE is blocking trades.
+   */
+  async _tradeEngineRejectionBreakdown(userId, cutoff) {
+    const { rows } = await db.query(
+      `SELECT
+         COALESCE(rejection_reason, 'unclassified') as reason_code,
+         COUNT(*) as total,
+         COUNT(DISTINCT symbol) as symbols_affected,
+         COUNT(DISTINCT strategy) as strategies_affected,
+         MIN(created_at) as first_seen,
+         MAX(created_at) as last_seen
+       FROM signal_rejections
+       WHERE user_id = $1
+         AND created_at >= $2
+         AND gate = 'TRADE_ENGINE'
+       GROUP BY COALESCE(rejection_reason, 'unclassified')
+       ORDER BY total DESC`,
+      [userId, cutoff]
+    );
+
+    const totalEngineRejections = rows.reduce((s, r) => s + parseInt(r.total), 0);
+
+    return rows.map(r => ({
+      reasonCode: r.reason_code,
+      count: parseInt(r.total),
+      percentage: totalEngineRejections > 0
+        ? Math.round((parseInt(r.total) / totalEngineRejections) * 10000) / 100
+        : 0,
+      symbolsAffected: parseInt(r.symbols_affected),
+      strategiesAffected: parseInt(r.strategies_affected),
+      firstSeen: r.first_seen,
+      lastSeen: r.last_seen,
+    }));
+  }
+
+  /**
    * MAE/MFE analysis for exit parameter calibration.
    * Answers: are stops too tight? Are targets too conservative?
    */
@@ -130,8 +169,42 @@ class GuardEffectivenessService {
     const winnerMaeP90 = parseFloat(r.winner_mae_p90) || 0;
     const loserMfeP75 = parseFloat(r.loser_mfe_p75) || 0;
 
+    // Data integrity guard: MAE/MFE values > 2.0 (200%) are almost certainly
+    // a calculation pipeline error (wrong denominator, unit mismatch, or
+    // dollar values stored where percentages are expected).
+    const MAE_MFE_SANITY_CAP = 2.0;
+    const maeIntegrityWarning = winnerMaeP90 > MAE_MFE_SANITY_CAP;
+    const mfeIntegrityWarning = loserMfeP75 > MAE_MFE_SANITY_CAP;
+    const dataIntegrityOk = !maeIntegrityWarning && !mfeIntegrityWarning;
+
+    const dataIntegrityWarnings = [];
+    if (maeIntegrityWarning) {
+      dataIntegrityWarnings.push({
+        metric: 'winner_mae_p90',
+        rawValue: winnerMaeP90,
+        asPercent: (winnerMaeP90 * 100).toFixed(1) + '%',
+        issue: `Value ${(winnerMaeP90 * 100).toFixed(1)}% exceeds ${(MAE_MFE_SANITY_CAP * 100)}% sanity cap — likely a unit mismatch or denominator error in MAE calculation pipeline`,
+      });
+      logger.warn(
+        `[DATA_INTEGRITY] winner_mae_p90=${(winnerMaeP90 * 100).toFixed(1)}% exceeds sanity cap — MAE values are suspect`,
+        'guard-effectiveness'
+      );
+    }
+    if (mfeIntegrityWarning) {
+      dataIntegrityWarnings.push({
+        metric: 'loser_mfe_p75',
+        rawValue: loserMfeP75,
+        asPercent: (loserMfeP75 * 100).toFixed(1) + '%',
+        issue: `Value ${(loserMfeP75 * 100).toFixed(1)}% exceeds ${(MAE_MFE_SANITY_CAP * 100)}% sanity cap — likely a unit mismatch or denominator error in MFE calculation pipeline`,
+      });
+      logger.warn(
+        `[DATA_INTEGRITY] loser_mfe_p75=${(loserMfeP75 * 100).toFixed(1)}% exceeds sanity cap — MFE values are suspect`,
+        'guard-effectiveness'
+      );
+    }
+
     const recommendations = [];
-    if (winnerMaeP90 > 0 && totalTrades >= 10) {
+    if (dataIntegrityOk && winnerMaeP90 > 0 && totalTrades >= 10) {
       recommendations.push({
         type: 'stop_adjustment',
         current: 'Static stop levels',
@@ -139,7 +212,7 @@ class GuardEffectivenessService {
         rationale: 'Winning trades experienced this much adverse move before recovering',
       });
     }
-    if (loserMfeP75 > 0 && totalTrades >= 10) {
+    if (dataIntegrityOk && loserMfeP75 > 0 && totalTrades >= 10) {
       recommendations.push({
         type: 'target_adjustment',
         current: 'Static take-profit levels',
@@ -147,11 +220,21 @@ class GuardEffectivenessService {
         rationale: 'Losing trades reached this favorable excursion before reversing',
       });
     }
+    if (!dataIntegrityOk) {
+      recommendations.push({
+        type: 'DATA_INTEGRITY_WARNING',
+        current: 'MAE/MFE calculation pipeline',
+        suggested: 'Suspend all exit tuning recommendations until MAE/MFE pipeline is audited — values exceed sanity thresholds',
+        rationale: `Winner MAE p90=${(winnerMaeP90 * 100).toFixed(1)}%, Loser MFE p75=${(loserMfeP75 * 100).toFixed(1)}% — these are not credible under any standard interpretation`,
+      });
+    }
 
     return {
       totalTrades,
       wins: parseInt(r.wins) || 0,
       losses: parseInt(r.losses) || 0,
+      dataIntegrityOk,
+      dataIntegrityWarnings,
       mae: {
         avg: parseFloat(r.avg_mae) || 0,
         p25: parseFloat(r.mae_p25) || 0,
@@ -518,6 +601,76 @@ class GuardEffectivenessService {
           : `Positive GEX (pinning) conditions outperform — consider mean-reversion strategies in positive GEX`
         : 'Insufficient GEX data for environment analysis — ensure data service is seeding GEX snapshots',
     };
+  }
+
+  /**
+   * Strategy-specific signal frequency and rejection analysis.
+   * Identifies strategies that may be systematically suppressed by high rejection rates.
+   */
+  async analyzeStrategySignalFrequency(userId, options = {}) {
+    const lookbackDays = options.lookbackDays || 90;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - lookbackDays);
+
+    const { rows } = await db.query(
+      `WITH rejection_counts AS (
+         SELECT strategy, gate,
+                COALESCE(rejection_reason, 'unclassified') as rejection_reason,
+                COUNT(*) as rejection_count
+         FROM signal_rejections
+         WHERE user_id = $1 AND created_at >= $2
+         GROUP BY strategy, gate, COALESCE(rejection_reason, 'unclassified')
+       ),
+       trade_counts AS (
+         SELECT strategy, COUNT(*) as executed_count,
+                COUNT(*) FILTER (WHERE pnl > 0) as wins,
+                ROUND(SUM(pnl)::numeric, 2) as total_pnl
+         FROM sim_trades
+         WHERE user_id = $1 AND entry_time >= $2 AND exit_time IS NOT NULL
+         GROUP BY strategy
+       )
+       SELECT
+         COALESCE(rc.strategy, tc.strategy) as strategy,
+         COALESCE(tc.executed_count, 0) as executed,
+         COALESCE(tc.wins, 0) as wins,
+         COALESCE(tc.total_pnl, 0) as total_pnl,
+         COALESCE(SUM(rc.rejection_count), 0) as total_rejections,
+         COALESCE(SUM(rc.rejection_count) FILTER (WHERE rc.gate = 'TRADE_ENGINE'), 0) as engine_rejections,
+         COALESCE(SUM(rc.rejection_count) FILTER (WHERE rc.gate = 'ADAPTIVE_GUARD'), 0) as adaptive_rejections,
+         COALESCE(SUM(rc.rejection_count) FILTER (WHERE rc.gate = 'SAFETY_GUARD'), 0) as safety_rejections,
+         COALESCE(SUM(rc.rejection_count) FILTER (WHERE rc.rejection_reason = 'regime_unknown_block'), 0) as regime_unknown_blocks,
+         COALESCE(SUM(rc.rejection_count) FILTER (WHERE rc.rejection_reason = 'conviction_below_threshold'), 0) as conviction_blocks
+       FROM rejection_counts rc
+       FULL OUTER JOIN trade_counts tc ON tc.strategy = rc.strategy
+       GROUP BY COALESCE(rc.strategy, tc.strategy), tc.executed_count, tc.wins, tc.total_pnl
+       ORDER BY COALESCE(SUM(rc.rejection_count), 0) DESC`,
+      [userId, cutoff]
+    );
+
+    return rows.map(r => {
+      const executed = parseInt(r.executed) || 0;
+      const totalRejections = parseInt(r.total_rejections) || 0;
+      const totalSignals = executed + totalRejections;
+      const suppressionRate = totalSignals > 0
+        ? Math.round((totalRejections / totalSignals) * 10000) / 100
+        : 0;
+
+      return {
+        strategy: r.strategy,
+        totalSignals,
+        executed,
+        wins: parseInt(r.wins) || 0,
+        totalPnl: parseFloat(r.total_pnl) || 0,
+        totalRejections,
+        engineRejections: parseInt(r.engine_rejections) || 0,
+        adaptiveRejections: parseInt(r.adaptive_rejections) || 0,
+        safetyRejections: parseInt(r.safety_rejections) || 0,
+        regimeUnknownBlocks: parseInt(r.regime_unknown_blocks) || 0,
+        convictionBlocks: parseInt(r.conviction_blocks) || 0,
+        suppressionRate,
+        potentialSuppression: suppressionRate > 80 && executed > 0 && parseFloat(r.total_pnl) > 0,
+      };
+    });
   }
 
   _stalenessRecommendation(buckets) {

@@ -66,6 +66,14 @@ class TradeDecisionEngine {
     const failClosed = this._checkFailClosed(symbolState, accountState, rationale, globalState);
     if (failClosed) return failClosed;
 
+    // ── Session quality gate: prefer 9:30-10:00 ET window ──
+    // The 9:30-10:00 window has 68.2% WR with MEDIUM_CONFIDENCE.
+    // Trades outside this window require valid regime classification to proceed.
+    const sessionGate = this._applySessionQualityGate(symbolState, rationale);
+    if (sessionGate.blocked) {
+      return this._blocked(ticker, 0, rationale);
+    }
+
     // ── PIVOT_MB: Self-contained mechanical evaluation ──
     if (signal.strategy === 'pivot_motherbar') {
       return this._evaluatePivotMotherBar(signal, symbolState, rationale);
@@ -163,6 +171,14 @@ class TradeDecisionEngine {
       rationale.push(`SIZE: 0.75x (REVSTRAT size reduction, conviction=${conviction})`);
     } else {
       rationale.push(`SIZE: ${sizeMultiplier}x (conviction=${conviction})`);
+    }
+
+    // Performance-based size reduction for struggling strategies.
+    // Strategies with documented 0% WR at small sample sizes get minimum sizing
+    // until they prove positive expectancy at n>=10.
+    const perfSizeReduction = await this._applyPerformanceSizeReduction(signal.strategy, userId, rationale);
+    if (perfSizeReduction.reduced) {
+      sizeMultiplier = Math.min(sizeMultiplier, perfSizeReduction.maxSize);
     }
 
     // ── Part 9: Build structured output ──
@@ -990,6 +1006,98 @@ class TradeDecisionEngine {
   }
 
   // ═══════════════════════════════════════════════════════════════════
+  //  PERFORMANCE-BASED SIZE REDUCTION
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Reduce sizing for strategies with demonstrated poor performance.
+   * Strategies with 0% WR at n>=3 get minimum sizing (0.5x) until
+   * they establish positive expectancy at n>=10 with WR>40%.
+   */
+  async _applyPerformanceSizeReduction(strategy, userId, rationale) {
+    if (!strategy || !userId) return { reduced: false, maxSize: 1.0 };
+
+    try {
+      const result = await db.query(
+        `SELECT win_rate, total_trades, profit_factor
+         FROM strategy_scorecard
+         WHERE user_id = $1 AND strategy = $2`,
+        [userId, strategy]
+      );
+
+      if (result.rows.length === 0) return { reduced: false, maxSize: 1.0 };
+
+      const scorecard = result.rows[0];
+      const winRate = parseFloat(scorecard.win_rate);
+      const totalTrades = parseInt(scorecard.total_trades);
+      const profitFactor = parseFloat(scorecard.profit_factor);
+
+      // n < 3: insufficient data for sizing reduction
+      if (totalTrades < 3) return { reduced: false, maxSize: 1.0 };
+
+      // 0% WR at n>=3: reduce to minimum (paper-trade equivalent)
+      if (winRate === 0 && totalTrades >= 3) {
+        rationale.push(
+          `SIZE_REDUCTION: ${strategy} has 0% WR over ${totalTrades} trades — ` +
+          `reducing to 0.5x minimum until WR improves above 40% at n>=10`
+        );
+        return { reduced: true, maxSize: 0.5 };
+      }
+
+      // WR < 30% at n>=5 with PF < 0.8: reduce sizing
+      if (totalTrades >= 5 && winRate < 0.30 && profitFactor < 0.8) {
+        rationale.push(
+          `SIZE_REDUCTION: ${strategy} has ${(winRate * 100).toFixed(0)}% WR, PF=${profitFactor.toFixed(2)} ` +
+          `over ${totalTrades} trades — reducing to 0.75x`
+        );
+        return { reduced: true, maxSize: 0.75 };
+      }
+
+      return { reduced: false, maxSize: 1.0 };
+    } catch (_) {
+      return { reduced: false, maxSize: 1.0 };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  SESSION QUALITY GATE
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Enforce session quality preferences based on empirical edge data.
+   * 9:30-10:00 ET: free pass (validated edge window, 68.2% WR)
+   * Outside 9:30-10:00: require regime != UNKNOWN (quality gate)
+   *
+   * This concentrates risk in the highest-edge window while allowing
+   * trades outside it only when regime classification is functional.
+   */
+  _applySessionQualityGate(state, rationale) {
+    const etMinutes = getETMinutes();
+    const isValidatedWindow = etMinutes >= 570 && etMinutes < 600; // 9:30-10:00
+
+    if (isValidatedWindow) {
+      rationale.push('SESSION: Within 9:30-10:00 ET validated edge window — no regime gate required');
+      return { blocked: false, penalty: 0 };
+    }
+
+    // Outside the validated window: require valid regime classification
+    const regime = (state.regime || state.volatility_regime || '').toUpperCase();
+    const regimeUnknown = !regime || regime === 'UNKNOWN' || regime === 'N/A' || regime === '';
+
+    if (regimeUnknown) {
+      const phase = deriveSessionPhase();
+      rationale.push(
+        `SESSION_GATE: Outside 9:30-10:00 window (phase=${phase}) with regime=${regime || 'UNKNOWN'} — ` +
+        `valid regime required for post-opening trades`
+      );
+      return { blocked: true, penalty: 0 };
+    }
+
+    rationale.push(`SESSION: Outside 9:30-10:00 window but regime=${regime} is valid — allowing`);
+    return { blocked: false, penalty: 0 };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
   //  SIZING & HELPERS
   // ═══════════════════════════════════════════════════════════════════
 
@@ -1016,7 +1124,35 @@ class TradeDecisionEngine {
       rationale,
       risk_parameters: { stop_level: null, max_loss: null },
       contractType: null,
+      rejection_reason: this._classifyRejectionReason(rationale),
     };
+  }
+
+  /**
+   * Classify TRADE_ENGINE rejections into diagnostic sub-categories.
+   * Enables breakdown analysis of why the engine is blocking trades.
+   */
+  _classifyRejectionReason(rationale) {
+    const text = rationale.join(' ');
+
+    if (/FAIL_CLOSED.*[Cc]hain/i.test(text)) return 'chain_data_unavailable';
+    if (/FAIL_CLOSED.*[Ss]pread/i.test(text)) return 'bid_ask_spread_too_wide';
+    if (/FAIL_CLOSED.*[Ss]tale/i.test(text)) return 'data_staleness';
+    if (/FAIL_CLOSED.*[Dd]aily loss/i.test(text)) return 'daily_loss_limit';
+    if (/FAIL_CLOSED.*[Mm]ismatch.*severe/i.test(text)) return 'macro_local_conflict';
+    if (/PRECONDITION_FAIL|ORB_PRECONDITION_FAIL|STRAT_PRECONDITION_FAIL/i.test(text)) return 'precondition_fail';
+    if (/CONVICTION_FAIL/i.test(text)) return 'conviction_below_threshold';
+    if (/TRADE_TYPE_BLOCK/i.test(text)) return 'trade_type_blocked';
+    if (/regime.*UNKNOWN/i.test(text)) return 'regime_unknown_block';
+    if (/regime.*CHOP/i.test(text)) return 'regime_chop_block';
+    if (/MACRO_CONFLICT/i.test(text)) return 'macro_conflict';
+    if (/STRAT_CONFLICT_BLOCK/i.test(text)) return 'strat_conflict';
+    if (/FLOW_CONFLICT_BLOCK/i.test(text)) return 'flow_conflict';
+    if (/PIVOT_MB_BLOCK/i.test(text)) return 'pivot_mb_guard';
+    if (/SQUEEZE_PRO_BLOCK/i.test(text)) return 'squeeze_pro_guard';
+    if (/session|SESSION|INVALID_SESSION/i.test(text)) return 'session_filter';
+
+    return 'other';
   }
 
   // ═══════════════════════════════════════════════════════════════════

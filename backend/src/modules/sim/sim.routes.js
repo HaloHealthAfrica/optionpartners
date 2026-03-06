@@ -78,6 +78,7 @@ router.get('/adaptive/calibration/log', adaptiveIntelligence.getCalibrationLog);
 // Signal quality + Guard effectiveness analysis
 router.get('/adaptive/signal-quality', adaptiveIntelligence.getSignalQuality);
 router.get('/adaptive/guard-effectiveness', adaptiveIntelligence.getGuardEffectiveness);
+router.get('/adaptive/strategy-signal-frequency', adaptiveIntelligence.getStrategySignalFrequency);
 
 // AI Insights (LLM interpretation of adaptive data)
 router.get('/adaptive/ai-insights', adaptiveIntelligence.getAIInsights);

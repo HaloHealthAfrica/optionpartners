@@ -63,13 +63,14 @@ export class CboeClient {
     await rateLimiter.acquire('cboe');
 
     try {
-      const [spotRes, futuresRes] = await Promise.all([
+      const [rawSpot, futuresRes] = await Promise.all([
         this.fetchVixSpot(),
         this.fetchVixFutures(),
       ]);
 
       circuitBreaker.recordSuccess('cboe');
 
+      const spotRes = this.normalizeVixValue(rawSpot);
       const termStructure = this.classifyTermStructure(spotRes, futuresRes);
 
       return {
@@ -83,6 +84,35 @@ export class CboeClient {
       log.error({ error: err instanceof Error ? err.message : err }, 'Failed to fetch VIX data');
       throw err;
     }
+  }
+
+  /**
+   * Normalize VIX value to standard index-point format (e.g. 25.9).
+   * Some feeds deliver VIX as a decimal fraction (0.259 instead of 25.9).
+   * VIX has never closed below 9.14 historically, so any value < 5.0
+   * is almost certainly a decimal representation requiring ×100 correction.
+   * Values > 100 are also flagged as suspect (VIX rarely exceeds 90).
+   */
+  normalizeVixValue(raw: number): number {
+    if (raw <= 0) {
+      log.warn({ raw }, 'VIX value is zero or negative — returning as-is');
+      return raw;
+    }
+
+    if (raw < 2.0) {
+      const corrected = raw * 100;
+      log.warn(
+        { raw, corrected },
+        'VIX unit correction applied: raw value < 2.0 indicates decimal format, multiplying by 100',
+      );
+      return corrected;
+    }
+
+    if (raw > 150) {
+      log.warn({ raw }, 'VIX value suspiciously high (>150) — possible data error');
+    }
+
+    return raw;
   }
 
   private async fetchVixSpot(): Promise<number> {

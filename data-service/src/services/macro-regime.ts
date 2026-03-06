@@ -30,16 +30,36 @@ export class MacroRegimeService {
 
   async getVixData(): Promise<VixData> {
     const cached = await cacheManager.get<VixData>('vix', 'current');
-    if (cached) return cached.data;
+    if (cached) {
+      const validated = this.validateVixData(cached.data);
+      return validated;
+    }
 
     const data = await this.cboe.getVixData();
-    this.lastVix = data;
-    this.vixHistory.push(data.spot);
+    const validated = this.validateVixData(data);
+    this.lastVix = validated;
+    this.vixHistory.push(validated.spot);
     if (this.vixHistory.length > this.maxVixHistory) this.vixHistory.shift();
 
-    await cacheManager.set('vix', 'current', data);
-    await snapshotStore.saveVixSnapshot(data);
+    await cacheManager.set('vix', 'current', validated);
+    await snapshotStore.saveVixSnapshot(validated);
 
+    return validated;
+  }
+
+  /**
+   * Defense-in-depth VIX validation. Ensures spot value is in index-point
+   * format regardless of upstream normalization.
+   */
+  private validateVixData(data: VixData): VixData {
+    if (data.spot > 0 && data.spot < 2.0) {
+      const corrected = data.spot * 100;
+      log.warn(
+        { original: data.spot, corrected },
+        'VIX spot appears to be in decimal format — applying ×100 correction',
+      );
+      return { ...data, spot: corrected };
+    }
     return data;
   }
 

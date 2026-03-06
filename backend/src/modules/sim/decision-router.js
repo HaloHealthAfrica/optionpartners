@@ -312,12 +312,14 @@ class DecisionRouter {
 
       if (tradeDecision.action === 'BLOCK') {
         const reason = tradeDecision.rationale.join('; ');
-        await this._logRejection(userId, webhookEventId, signal, 'TRADE_ENGINE', reason);
+        const rejectionReason = tradeDecision.rejection_reason || 'other';
+        await this._logRejection(userId, webhookEventId, signal, 'TRADE_ENGINE', reason, rejectionReason);
 
         simEventBus.sendToUser(userId, 'trade:blocked', {
           symbol: signal.symbol,
           strategy: signal.strategy,
           gate: 'TRADE_ENGINE',
+          rejectionReason,
           reason,
           conviction: tradeDecision.conviction_score,
           timestamp: new Date().toISOString(),
@@ -729,15 +731,28 @@ class DecisionRouter {
     }
   }
 
-  async _logRejection(userId, webhookEventId, signal, gate, reason) {
+  async _logRejection(userId, webhookEventId, signal, gate, reason, rejectionSubCategory = null) {
     try {
       await db.query(
-        `INSERT INTO signal_rejections (user_id, webhook_event_id, symbol, strategy, action, reason, gate, raw_signal)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [userId, webhookEventId, signal.symbol, signal.strategy, signal.action, reason, gate, JSON.stringify(signal)]
+        `INSERT INTO signal_rejections (user_id, webhook_event_id, symbol, strategy, action, reason, gate, rejection_reason, raw_signal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [userId, webhookEventId, signal.symbol, signal.strategy, signal.action, reason, gate, rejectionSubCategory, JSON.stringify(signal)]
       );
     } catch (err) {
-      logger.error(`Failed to log rejection: ${err.message}`, 'decision-router');
+      // Graceful fallback if rejection_reason column doesn't exist yet
+      if (err.message?.includes('rejection_reason')) {
+        try {
+          await db.query(
+            `INSERT INTO signal_rejections (user_id, webhook_event_id, symbol, strategy, action, reason, gate, raw_signal)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [userId, webhookEventId, signal.symbol, signal.strategy, signal.action, reason, gate, JSON.stringify(signal)]
+          );
+        } catch (innerErr) {
+          logger.error(`Failed to log rejection (fallback): ${innerErr.message}`, 'decision-router');
+        }
+      } else {
+        logger.error(`Failed to log rejection: ${err.message}`, 'decision-router');
+      }
     }
   }
 

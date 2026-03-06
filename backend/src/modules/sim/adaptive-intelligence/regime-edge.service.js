@@ -99,6 +99,31 @@ class RegimeEdgeService {
     // Compute current regime implications (if we have a current regime)
     const currentImplications = this._computeImplications(matrix, minSampleSize);
 
+    const unknownCount = tradesWithRegime.filter(t => t.regime === 'UNKNOWN').length;
+    const unknownRate = tradesWithRegime.length > 0
+      ? Math.round((unknownCount / tradesWithRegime.length) * 10000) / 100
+      : 0;
+
+    const regimeHealth = {
+      unknownCount,
+      unknownRate,
+      status: unknownRate > 50
+        ? 'REGIME_DATA_UNRELIABLE'
+        : unknownRate > 30
+          ? 'REGIME_DATA_DEGRADED'
+          : 'HEALTHY',
+      warning: unknownRate > 50
+        ? `${unknownRate}% of trades have UNKNOWN regime — regime-dependent logic is effectively non-functional. Likely cause: missing volatility_snapshots or VIX data feed issue.`
+        : null,
+    };
+
+    if (unknownRate > 50) {
+      logger.warn(
+        `[REGIME_HEALTH] ${unknownRate}% UNKNOWN regime rate (${unknownCount}/${tradesWithRegime.length} trades) — regime engine may be non-functional`,
+        'regime-edge'
+      );
+    }
+
     return {
       matrix,
       strategies,
@@ -106,6 +131,7 @@ class RegimeEdgeService {
       totalTrades: tradesWithRegime.length,
       lookbackDays,
       currentImplications,
+      regimeHealth,
       computedAt: Date.now(),
     };
   }
@@ -140,6 +166,7 @@ class RegimeEdgeService {
     const grossWins = wins.reduce((a, b) => a + b, 0);
     const grossLosses = Math.abs(losses.reduce((a, b) => a + b, 0));
     const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? 999 : 0);
+    const profitFactorIsSentinel = profitFactor === 999;
 
     return {
       totalTrades: trades.length,
@@ -148,6 +175,7 @@ class RegimeEdgeService {
       avgR: Math.round(avgR * 1000) / 1000,
       totalPnl: Math.round(totalPnl * 100) / 100,
       profitFactor: Math.round(profitFactor * 100) / 100,
+      profitFactorIsSentinel,
     };
   }
 
