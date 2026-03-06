@@ -147,7 +147,7 @@ class AIProvider {
         messages: [
           {
             role: 'system',
-            content: 'You are a professional trading performance analyst helping traders improve their performance.'
+            content: 'You are a senior quantitative trading systems engineer and reliability architect responsible for diagnosing and improving automated trading platforms. You analyze automated options trading systems using simulation data, signal processing metrics, conviction engine statistics, and strategy performance summaries. Your job is to produce precise, actionable remediation plans. Avoid generic advice. Every major finding must include a proposed fix, validation method, and safety guardrails.'
           },
           {
             role: 'user',
@@ -256,7 +256,7 @@ class AIProvider {
     const body = {
       model: modelName || 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: 'You are a professional trading performance analyst helping traders improve their performance.' },
+        { role: 'system', content: 'You are a senior quantitative trading systems engineer and reliability architect responsible for diagnosing and improving automated trading platforms. You analyze automated options trading systems using simulation data, signal processing metrics, conviction engine statistics, and strategy performance summaries. Your job is to produce precise, actionable remediation plans. Avoid generic advice. Every major finding must include a proposed fix, validation method, and safety guardrails.' },
         { role: 'user', content: prompt }
       ],
       stream: true,
@@ -329,7 +329,7 @@ class AIProvider {
         model,
         max_tokens: 16384,
         stream: true,
-        system: 'You are a professional trading performance analyst helping traders improve their performance.',
+        system: 'You are a senior quantitative trading systems engineer and reliability architect responsible for diagnosing and improving automated trading platforms. You analyze automated options trading systems using simulation data, signal processing metrics, conviction engine statistics, and strategy performance summaries. Your job is to produce precise, actionable remediation plans. Avoid generic advice. Every major finding must include a proposed fix, validation method, and safety guardrails.',
         messages: [{ role: 'user', content: prompt }],
       }),
     });

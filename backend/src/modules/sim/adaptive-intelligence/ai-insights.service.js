@@ -122,85 +122,251 @@ class AIInsightsService {
   _buildPrompt(calibration, regime, temporal, signal, guard, liveCtx, lookbackDays) {
     const sections = [];
 
-    sections.push(`You are a professional algorithmic trading system analyst reviewing an automated options trading system's adaptive intelligence dashboard.
-Your job: interpret the analytics below and provide actionable, specific recommendations. Ground every claim in the data provided.
+    sections.push(`You are analyzing the performance of an automated options trading system using simulation trading data, signal processing metrics, conviction engine statistics, and strategy performance summaries.
 
-RULES:
-- Reference specific numbers. Do NOT give generic advice.
-- If sample sizes are small (<30 trades), label conclusions as "LOW CONFIDENCE".
-- Prioritize findings by impact on P&L.
-- Be direct and concise. Traders don't want fluff.
+Your job is not only to describe what is happening, but to produce **precise, actionable remediation plans** that can be implemented safely.
 
-OUTPUT FORMAT (use these exact markdown headers):
+Avoid generic advice. Every major finding must include a proposed fix, validation method, and safety guardrails.
+
+---
+
+### ANALYSIS OBJECTIVES
+
+You must determine:
+
+• Whether profitable strategies are being blocked by system filters
+• Whether conviction thresholds or guards are too strict
+• Whether regime classification or analytics pipelines are degrading signal interpretation
+• Whether strategies are underperforming and should be suspended
+• Whether sample sizes are too small to justify action
+• Whether metrics such as MAE/MFE or regime tags appear corrupted or unreliable
+
+Your output must convert diagnostics into **testable engineering actions**.
+
+---
+
+### STATISTICAL CONFIDENCE RULES
+
+You must label conclusions based on sample size:
+
+n < 5 → INSUFFICIENT_SAMPLE
+5 ≤ n < 15 → LOW_CONFIDENCE
+15 ≤ n < 30 → MEDIUM_CONFIDENCE
+n ≥ 30 → HIGH_CONFIDENCE
+
+Never recommend structural system changes based on LOW_CONFIDENCE results. Instead suggest simulation testing.
+
+---
+
+### BEHAVIORAL RULES
+
+You must:
+• prefer targeted adjustments over broad system changes
+• clearly distinguish hypotheses from confirmed issues
+• prioritize high expected impact fixes
+• avoid vague recommendations
+
+If you recommend changing thresholds, always provide a **reasonable adjustment range** rather than a single number.
+
+Example: "Test reducing conviction threshold by 5–10 points for STRAT_Failed2 signals in simulation."
+
+---
+
+### STRUCTURE OF THE OUTPUT (use these exact markdown headers)
 
 # System Health Assessment
-A 2-3 sentence verdict on overall system health. Include a score out of 100.
+
+Summarize the system's overall condition using metrics such as:
+* trade acceptance rate
+* rejection concentration by subsystem
+* total trade sample size
+* strategy-level performance distribution
+
+Provide a **System Health Score (0–100)** and explain what factors drive the score.
+
+---
 
 # Critical Findings
-Top 3-5 findings that need immediate attention, each with:
-- **Finding**: What you observed
+
+Identify the most important issues affecting system performance (top 3-5).
+
+Each finding must include:
+- **Issue**: What you observed
 - **Evidence**: The specific numbers
-- **Action**: What to change and why
+- **Why it matters**: Impact on P&L or system reliability
 
-# Conviction Engine Diagnosis
-Analyze weight drift, calibration health, and whether conviction correlates with outcomes.
-Call out any components that are hurting performance.
+---
 
-# Regime & Timing Optimization
-Which regime/strategy combinations to lean into vs suppress.
-Which hours/days show edge vs which are destroying value.
+# Root Cause Hypotheses
 
-# Guard & Risk Tuning
-Are guards blocking good trades? Are stops/targets well-calibrated?
-Specific threshold adjustments with expected impact.
+For each major issue, propose the most likely root cause.
+
+Examples:
+* conviction threshold too high
+* adaptive guard rejecting trades due to regime misclassification
+* expected move filter too strict in high-IV environments
+* underperforming strategy family dragging P&L
+* missing regime tags causing guard misfires
+
+If data is insufficient, explicitly label the hypothesis as **LOW CONFIDENCE**.
+
+---
+
+# Prescribed Fix Plan
+
+For every major issue, produce a remediation block with:
+
+- **Issue**
+- **Evidence**
+- **Root Cause Hypothesis**
+- **Likely Subsystem or Module**
+- **Prescribed Fix**
+- **Exact Parameter or Logic Change to Test**
+- **Safety Level**: one of SAFE_LIVE | SIM_ONLY | MONITOR_ONLY | DO_NOT_TOUCH_YET
+- **Validation Method**
+- **Rollback Trigger**
+- **Confidence Level**
+- **Expected Impact**
+
+Instead of saying "loosen filters," specify:
+* reduce conviction threshold by 5–10 points for specific strategies
+* widen expected move guard by 10–15% during high volatility regimes
+* restrict entries to specific session windows
+
+---
+
+# Strategy Performance Diagnosis
+
+Evaluate each strategy family separately. Classify strategies into:
+
+- **LEAN INTO** – strong evidence of edge
+- **MONITOR** – possible edge but sample too small
+- **SUPPRESS** – negative expectancy
+- **INSUFFICIENT SAMPLE** – no reliable conclusion
+
+For suppressed strategies, recommend: suspension, paper trading only, or further data collection.
+
+---
+
+# Guard and Risk Tuning
+
+Analyze rejection data to determine if filters are too aggressive.
+
+Provide explicit diagnostics for:
+* TRADE_ENGINE rejections
+* ADAPTIVE_GUARD rejections
+* EXPECTED_MOVE filters
+* SAFETY_GUARD triggers
+
+For each guard type:
+• explain its rejection contribution
+• identify whether it is likely blocking profitable setups
+• suggest threshold adjustments where appropriate
+
+---
+
+# Timing and Regime Optimization
+
+Analyze whether trade performance varies by:
+* time of day
+* market regime
+* volatility environment
+
+If one window dominates profitability, recommend explicit session filters until more data exists.
+If regime classification appears unreliable (e.g., many trades marked UNKNOWN), recommend diagnosing regime tagging rather than modifying strategies.
+
+---
+
+# Data Integrity Warnings
+
+Before recommending structural changes, verify that analytics metrics appear credible.
+
+Flag any of the following:
+* extremely large MAE/MFE percentages
+* unit inconsistencies (percent vs basis points)
+* metrics derived from very small sample sizes
+
+If suspicious metrics are detected, label them: **DATA_INTEGRITY_WARNING** and recommend auditing the calculation before acting.
+
+---
 
 # Priority Action Plan
-Numbered list of 5-7 actions in order of expected P&L impact.
-Each with: the change, why, how to validate, and guardrail.
+
+Produce a ranked list of the highest-impact fixes. Each action must include:
+
+| Priority | Fix | Subsystem | Safety Level | Confidence | Expected Impact | Validation Window | Rollback Trigger |
+
+Prioritize fixes that:
+* unlock profitable setups
+* remove losing strategies
+* improve data reliability
+* increase calibration data volume
+
+---
+
+### GOAL
+
+Produce a **remediation blueprint** that allows engineers and traders to improve the system safely without introducing additional risk.
+Your report should read like a **trading system triage plan written by an experienced quant engineer**, not a general commentary on performance.
+
+---
 
 DATA (${lookbackDays}-day lookback):`);
 
     if (calibration) {
-      sections.push(`\nCALIBRATION (${calibration.totalTrades} trades):
-- Health: ${calibration.calibrationHealth}
+      sections.push(`\n## CONVICTION CALIBRATION DATA (${calibration.totalTrades} trades):
+- Calibration Health: ${calibration.calibrationHealth}
 - Drifts Detected: ${calibration.driftCount}
-- Components:`);
+- Component Breakdown:`);
       if (calibration.components) {
-        for (const c of calibration.components.slice(0, 18)) {
-          sections.push(`  ${c.key}: static=${c.staticWeight}, recommended=${c.recommendedWeight}, drift=${c.weightDrift}, WR_lift=${c.winRateLift}%, present_WR=${(c.present?.winRate * 100 || 0).toFixed(1)}%, absent_WR=${(c.absent?.winRate * 100 || 0).toFixed(1)}%, n=${c.present?.sampleSize || 0}${c.significant ? '' : ' (low n)'}`);
+        for (const c of calibration.components.slice(0, 25)) {
+          const confidence = (c.present?.sampleSize || 0) >= 30 ? 'HIGH_CONFIDENCE'
+            : (c.present?.sampleSize || 0) >= 15 ? 'MEDIUM_CONFIDENCE'
+            : (c.present?.sampleSize || 0) >= 5 ? 'LOW_CONFIDENCE'
+            : 'INSUFFICIENT_SAMPLE';
+          sections.push(`  ${c.key}: static_wt=${c.staticWeight}, recommended_wt=${c.recommendedWeight}, drift=${c.weightDrift}, WR_lift=${c.winRateLift}%, present_WR=${(c.present?.winRate * 100 || 0).toFixed(1)}%, absent_WR=${(c.absent?.winRate * 100 || 0).toFixed(1)}%, n=${c.present?.sampleSize || 0} [${confidence}]`);
         }
       }
     }
 
     if (regime) {
-      sections.push(`\nREGIME EDGE (${regime.totalTrades} trades):`);
+      sections.push(`\n## REGIME EDGE DATA (${regime.totalTrades} trades):`);
       if (regime.currentImplications) {
+        sections.push('- Current Regime Implications:');
         for (const imp of regime.currentImplications) {
           const parts = [];
-          if (imp.strong?.length) parts.push(`STRONG in: ${imp.strong.join(', ')}`);
-          if (imp.active?.length) parts.push(`ACTIVE in: ${imp.active.join(', ')}`);
-          if (imp.suppressed?.length) parts.push(`SUPPRESSED in: ${imp.suppressed.join(', ')}`);
-          sections.push(`- ${imp.strategy}: ${parts.join(' | ')}`);
+          if (imp.strong?.length) parts.push(`STRONG: ${imp.strong.join(', ')}`);
+          if (imp.active?.length) parts.push(`ACTIVE: ${imp.active.join(', ')}`);
+          if (imp.suppressed?.length) parts.push(`SUPPRESSED: ${imp.suppressed.join(', ')}`);
+          sections.push(`  ${imp.strategy}: ${parts.join(' | ')}`);
         }
       }
       if (regime.matrix) {
-        sections.push('- Matrix:');
-        for (const cell of regime.matrix.slice(0, 20)) {
-          sections.push(`  ${cell.strategy} × ${cell.regime}: trades=${cell.totalTrades}, WR=${(cell.winRate * 100).toFixed(1)}%, PF=${cell.profitFactor}, PnL=$${cell.totalPnl}, status=${cell.status}`);
+        sections.push('- Strategy × Regime Matrix:');
+        for (const cell of regime.matrix.slice(0, 25)) {
+          const confidence = cell.totalTrades >= 30 ? 'HIGH_CONFIDENCE'
+            : cell.totalTrades >= 15 ? 'MEDIUM_CONFIDENCE'
+            : cell.totalTrades >= 5 ? 'LOW_CONFIDENCE'
+            : 'INSUFFICIENT_SAMPLE';
+          sections.push(`  ${cell.strategy} × ${cell.regime}: trades=${cell.totalTrades}, WR=${(cell.winRate * 100).toFixed(1)}%, PF=${cell.profitFactor}, PnL=$${cell.totalPnl}, status=${cell.status} [${confidence}]`);
         }
       }
     }
 
     if (temporal) {
-      sections.push(`\nTEMPORAL EDGE (base WR: ${(temporal.baseWinRate * 100).toFixed(1)}%):`);
+      sections.push(`\n## TEMPORAL EDGE DATA (base WR: ${(temporal.baseWinRate * 100).toFixed(1)}%):`);
       if (temporal.edgeHours?.length) {
-        sections.push('- Edge Hours:');
+        sections.push('- Statistically Significant Edge Hours:');
         for (const e of temporal.edgeHours) {
-          sections.push(`  ${e.label}: ${e.direction}, WR delta=${e.winRateDelta > 0 ? '+' : ''}${e.winRateDelta}%, n=${e.sampleSize}`);
+          const confidence = e.sampleSize >= 30 ? 'HIGH_CONFIDENCE'
+            : e.sampleSize >= 15 ? 'MEDIUM_CONFIDENCE'
+            : e.sampleSize >= 5 ? 'LOW_CONFIDENCE'
+            : 'INSUFFICIENT_SAMPLE';
+          sections.push(`  ${e.label}: ${e.direction}, WR_delta=${e.winRateDelta > 0 ? '+' : ''}${e.winRateDelta}%, n=${e.sampleSize} [${confidence}]`);
         }
       }
       if (temporal.hourSummary) {
-        sections.push('- Hour Summary:');
+        sections.push('- Full Hour Summary:');
         for (const h of temporal.hourSummary) {
           sections.push(`  ${h.label}: WR=${(h.winRate * 100).toFixed(1)}%, n=${h.sampleSize}`);
         }
@@ -208,17 +374,22 @@ DATA (${lookbackDays}-day lookback):`);
     }
 
     if (signal) {
-      sections.push(`\nSIGNAL QUALITY:`);
+      sections.push(`\n## SIGNAL QUALITY DATA:`);
       if (signal.sourcePerformance) {
-        sections.push('- Source Performance:');
+        sections.push('- Signal Source Performance:');
         for (const s of signal.sourcePerformance) {
-          sections.push(`  ${s.source}: trades=${s.sampleSize}, WR=${(s.winRate * 100).toFixed(1)}%, PF=${s.profitFactor}, avg_pnl=$${s.avgPnl}${s.significant ? '' : ' (low n)'}`);
+          const confidence = s.sampleSize >= 30 ? 'HIGH_CONFIDENCE'
+            : s.sampleSize >= 15 ? 'MEDIUM_CONFIDENCE'
+            : s.sampleSize >= 5 ? 'LOW_CONFIDENCE'
+            : 'INSUFFICIENT_SAMPLE';
+          sections.push(`  ${s.source}: trades=${s.sampleSize}, WR=${(s.winRate * 100).toFixed(1)}%, PF=${s.profitFactor}, avg_pnl=$${s.avgPnl} [${confidence}]`);
         }
       }
       if (signal.convictionAccuracy) {
-        sections.push(`- Conviction Monotonic: ${signal.convictionAccuracy.isMonotonic ? 'YES' : 'NO'}`);
-        sections.push(`- Conviction Note: ${signal.convictionAccuracy.recommendation || 'N/A'}`);
+        sections.push(`- Conviction Monotonicity: ${signal.convictionAccuracy.isMonotonic ? 'YES (higher conviction = higher WR)' : 'NO (conviction does NOT correlate with outcomes — calibration issue)'}`);
+        sections.push(`- Conviction Diagnostic: ${signal.convictionAccuracy.recommendation || 'N/A'}`);
         if (signal.convictionAccuracy.buckets) {
+          sections.push('- Conviction Bucket Breakdown:');
           for (const b of signal.convictionAccuracy.buckets) {
             sections.push(`  ${b.bucket}: WR=${(b.winRate * 100).toFixed(1)}%, avg_pnl=$${b.avgPnl}, n=${b.sampleSize}`);
           }
@@ -227,26 +398,29 @@ DATA (${lookbackDays}-day lookback):`);
     }
 
     if (guard) {
-      sections.push(`\nGUARD EFFECTIVENESS:`);
+      sections.push(`\n## GUARD EFFECTIVENESS DATA:`);
       if (guard.gateBreakdown) {
-        sections.push('- Gate Rejections:');
-        for (const g of guard.gateBreakdown.slice(0, 10)) {
-          sections.push(`  ${g.gate}: ${g.count} rejections (${g.percentage}%)`);
+        sections.push('- Gate Rejection Breakdown (trades blocked by each filter):');
+        for (const g of guard.gateBreakdown.slice(0, 15)) {
+          sections.push(`  ${g.gate}: ${g.count} rejections (${g.percentage}% of total rejections)`);
         }
       }
       if (guard.exitQuality) {
         const eq = guard.exitQuality;
-        sections.push(`- Exit Quality: winner_MAE_p90=${eq.winnerMaeP90 || 'N/A'}, loser_MFE_p75=${eq.loserMfeP75 || 'N/A'}`);
+        sections.push(`- Exit Quality Metrics:`);
+        sections.push(`  winner_MAE_p90=${eq.winnerMaeP90 || 'N/A'} (how far winners go against you before recovering)`);
+        sections.push(`  loser_MFE_p75=${eq.loserMfeP75 || 'N/A'} (how far losers go in your favor before reversing)`);
         if (eq.recommendations) {
+          sections.push('- Exit Tuning Recommendations:');
           for (const r of eq.recommendations) {
-            sections.push(`  Rec: ${r.type} — ${r.suggested}`);
+            sections.push(`  ${r.type}: ${r.suggested}`);
           }
         }
       }
     }
 
     if (liveCtx) {
-      sections.push(`\n${liveCtx}`);
+      sections.push(`\n## CURRENT LIVE MARKET CONTEXT:\n${liveCtx}`);
     }
 
     return sections.join('\n');
