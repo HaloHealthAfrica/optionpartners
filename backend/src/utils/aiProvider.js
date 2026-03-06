@@ -86,7 +86,7 @@ class AIProvider {
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
-          'anthropic-version': '2024-10-22'
+          'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
           model: modelName,
@@ -323,11 +323,11 @@ class AIProvider {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
-        'anthropic-version': '2024-10-22',
+        'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
         model,
-        max_tokens: 4096,
+        max_tokens: 16384,
         stream: true,
         system: 'You are a professional trading performance analyst helping traders improve their performance.',
         messages: [{ role: 'user', content: prompt }],
