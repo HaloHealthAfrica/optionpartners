@@ -72,6 +72,14 @@ class TradeFinalizerService {
     // Determine side
     const side = position.contract_type === 'CREDIT_SPREAD' ? 'short' : 'long';
 
+    // Look up regime at entry time
+    const { regimeAtEntry, regimeSource } = await this._lookupRegimeAtEntry(
+      position.underlying_symbol || position.symbol, position.opened_at
+    );
+
+    // Compute MAE/MFE as fraction of entry cost basis
+    const maeMfe = await this._computeSimMaeMfe(position, entryPrice, exitPrice, side, capitalBase);
+
     const id = uuidv4();
     const result = await db.query(
       `INSERT INTO sim_trades (
@@ -80,10 +88,13 @@ class TradeFinalizerService {
         entry_price, exit_price, quantity, contract_multiplier,
         entry_time, exit_time, pnl, pnl_percent, r_multiple,
         commission_total, dte_at_entry, delta_at_entry,
-        is_sim, webhook_event_id, stop_source, exit_reason
+        is_sim, webhook_event_id, stop_source, exit_reason,
+        regime_at_entry, regime_source,
+        max_adverse_excursion, max_favorable_excursion
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, TRUE, $25, $26, $27
+        $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, TRUE, $25, $26, $27,
+        $28, $29, $30, $31
       ) RETURNING *`,
       [
         id, userId, position.id, position.symbol, position.underlying_symbol,
@@ -94,6 +105,8 @@ class TradeFinalizerService {
         pnl, pnlPercent, rMultiple,
         commissionTotal, dteAtEntry, position.delta_at_entry,
         position.webhook_event_id, position.stop_source || null, position.exit_reason || null,
+        regimeAtEntry, regimeSource,
+        maeMfe.mae, maeMfe.mfe,
       ]
     );
 
@@ -156,7 +169,87 @@ class TradeFinalizerService {
       'sim-finalizer'
     );
 
+    const PRIORITY_STRATEGIES = ['STRAT_FAILED2', 'REVERSAL_2-2-2_CONT_DOWN', 'ORB_BREAKOUT'];
+    if (PRIORITY_STRATEGIES.includes((position.strategy || '').toUpperCase())) {
+      logger.info(
+        `[PRIORITY_TRADE] ${position.strategy}: symbol=${position.symbol} ` +
+        `entry=${entryPrice} exit=${exitPrice} PnL=$${pnl.toFixed(2)} ` +
+        `regime=${regimeAtEntry || 'UNKNOWN'} (source=${regimeSource}) ` +
+        `DTE=${dteAtEntry} delta=${position.delta_at_entry} ` +
+        `MAE=${maeMfe.mae != null ? (maeMfe.mae * 100).toFixed(1) + '%' : 'N/A'} ` +
+        `MFE=${maeMfe.mfe != null ? (maeMfe.mfe * 100).toFixed(1) + '%' : 'N/A'} ` +
+        `session=${position.opened_at}`,
+        'sim-finalizer'
+      );
+    }
+
     return trade;
+  }
+
+  async _lookupRegimeAtEntry(symbol, entryTime) {
+    try {
+      const vsResult = await db.query(
+        `SELECT regime FROM volatility_snapshots
+         WHERE symbol = $1 AND captured_at <= $2
+         ORDER BY captured_at DESC LIMIT 1`,
+        [symbol, entryTime]
+      );
+      if (vsResult.rows.length > 0 && vsResult.rows[0].regime) {
+        return { regimeAtEntry: vsResult.rows[0].regime, regimeSource: 'volatility_snapshot' };
+      }
+
+      const ivResult = await db.query(
+        `SELECT iv_rank FROM iv_snapshots
+         WHERE symbol = $1 AND captured_at <= $2
+         ORDER BY captured_at DESC LIMIT 1`,
+        [symbol, entryTime]
+      );
+      if (ivResult.rows.length > 0 && ivResult.rows[0].iv_rank != null) {
+        const ivRank = parseFloat(ivResult.rows[0].iv_rank);
+        let regime;
+        if (ivRank > 80) regime = 'HIGH_VOL_EXPANSION';
+        else if (ivRank > 60) regime = 'ELEVATED_VOL';
+        else if (ivRank > 40) regime = 'NEUTRAL';
+        else if (ivRank > 20) regime = 'LOW_VOL';
+        else regime = 'LOW_VOL_CHOP';
+        return { regimeAtEntry: regime, regimeSource: 'iv_rank_fallback' };
+      }
+
+      return { regimeAtEntry: null, regimeSource: null };
+    } catch (err) {
+      logger.warn(`Regime lookup at entry failed: ${err.message}`, 'sim-finalizer');
+      return { regimeAtEntry: null, regimeSource: null };
+    }
+  }
+
+  async _computeSimMaeMfe(position, entryPrice, exitPrice, side, capitalBase) {
+    try {
+      if (!position.highest_price || !position.lowest_price || capitalBase <= 0) {
+        return { mae: null, mfe: null };
+      }
+
+      const highest = parseFloat(position.highest_price);
+      const lowest = parseFloat(position.lowest_price);
+      const multiplier = position.contract_type === 'STOCK' ? 1 : CONTRACT_MULTIPLIER;
+      const qty = position.quantity;
+
+      let maeDollar, mfeDollar;
+      if (side === 'long') {
+        maeDollar = Math.abs(Math.min(0, (lowest - entryPrice))) * qty * multiplier;
+        mfeDollar = Math.abs(Math.max(0, (highest - entryPrice))) * qty * multiplier;
+      } else {
+        maeDollar = Math.abs(Math.max(0, (highest - entryPrice))) * qty * multiplier;
+        mfeDollar = Math.abs(Math.min(0, (lowest - entryPrice))) * qty * multiplier;
+      }
+
+      const mae = capitalBase > 0 ? Math.round((maeDollar / capitalBase) * 10000) / 10000 : null;
+      const mfe = capitalBase > 0 ? Math.round((mfeDollar / capitalBase) * 10000) / 10000 : null;
+
+      return { mae, mfe };
+    } catch (err) {
+      logger.warn(`MAE/MFE computation failed: ${err.message}`, 'sim-finalizer');
+      return { mae: null, mfe: null };
+    }
   }
 
   async _calculateRMultiple(position, pnl) {

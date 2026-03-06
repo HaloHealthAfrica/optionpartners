@@ -178,7 +178,7 @@ class DecisionRouter {
 
     const safetyResult = await safetyGuards.evaluate(signal, accountState, userId);
     if (!safetyResult.safe) {
-      await this._logRejection(userId, webhookEventId, signal, 'SAFETY_GUARD', safetyResult.violations.join('; '));
+      await this._logRejection(userId, webhookEventId, signal, 'SAFETY_GUARD', safetyResult.violations.join('; '), 'safety_violation');
       return {
         approved: false,
         reason: `Safety guard violation: ${safetyResult.violations.join('; ')}`,
@@ -188,31 +188,40 @@ class DecisionRouter {
     }
 
     if (signal.action !== 'CLOSE') {
+      // Strategy suppression gate: strategies in this list are blocked from live execution
+      const SUPPRESSED_STRATEGIES = (process.env.SUPPRESSED_STRATEGIES || 'SIGNALS').split(',').map(s => s.trim().toUpperCase());
+      const stratUpper = (signal.strategy || '').toUpperCase();
+      if (SUPPRESSED_STRATEGIES.includes(stratUpper)) {
+        const reason = `Strategy ${signal.strategy} is suppressed (SIM_ONLY) — 0% WR on executed trades, consuming excessive filter capacity`;
+        await this._logRejection(userId, webhookEventId, signal, 'STRATEGY_GATE', reason, 'strategy_suppressed');
+        return { approved: false, reason, signal, indicatorSource };
+      }
+
       // Strategy gate
       const strategyGate = await strategyScorecardService.checkStrategyGate(userId, signal.strategy);
       if (!strategyGate.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'STRATEGY_GATE', strategyGate.reason);
+        await this._logRejection(userId, webhookEventId, signal, 'STRATEGY_GATE', strategyGate.reason, 'strategy_gate');
         return { approved: false, reason: strategyGate.reason, signal, indicatorSource };
       }
 
       // Adaptive guards
       const adaptiveResult = await adaptiveGuards.evaluate(signal, accountState, userId);
       if (!adaptiveResult.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'ADAPTIVE_GUARD', adaptiveResult.reason);
+        await this._logRejection(userId, webhookEventId, signal, 'ADAPTIVE_GUARD', adaptiveResult.reason, 'adaptive_guard');
         return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
       }
 
       // ── Phase 2.4: Portfolio-level Greeks guard ──
       const greeksCheck = await this._checkPortfolioGreeks(userId, signal);
       if (!greeksCheck.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'PORTFOLIO_GREEKS', greeksCheck.reason);
+        await this._logRejection(userId, webhookEventId, signal, 'PORTFOLIO_GREEKS', greeksCheck.reason, 'portfolio_greeks');
         return { approved: false, reason: greeksCheck.reason, signal, indicatorSource };
       }
 
       // ── Phase 2.45: Market Intelligence (confluence, flow, price action) ──
       const intelResult = await marketIntelligence.evaluate(signal, userId);
       if (!intelResult.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'MARKET_INTELLIGENCE', intelResult.reason);
+        await this._logRejection(userId, webhookEventId, signal, 'MARKET_INTELLIGENCE', intelResult.reason, 'market_intelligence');
         return {
           approved: false,
           reason: `Market intelligence rejection: ${intelResult.reason}`,
@@ -230,24 +239,46 @@ class DecisionRouter {
         marketContext.getFullContext(effectiveSymbol),
       ]);
 
+      // ── Phase 2.55: IV Rank fallback regime when data-service regime unavailable ──
+      let effectiveRegime = volRegime;
+      if (!effectiveRegime?.regime && mktCtx?.iv?.iv_rank != null) {
+        const ivRank = parseFloat(mktCtx.iv.iv_rank);
+        let fallbackRegime;
+        if (ivRank > 80) fallbackRegime = 'HIGH_VOL_EXPANSION';
+        else if (ivRank > 60) fallbackRegime = 'ELEVATED_VOL';
+        else if (ivRank > 40) fallbackRegime = 'NEUTRAL';
+        else if (ivRank > 20) fallbackRegime = 'LOW_VOL';
+        else fallbackRegime = 'LOW_VOL_CHOP';
+
+        effectiveRegime = {
+          regime: fallbackRegime,
+          metrics: { ivRankFallback: true, ivRank },
+          _source: 'iv_rank_fallback',
+        };
+        logger.info(
+          `[VOL_REGIME] ${effectiveSymbol}: Using IV Rank fallback regime=${fallbackRegime} (IV_Rank=${ivRank.toFixed(1)})`,
+          'decision-router'
+        );
+      }
+
       // ── Phase 2.6: Adaptive portfolio config from regime ──
-      const portfolioConfig = regimeIntegration.getAdaptivePortfolioConfig(volRegime);
+      const portfolioConfig = regimeIntegration.getAdaptivePortfolioConfig(effectiveRegime);
 
       // ── Phase 3: Trade Decision Engine (deterministic) ──
       const symState = await symbolStateService.getState(userId, effectiveSymbol);
-      if (volRegime) {
-        symState.volatility_regime = volRegime.regime;
-        symState.volatility_metrics = volRegime.metrics;
+      if (effectiveRegime) {
+        symState.volatility_regime = effectiveRegime.regime;
+        symState.volatility_metrics = effectiveRegime.metrics;
       }
       const gmsState = await globalMarketState.getState(effectiveSymbol);
       const tradeDecision = await tradeDecisionEngine.evaluate(signal, symState, accountState, userId, mktCtx, gmsState);
 
       // Build regime overrides (existing clamping logic)
-      const regimeResult = this._regimeOverrides(volRegime);
+      const regimeResult = this._regimeOverrides(effectiveRegime);
       const { _overridesApplied, _regime, _regimeRaw, _regimeClamped, ...regimeSafe } = regimeResult;
 
       // ── Phase 3.5: Adaptive strategy params from HV metrics ──
-      const regimeMetrics = volRegime?.metrics || null;
+      const regimeMetrics = effectiveRegime?.metrics || null;
       const baseStrategyConfig = {
         dte_target: tradeDecision.dte_target,
         dte_min: tradeDecision.dte_min,
@@ -277,11 +308,12 @@ class DecisionRouter {
 
       // ── Build versioned regime audit context (Phase 7) ──
       const regimeAuditContext = {
-        regime: volRegime?.regime || null,
+        regime: effectiveRegime?.regime || null,
+        regimeSource: effectiveRegime?._source || null,
         hvPercentile: hvPercentile,
         atr14: regimeMetrics?.atr14 ?? null,
         atr30: regimeMetrics?.atr30 ?? null,
-        analyticsVersion: volRegime?.analyticsVersion || null,
+        analyticsVersion: effectiveRegime?.analyticsVersion || null,
         overridesApplied: _overridesApplied || false,
         rawOverrides: _regimeRaw || null,
         clampedOverrides: _regimeClamped || null,
@@ -345,14 +377,14 @@ class DecisionRouter {
         const constructorEnabled = await optionsConstructor.isEnabled(userId);
         if (!constructorEnabled) {
           const reason = 'Options constructor disabled and no explicit contract type provided';
-          await this._logRejection(userId, webhookEventId, signal, 'OPTIONS_CONSTRUCTOR', reason);
+          await this._logRejection(userId, webhookEventId, signal, 'OPTIONS_CONSTRUCTOR', reason, 'constructor_disabled');
           return { approved: false, reason, signal, indicatorSource };
         }
 
         // ── Cooldown: enforce minimum interval between entries on the same symbol ──
         const cooldownResult = await this._checkEntryCooldown(userId, effectiveSymbol);
         if (!cooldownResult.allowed) {
-          await this._logRejection(userId, webhookEventId, signal, 'ENTRY_COOLDOWN', cooldownResult.reason);
+          await this._logRejection(userId, webhookEventId, signal, 'ENTRY_COOLDOWN', cooldownResult.reason, 'entry_cooldown');
           return { approved: false, reason: cooldownResult.reason, signal, indicatorSource };
         }
 
@@ -382,8 +414,8 @@ class DecisionRouter {
         };
 
         // Regime context for dynamic scoring weights (Phase 3)
-        const regimeContext = volRegime ? {
-          regime: volRegime.regime,
+        const regimeContext = effectiveRegime ? {
+          regime: effectiveRegime.regime,
           hvPercentile: hvPercentile,
           atrRatio: (regimeMetrics?.atr14 && regimeMetrics?.atr30 > 0)
             ? regimeMetrics.atr14 / regimeMetrics.atr30
@@ -398,7 +430,7 @@ class DecisionRouter {
 
         const construction = await optionsConstructor.construct(signal, userId, engineOverrides, regimeContext, excludedStrikes);
         if (!construction.success) {
-          await this._logRejection(userId, webhookEventId, signal, 'OPTIONS_CONSTRUCTOR', construction.reason);
+          await this._logRejection(userId, webhookEventId, signal, 'OPTIONS_CONSTRUCTOR', construction.reason, 'construction_failed');
           return {
             approved: false,
             reason: `Options construction failed: ${construction.reason}`,
@@ -430,7 +462,7 @@ class DecisionRouter {
           });
           regimeAuditContext.expectedMoveCheck = emFilter.details;
           if (!emFilter.pass) {
-            await this._logRejection(userId, webhookEventId, signal, 'EXPECTED_MOVE', emFilter.reason);
+            await this._logRejection(userId, webhookEventId, signal, 'EXPECTED_MOVE', emFilter.reason, 'expected_move');
             return {
               approved: false,
               reason: `Expected move filter: ${emFilter.reason}`,

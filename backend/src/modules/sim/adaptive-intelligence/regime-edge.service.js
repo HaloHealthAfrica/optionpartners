@@ -18,8 +18,8 @@ class RegimeEdgeService {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - lookbackDays);
 
-    // Join trades with the closest volatility snapshot before each trade entry.
-    // Uses a lateral join to find the most recent regime for each trade's symbol at entry time.
+    // Use regime_at_entry from the trade itself (populated at finalization),
+    // falling back to a lateral join against volatility_snapshots for legacy trades.
     const { rows } = await db.query(
       `SELECT
          st.strategy,
@@ -31,7 +31,9 @@ class RegimeEdgeService {
          st.exit_time,
          st.dte_at_entry,
          st.delta_at_entry,
-         vs.regime,
+         st.regime_at_entry,
+         st.regime_source,
+         vs.regime as vs_regime,
          vs.captured_at as regime_at
        FROM sim_trades st
        LEFT JOIN LATERAL (
@@ -53,10 +55,9 @@ class RegimeEdgeService {
       return { matrix: [], strategies: [], regimes: REGIMES, totalTrades: 0, lookbackDays };
     }
 
-    // Also try falling back to checks_detail regime for trades without volatility snapshots
     const tradesWithRegime = rows.map(row => ({
       ...row,
-      regime: row.regime || 'UNKNOWN',
+      regime: row.regime_at_entry || row.vs_regime || 'UNKNOWN',
     }));
 
     // Build strategy × regime matrix

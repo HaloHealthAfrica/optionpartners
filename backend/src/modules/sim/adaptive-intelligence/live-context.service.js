@@ -162,9 +162,9 @@ class LiveContextService {
       const netGex = row.net_gex ? parseFloat(row.net_gex) : null;
       let environment = 'UNKNOWN';
       if (netGex != null) {
-        if (netGex > 500_000_000) environment = 'STRONG_POSITIVE';
+        if (netGex > 0.5) environment = 'STRONG_POSITIVE';
         else if (netGex > 0) environment = 'POSITIVE';
-        else if (netGex > -500_000_000) environment = 'NEGATIVE';
+        else if (netGex > -0.5) environment = 'NEGATIVE';
         else environment = 'STRONG_NEGATIVE';
       }
       return {

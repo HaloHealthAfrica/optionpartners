@@ -193,7 +193,7 @@ class TradeDecisionEngine {
       'trade-decision-engine'
     );
 
-    return {
+    const result = {
       action,
       ticker,
       strike: null,
@@ -210,6 +210,12 @@ class TradeDecisionEngine {
       risk_parameters: riskParams,
       contractType: tradeType === 'CREDIT_SPREAD' ? 'CREDIT_SPREAD' : tradeType,
     };
+
+    if (action === 'BLOCK') {
+      result.rejection_reason = this._classifyRejectionReason(rationale);
+    }
+
+    return result;
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -720,20 +726,18 @@ class TradeDecisionEngine {
         }
       }
 
-      // GEX environment modifier
+      // GEX environment modifier (net_gex is raw gamma, typically -10 to +10 range)
       if (marketContext.gex) {
         const netGex = marketContext.gex.net_gex;
         if (netGex != null) {
-          if (netGex < -500_000_000) {
-            // Strong negative GEX = dealers amplify moves — good for directional
+          if (netGex < -0.5) {
             const wt = w('gex_negative', 8);
             conviction += wt;
-            rationale.push(`CONVICTION +${wt}: GEX strongly negative (${(netGex / 1e6).toFixed(0)}M — explosive potential)`);
-          } else if (netGex > 500_000_000) {
-            // Strong positive GEX = dealer hedging pins price — bad for directional
+            rationale.push(`CONVICTION +${wt}: GEX strongly negative (${netGex.toFixed(3)} — explosive potential)`);
+          } else if (netGex > 0.5) {
             const wt = w('gex_positive', -8);
             conviction += wt;
-            rationale.push(`CONVICTION ${wt}: GEX strongly positive (${(netGex / 1e6).toFixed(0)}M — pinning risk)`);
+            rationale.push(`CONVICTION ${wt}: GEX strongly positive (${netGex.toFixed(3)} — pinning risk)`);
           }
         }
       }
