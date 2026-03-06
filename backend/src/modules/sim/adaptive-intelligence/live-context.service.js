@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('../../../config/database');
+const dataServiceProxy = require('../../../services/dataServiceProxy');
 const logger = require('../../../utils/logger');
 
 /**
@@ -49,7 +50,11 @@ class LiveContextService {
 
     if (ctx.regime) {
       parts.push(`- Volatility Regime: ${ctx.regime.regime || 'UNKNOWN'}`);
-      if (ctx.regime.vix != null) parts.push(`- VIX: ${ctx.regime.vix}`);
+      if (ctx.regime.vix != null) parts.push(`- VIX (spot index): ${ctx.regime.vix}`);
+      if (ctx.regime.currentIV != null) {
+        const ivPct = (ctx.regime.currentIV * 100).toFixed(1);
+        parts.push(`- Current IV: ${ivPct}% (raw=${ctx.regime.currentIV})`);
+      }
       if (ctx.regime.hvPercentile != null) parts.push(`- HV Percentile: ${ctx.regime.hvPercentile}`);
       if (ctx.regime.ivRank != null) parts.push(`- IV Rank: ${ctx.regime.ivRank}`);
     }
@@ -82,35 +87,65 @@ class LiveContextService {
 
   async _getLatestRegime(userId) {
     try {
-      const result = await db.query(
-        `SELECT vs.regime, vs.captured_at,
-                iv.iv_rank, iv.iv_percentile, iv.current_iv
-         FROM volatility_snapshots vs
-         LEFT JOIN LATERAL (
-           SELECT iv_rank, iv_percentile, current_iv
-           FROM iv_snapshots
-           WHERE symbol = vs.symbol
-           ORDER BY captured_at DESC LIMIT 1
-         ) iv ON true
-         ORDER BY vs.captured_at DESC LIMIT 1`
-      );
-      if (result.rows.length === 0) return null;
-      const row = result.rows[0];
-      let vix = row.current_iv ? parseFloat(row.current_iv) : null;
-      // VIX unit normalization: values < 2.0 are likely decimal format (0.259 = 25.9)
-      if (vix != null && vix > 0 && vix < 2.0) {
-        logger.warn(`LiveContext: VIX value ${vix} appears to be decimal format — correcting to ${vix * 100}`, 'live-context');
-        vix = vix * 100;
-      }
+      const [dbResult, vixData] = await Promise.all([
+        db.query(
+          `SELECT vs.regime, vs.captured_at,
+                  iv.iv_rank, iv.iv_percentile, iv.current_iv
+           FROM volatility_snapshots vs
+           LEFT JOIN LATERAL (
+             SELECT iv_rank, iv_percentile, current_iv
+             FROM iv_snapshots
+             WHERE symbol = vs.symbol
+             ORDER BY captured_at DESC LIMIT 1
+           ) iv ON true
+           ORDER BY vs.captured_at DESC LIMIT 1`
+        ),
+        this._fetchVixSpot(),
+      ]);
+
+      if (dbResult.rows.length === 0 && !vixData) return null;
+      const row = dbResult.rows[0] || {};
+
       return {
-        regime: row.regime,
-        vix,
+        regime: row.regime || null,
+        vix: vixData,
+        currentIV: row.current_iv ? parseFloat(row.current_iv) : null,
         hvPercentile: null,
         ivRank: row.iv_rank ? parseFloat(row.iv_rank) : null,
-        updatedAt: row.captured_at,
+        updatedAt: row.captured_at || null,
       };
     } catch (err) {
       logger.error(`LiveContext: regime fetch failed: ${err.message}`, 'live-context');
+      return null;
+    }
+  }
+
+  async _fetchVixSpot() {
+    try {
+      const resp = await dataServiceProxy.getVIX();
+      const vixData = resp?.data ?? resp;
+      let vix = vixData?.spot ?? vixData?.vix ?? null;
+      if (vix != null) {
+        vix = parseFloat(vix);
+        if (vix > 0 && vix < 2.0) {
+          vix = vix * 100;
+        }
+      }
+      return vix;
+    } catch (err) {
+      logger.warn(`LiveContext: VIX API fetch failed, trying db fallback: ${err.message}`, 'live-context');
+      try {
+        const result = await db.query(
+          `SELECT spot FROM vix_snapshots ORDER BY captured_at DESC LIMIT 1`
+        );
+        if (result.rows.length > 0 && result.rows[0].spot) {
+          let vix = parseFloat(result.rows[0].spot);
+          if (vix > 0 && vix < 2.0) vix = vix * 100;
+          return vix;
+        }
+      } catch (dbErr) {
+        logger.warn(`LiveContext: VIX db fallback also failed: ${dbErr.message}`, 'live-context');
+      }
       return null;
     }
   }

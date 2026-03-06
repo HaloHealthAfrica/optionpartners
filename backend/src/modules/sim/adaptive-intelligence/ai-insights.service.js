@@ -35,12 +35,13 @@ class AIInsightsService {
       throw new Error(creditCheck.message || 'Insufficient credits for AI insights');
     }
 
-    const [calibration, regime, temporal, signal, guard, liveCtx] = await Promise.all([
+    const [calibration, regime, temporal, signal, guard, signalFreq, liveCtx] = await Promise.all([
       convictionCalibrator.calibrate(userId, { lookbackDays, minSampleSize: 10 }).catch(() => null),
       regimeEdge.analyze(userId, { lookbackDays, minSampleSize: 5 }).catch(() => null),
       temporalEdge.analyze(userId, { lookbackDays, minSampleSize: 3 }).catch(() => null),
       signalQuality.analyze(userId, { lookbackDays, minSampleSize: 5 }).catch(() => null),
       guardEffectiveness.analyze(userId, { lookbackDays }).catch(() => null),
+      guardEffectiveness.analyzeStrategySignalFrequency(userId, { lookbackDays }).catch(() => null),
       includeLiveContext ? liveContext.buildContextBlock(userId) : Promise.resolve(''),
     ]);
 
@@ -49,7 +50,7 @@ class AIInsightsService {
       throw new Error('No completed trades to analyze. The system needs trade outcomes to generate insights.');
     }
 
-    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, liveCtx, lookbackDays);
+    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays);
     const aiSettings = await AISessionService.getAISettings(userId, options);
 
     logger.info(`[AI_INSIGHTS] Generating insights for user ${userId} (${totalTrades} trades, ${lookbackDays}d lookback)`, 'ai-insights');
@@ -88,12 +89,13 @@ class AIInsightsService {
       throw new Error(creditCheck.message || 'Insufficient credits for AI insights');
     }
 
-    const [calibration, regime, temporal, signal, guard, liveCtx] = await Promise.all([
+    const [calibration, regime, temporal, signal, guard, signalFreq, liveCtx] = await Promise.all([
       convictionCalibrator.calibrate(userId, { lookbackDays, minSampleSize: 10 }).catch(() => null),
       regimeEdge.analyze(userId, { lookbackDays, minSampleSize: 5 }).catch(() => null),
       temporalEdge.analyze(userId, { lookbackDays, minSampleSize: 3 }).catch(() => null),
       signalQuality.analyze(userId, { lookbackDays, minSampleSize: 5 }).catch(() => null),
       guardEffectiveness.analyze(userId, { lookbackDays }).catch(() => null),
+      guardEffectiveness.analyzeStrategySignalFrequency(userId, { lookbackDays }).catch(() => null),
       includeLiveContext ? liveContext.buildContextBlock(userId) : Promise.resolve(''),
     ]);
 
@@ -102,7 +104,7 @@ class AIInsightsService {
       throw new Error('No completed trades to analyze.');
     }
 
-    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, liveCtx, lookbackDays);
+    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays);
     const aiSettings = await AISessionService.getAISettings(userId, options);
 
     return {
@@ -119,7 +121,7 @@ class AIInsightsService {
     };
   }
 
-  _buildPrompt(calibration, regime, temporal, signal, guard, liveCtx, lookbackDays) {
+  _buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays) {
     const sections = [];
 
     sections.push(`You are analyzing the performance of an automated options trading system using simulation trading data, signal processing metrics, conviction engine statistics, and strategy performance summaries.
@@ -331,6 +333,12 @@ DATA (${lookbackDays}-day lookback):`);
 
     if (regime) {
       sections.push(`\n## REGIME EDGE DATA (${regime.totalTrades} trades):`);
+      if (regime.regimeHealth) {
+        const rh = regime.regimeHealth;
+        sections.push(`- Regime Classification Health: ${rh.status}`);
+        sections.push(`  UNKNOWN regime rate: ${rh.unknownRate}% (${rh.unknownCount} trades)`);
+        if (rh.warning) sections.push(`  ⚠ ${rh.warning}`);
+      }
       if (regime.currentImplications) {
         sections.push('- Current Regime Implications:');
         for (const imp of regime.currentImplications) {
@@ -348,7 +356,8 @@ DATA (${lookbackDays}-day lookback):`);
             : cell.totalTrades >= 15 ? 'MEDIUM_CONFIDENCE'
             : cell.totalTrades >= 5 ? 'LOW_CONFIDENCE'
             : 'INSUFFICIENT_SAMPLE';
-          sections.push(`  ${cell.strategy} × ${cell.regime}: trades=${cell.totalTrades}, WR=${(cell.winRate * 100).toFixed(1)}%, PF=${cell.profitFactor}, PnL=$${cell.totalPnl}, status=${cell.status} [${confidence}]`);
+          const pfNote = cell.profitFactorIsSentinel ? ' (PF=999 is sentinel: no losses recorded, not a real 999x factor)' : '';
+          sections.push(`  ${cell.strategy} × ${cell.regime}: trades=${cell.totalTrades}, WR=${(cell.winRate * 100).toFixed(1)}%, PF=${cell.profitFactor}${pfNote}, PnL=$${cell.totalPnl}, status=${cell.status} [${confidence}]`);
         }
       }
     }
@@ -405,17 +414,49 @@ DATA (${lookbackDays}-day lookback):`);
           sections.push(`  ${g.gate}: ${g.count} rejections (${g.percentage}% of total rejections)`);
         }
       }
+      if (guard.tradeEngineBreakdown && guard.tradeEngineBreakdown.length > 0) {
+        sections.push('- TRADE_ENGINE Rejection Sub-Category Breakdown:');
+        for (const r of guard.tradeEngineBreakdown) {
+          sections.push(`  ${r.reasonCode}: ${r.count} rejections (${r.percentage}%)`);
+        }
+      } else {
+        sections.push('- TRADE_ENGINE Rejection Sub-Category: No breakdown data available (rejection_reason logging may not have accumulated data yet)');
+      }
       if (guard.exitQuality) {
         const eq = guard.exitQuality;
-        sections.push(`- Exit Quality Metrics:`);
-        sections.push(`  winner_MAE_p90=${eq.winnerMaeP90 || 'N/A'} (how far winners go against you before recovering)`);
-        sections.push(`  loser_MFE_p75=${eq.loserMfeP75 || 'N/A'} (how far losers go in your favor before reversing)`);
+        const maeP90 = eq.winnerMae?.p90 ?? eq.winnerMaeP90;
+        const mfeP75 = eq.loserMfe?.p75 ?? eq.loserMfeP75;
+        sections.push(`- Exit Quality Metrics (data_integrity_ok=${eq.dataIntegrityOk}):`);
+        sections.push(`  winner_MAE_p90=${maeP90 != null ? (maeP90 * 100).toFixed(1) + '%' : 'N/A'} (how far winners go against you before recovering)`);
+        sections.push(`  loser_MFE_p75=${mfeP75 != null ? (mfeP75 * 100).toFixed(1) + '%' : 'N/A'} (how far losers go in your favor before reversing)`);
+        if (eq.dataIntegrityWarnings && eq.dataIntegrityWarnings.length > 0) {
+          sections.push('- ⚠ EXIT QUALITY DATA INTEGRITY WARNINGS:');
+          for (const w of eq.dataIntegrityWarnings) {
+            sections.push(`  ${w.metric}: ${w.issue}`);
+          }
+        }
         if (eq.recommendations) {
           sections.push('- Exit Tuning Recommendations:');
           for (const r of eq.recommendations) {
             sections.push(`  ${r.type}: ${r.suggested}`);
           }
         }
+      }
+    }
+
+    if (signalFreq && signalFreq.length > 0) {
+      sections.push(`\n## STRATEGY SIGNAL FREQUENCY & SUPPRESSION ANALYSIS:`);
+      for (const sf of signalFreq) {
+        sections.push(`  ${sf.strategy}: total_signals=${sf.totalSignals}, executed=${sf.executed}, rejected=${sf.totalRejections} (${sf.suppressionRate}% suppression rate), wins=${sf.wins}, PnL=$${sf.totalPnl}${sf.potentialSuppression ? ' ⚠ POTENTIAL SYSTEMATIC SUPPRESSION' : ''}`);
+        const gateParts = [];
+        if (sf.engineRejections > 0) gateParts.push(`TRADE_ENGINE=${sf.engineRejections}`);
+        if (sf.adaptiveRejections > 0) gateParts.push(`ADAPTIVE_GUARD=${sf.adaptiveRejections}`);
+        if (sf.safetyRejections > 0) gateParts.push(`SAFETY_GUARD=${sf.safetyRejections}`);
+        if (gateParts.length > 0) sections.push(`    Rejections by gate: ${gateParts.join(', ')}`);
+        const reasonParts = [];
+        if (sf.regimeUnknownBlocks > 0) reasonParts.push(`regime_unknown_block=${sf.regimeUnknownBlocks}`);
+        if (sf.convictionBlocks > 0) reasonParts.push(`conviction_below_threshold=${sf.convictionBlocks}`);
+        if (reasonParts.length > 0) sections.push(`    TRADE_ENGINE sub-reasons: ${reasonParts.join(', ')}`);
       }
     }
 
