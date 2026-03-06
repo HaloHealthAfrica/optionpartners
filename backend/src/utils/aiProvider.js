@@ -75,7 +75,7 @@ class AIProvider {
   /**
    * Generate using Claude/Anthropic API
    */
-  static async generateClaude(prompt, apiKey, modelName = 'claude-3-5-haiku-latest') {
+  static async generateClaude(prompt, apiKey, modelName = 'claude-3-5-haiku-20241022') {
     if (!apiKey) {
       throw new Error('Anthropic API key not configured');
     }
@@ -86,7 +86,7 @@ class AIProvider {
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01'
+          'anthropic-version': '2024-10-22'
         },
         body: JSON.stringify({
           model: modelName,
@@ -315,7 +315,7 @@ class AIProvider {
   static async streamClaude(prompt, apiKey, modelName, res) {
     if (!apiKey) throw new Error('Anthropic API key not configured');
 
-    const model = modelName || 'claude-3-5-haiku-latest';
+    const model = modelName || 'claude-3-5-haiku-20241022';
     console.log(`[AI_PROVIDER] Streaming Claude: model=${model}`);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -323,7 +323,7 @@ class AIProvider {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
+        'anthropic-version': '2024-10-22',
       },
       body: JSON.stringify({
         model,
@@ -336,7 +336,11 @@ class AIProvider {
 
     if (!response.ok) {
       let msg = `HTTP ${response.status}`;
-      try { const e = await response.json(); msg = e.error?.message || msg; } catch {}
+      try {
+        const e = await response.json();
+        msg = e.error?.message || JSON.stringify(e.error) || msg;
+      } catch {}
+      console.error(`[AI_PROVIDER] Claude streaming error: ${msg}`);
       throw new Error(`Claude API error: ${msg}`);
     }
 
