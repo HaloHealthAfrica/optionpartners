@@ -57,13 +57,9 @@ class AIInsightsService {
 
     const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays, remediationEntries);
     const baseSettings = await AISessionService.getAISettings(userId, options);
-    const aiSettings = {
-      ...baseSettings,
-      provider: INSIGHTS_PROVIDER,
-      modelName: INSIGHTS_MODEL,
-    };
+    const aiSettings = this._buildInsightsAISettings(baseSettings);
 
-    logger.info(`[AI_INSIGHTS] Generating insights for user ${userId} (${totalTrades} trades, ${lookbackDays}d lookback) using ${INSIGHTS_PROVIDER}/${INSIGHTS_MODEL}`, 'ai-insights');
+    logger.info(`[AI_INSIGHTS] Generating insights for user ${userId} (${totalTrades} trades, ${lookbackDays}d lookback) using ${aiSettings.provider}/${aiSettings.modelName}`, 'ai-insights');
     const analysis = await AIProvider.generateResponse(prompt, aiSettings);
 
     const creditsResult = await AICreditService.useCredits(userId, AICreditService.getCost('NEW_SESSION'));
@@ -117,11 +113,7 @@ class AIInsightsService {
 
     const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays, remediationEntries);
     const baseSettings = await AISessionService.getAISettings(userId, options);
-    const aiSettings = {
-      ...baseSettings,
-      provider: INSIGHTS_PROVIDER,
-      modelName: INSIGHTS_MODEL,
-    };
+    const aiSettings = this._buildInsightsAISettings(baseSettings);
 
     return {
       prompt,
@@ -135,6 +127,20 @@ class AIInsightsService {
         baseWinRate: temporal?.baseWinRate,
       },
     };
+  }
+
+  _buildInsightsAISettings(baseSettings) {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY;
+    if (anthropicKey) {
+      return {
+        ...baseSettings,
+        provider: INSIGHTS_PROVIDER,
+        modelName: INSIGHTS_MODEL,
+        apiKey: anthropicKey,
+      };
+    }
+    logger.warn('[AI_INSIGHTS] ANTHROPIC_API_KEY not set, falling back to user AI settings', 'ai-insights');
+    return baseSettings;
   }
 
   _buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays, remediationEntries) {
