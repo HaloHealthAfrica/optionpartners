@@ -263,9 +263,12 @@ async function streamAIInsights(req, res) {
 
     const fullText = await AIProvider.generateStreamingResponse(prompt, aiSettings, res);
 
+    logger.info(`[AI_INSIGHTS] Stream completed: ${fullText?.length || 0} chars for user ${req.user.id}`, 'adaptive-intelligence');
+
     await AICreditService.useCredits(req.user.id, AICreditService.getCost('NEW_SESSION'));
 
-    res.write(`data: ${JSON.stringify({ type: 'done', fullText: fullText.substring(0, 100) + '...' })}\n\n`);
+    const preview = fullText ? fullText.substring(0, 100) + '...' : '(empty response)';
+    res.write(`data: ${JSON.stringify({ type: 'done', fullText: preview })}\n\n`);
     res.end();
   } catch (err) {
     logger.error(`Stream AI insights failed: ${err.message}`, 'adaptive-intelligence');

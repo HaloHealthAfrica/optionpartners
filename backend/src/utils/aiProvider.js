@@ -75,7 +75,7 @@ class AIProvider {
   /**
    * Generate using Claude/Anthropic API
    */
-  static async generateClaude(prompt, apiKey, modelName = 'claude-3-haiku-20240307') {
+  static async generateClaude(prompt, apiKey, modelName = 'claude-3-5-haiku-latest') {
     if (!apiKey) {
       throw new Error('Anthropic API key not configured');
     }
@@ -315,6 +315,9 @@ class AIProvider {
   static async streamClaude(prompt, apiKey, modelName, res) {
     if (!apiKey) throw new Error('Anthropic API key not configured');
 
+    const model = modelName || 'claude-3-5-haiku-latest';
+    console.log(`[AI_PROVIDER] Streaming Claude: model=${model}`);
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -323,9 +326,10 @@ class AIProvider {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: modelName || 'claude-3-haiku-20240307',
+        model,
         max_tokens: 4096,
         stream: true,
+        system: 'You are a professional trading performance analyst helping traders improve their performance.',
         messages: [{ role: 'user', content: prompt }],
       }),
     });
@@ -337,6 +341,7 @@ class AIProvider {
     }
 
     let fullText = '';
+    let chunkCount = 0;
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -357,12 +362,14 @@ class AIProvider {
           const parsed = JSON.parse(trimmed.slice(6));
           if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
             fullText += parsed.delta.text;
+            chunkCount++;
             res.write(`data: ${JSON.stringify({ chunk: parsed.delta.text })}\n\n`);
           }
         } catch {}
       }
     }
 
+    console.log(`[AI_PROVIDER] Claude stream done: ${chunkCount} chunks, ${fullText.length} chars`);
     return fullText;
   }
 
