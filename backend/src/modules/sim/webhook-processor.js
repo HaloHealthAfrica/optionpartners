@@ -234,9 +234,23 @@ class WebhookProcessor {
       prioritized.push(...ranked);
     }
 
-    // Phase 3: Execute in priority order
+    // Phase 3: Execute in priority order, deduplicating entries per symbol+contractType
     const results = [...rejected];
+    const executedEntries = new Set();
+
     for (const { event, decision, score } of prioritized) {
+      const intent = decision.orderIntent;
+      if (intent && intent.side === 'BUY' && !intent.positionId) {
+        const entryKey = [intent.symbol, intent.contractType, intent.strike, intent.expiration]
+          .filter(Boolean).join('|');
+        if (executedEntries.has(entryKey)) {
+          await webhookService.markRejected(event.id, `Batch dedup: entry already executed for ${entryKey}`);
+          results.push({ eventId: event.id, score, approved: true, executed: false, reason: `Batch dedup: ${entryKey}` });
+          continue;
+        }
+        executedEntries.add(entryKey);
+      }
+
       const result = await this._executeApprovedDecision(event, decision, score);
       results.push({ eventId: event.id, score, ...result });
     }

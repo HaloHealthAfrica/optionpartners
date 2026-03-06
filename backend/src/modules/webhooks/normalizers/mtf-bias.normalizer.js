@@ -6,10 +6,14 @@ const { normalizeDirection } = require('../indicator-detector');
  * MTF_BIAS normalizer — MTF Bias Engine V3.
  *
  * The most data-dense context signal: multi-timeframe bias consensus,
- * regime classification, key levels (VWAP/ORB/swings), bar trigger
- * patterns, liquidity sweeps, macro state, and risk invalidation.
+ * regime classification, key levels (VWAP/ORB/swings), strat patterns,
+ * liquidity sweeps, macro state, and risk invalidation.
  *
- * Direction: mtf.consensus.bias_consensus → macro.state.macro_class
+ * Backward-compatible: accepts both the original payload shape (trigger,
+ * bias_consensus, invalidation.level) and the V2 shape (strat, bias,
+ * invalidation_level, ATR-based space).
+ *
+ * Direction: mtf.consensus.bias → bias_consensus → macro.state.macro_class
  */
 function normalize(payload) {
   const symbol = (payload.symbol || payload.ticker || '').toUpperCase();
@@ -19,7 +23,7 @@ function normalize(payload) {
   const consensus = payload.mtf?.consensus || {};
   const regime = payload.mtf?.regime || {};
   const macroState = payload.macro?.state || {};
-  const trigger = payload.trigger || {};
+  const strat = payload.strat || payload.trigger || {};
   const levels = payload.levels || {};
   const intent = payload.intent || {};
   const riskCtx = payload.risk_context || {};
@@ -27,19 +31,21 @@ function normalize(payload) {
   const liquidity = payload.liquidity || {};
   const space = payload.space || {};
 
-  const dirRaw = consensus.bias_consensus ?? macroState.macro_class ?? null;
+  // Direction: new `bias` field first, fall back to old `bias_consensus`
+  const dirRaw = consensus.bias || consensus.bias_consensus || macroState.macro_class || null;
   const direction = normalizeDirection(dirRaw);
 
   const entryPrice = parseFloat(bar.close ?? payload.price) || null;
-  const stopLoss = parseFloat(riskCtx.invalidation?.level) || null;
+  const stopLoss = parseFloat(riskCtx.invalidation_level ?? riskCtx.invalidation?.level) || null;
 
   const targets = [];
   const measuredMove = parseFloat(macroState.macro_measured_move_target);
-  if (!isNaN(measuredMove)) targets.push(measuredMove);
+  if (!isNaN(measuredMove) && measuredMove > 0) targets.push(measuredMove);
 
-  const biasScore = consensus.bias_score ?? null;
-  const confidenceScore = consensus.confidence_score != null
-    ? Math.round(consensus.confidence_score * 100)
+  const biasScore = consensus.weighted_score ?? consensus.bias_score ?? null;
+  const rawConfidence = consensus.confidence ?? consensus.confidence_score;
+  const confidenceScore = rawConfidence != null
+    ? Math.round((rawConfidence <= 1 ? rawConfidence : rawConfidence / 100) * 100)
     : null;
 
   return {
@@ -54,7 +60,7 @@ function normalize(payload) {
     targets,
     score: biasScore,
     confidence: confidenceScore,
-    strategy: trigger.pattern || 'MTF_BIAS',
+    strategy: strat.pattern || 'MTF_BIAS',
     indicatorMeta: {
       eventType: payload.event_type || null,
       eventIdRaw: payload.event_id_raw || null,
@@ -65,15 +71,17 @@ function normalize(payload) {
       regime: {
         type: regime.type || null,
         chopScore: regime.chop_score ?? null,
-        adx15m: regime.adx_15m ?? null,
-        atrState15m: regime.atr_state_15m || null,
+        adx: regime.adx ?? regime.adx_15m ?? null,
+        atrState: regime.atr_state ?? regime.atr_state_15m ?? null,
       },
 
       bar,
-      trigger: {
-        barType: trigger.bar_type || null,
-        pattern: trigger.pattern || null,
-        triggered: trigger.triggered ?? false,
+      strat: {
+        barType: strat.bar_type || null,
+        combo: strat.combo || null,
+        pattern: strat.pattern || null,
+        direction: strat.direction || null,
+        triggered: strat.triggered ?? false,
       },
 
       levels: {
@@ -101,8 +109,8 @@ function validate(payload) {
   if (!payload.event_id_raw) errors.push('Missing event_id_raw');
 
   const consensus = payload.mtf?.consensus;
-  if (!consensus || !consensus.bias_consensus) {
-    errors.push('Missing mtf.consensus.bias_consensus');
+  if (!consensus || !(consensus.bias || consensus.bias_consensus)) {
+    errors.push('Missing mtf.consensus.bias');
   }
 
   return { valid: errors.length === 0, errors };

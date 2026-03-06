@@ -6,6 +6,8 @@ import type {
   ProviderCapabilities,
   Candle,
   Quote,
+  OptionsChain,
+  OptionsContract,
   Timeframe,
 } from '../types';
 
@@ -35,6 +37,32 @@ interface PolygonSnapshotResponse {
   status: string;
 }
 
+interface PolygonOptionsResult {
+  break_even_price?: number;
+  day?: { close: number; high: number; low: number; open: number; volume: number; vwap: number };
+  details?: {
+    contract_type: 'call' | 'put';
+    exercise_style: string;
+    expiration_date: string;
+    shares_per_contract: number;
+    strike_price: number;
+    ticker: string;
+  };
+  greeks?: { delta: number; gamma: number; theta: number; vega: number };
+  implied_volatility?: number;
+  last_quote?: { ask: number; ask_size: number; bid: number; bid_size: number; midpoint: number };
+  open_interest?: number;
+  underlying_asset?: { price: number; ticker: string };
+}
+
+interface PolygonOptionsChainResponse {
+  results: PolygonOptionsResult[];
+  status: string;
+  next_url?: string;
+}
+
+const POLYGON_OPTIONS_ENABLED = process.env.POLYGON_OPTIONS_ENABLED !== 'false';
+
 const TIMEFRAME_MAP: Record<Timeframe, { multiplier: number; timespan: string }> = {
   '1min': { multiplier: 1, timespan: 'minute' },
   '5min': { multiplier: 5, timespan: 'minute' },
@@ -51,7 +79,7 @@ export class PolygonClient extends BaseProvider implements MarketDataProvider {
   readonly capabilities: ProviderCapabilities = {
     candles: true,
     quotes: true,
-    optionsChain: false,
+    optionsChain: POLYGON_OPTIONS_ENABLED,
     gex: false,
     flow: false,
     iv: false,
@@ -70,7 +98,7 @@ export class PolygonClient extends BaseProvider implements MarketDataProvider {
       capabilities: {
         candles: true,
         quotes: true,
-        optionsChain: false,
+        optionsChain: POLYGON_OPTIONS_ENABLED,
         gex: false,
         flow: false,
         iv: false,
@@ -144,6 +172,98 @@ export class PolygonClient extends BaseProvider implements MarketDataProvider {
       close: r.c,
       volume: r.v,
     }));
+  }
+
+  async getOptionsChain(symbol: string, expiration?: string): Promise<OptionsChain> {
+    const params: Record<string, unknown> = {
+      apiKey: config.polygon.apiKey,
+      limit: 250,
+    };
+    if (expiration) {
+      params.expiration_date = expiration;
+    }
+
+    // Paginate to collect all contracts (max 250 per page)
+    let allResults: PolygonOptionsResult[] = [];
+    let url: string | null = `/v3/snapshot/options/${symbol}`;
+
+    while (url && allResults.length < 1000) {
+      const isNextPage = url.startsWith('http');
+      let data: PolygonOptionsChainResponse;
+
+      if (isNextPage) {
+        // next_url is absolute; strip baseUrl prefix and add apiKey
+        const nextPath = url.replace(config.polygon.baseUrl, '');
+        data = await this.request<PolygonOptionsChainResponse>('GET', nextPath, {
+          apiKey: config.polygon.apiKey,
+        });
+      } else {
+        data = await this.request<PolygonOptionsChainResponse>('GET', url, params);
+      }
+
+      if (data?.results?.length) {
+        allResults = allResults.concat(data.results);
+      }
+
+      url = data?.next_url || null;
+    }
+
+    if (allResults.length === 0) {
+      throw new ProviderError(this.name, 'PARSE_ERROR', `Empty options chain for ${symbol}`);
+    }
+
+    const expirationSet = new Set<string>();
+    let underlyingPrice = 0;
+
+    // Extract underlying price from the first result that has it
+    for (const r of allResults) {
+      if (r.underlying_asset?.price) {
+        underlyingPrice = r.underlying_asset.price;
+        break;
+      }
+    }
+
+    const contracts: OptionsContract[] = [];
+    for (const r of allResults) {
+      if (!r.details) continue;
+      const d = r.details;
+      expirationSet.add(d.expiration_date);
+
+      const bid = r.last_quote?.bid || 0;
+      const ask = r.last_quote?.ask || 0;
+      const mid = r.last_quote?.midpoint || (bid && ask ? (bid + ask) / 2 : r.day?.close || 0);
+
+      contracts.push({
+        symbol: d.ticker,
+        underlyingSymbol: symbol,
+        type: d.contract_type,
+        strike: d.strike_price,
+        expiration: d.expiration_date,
+        bid,
+        ask,
+        mid,
+        last: r.day?.close || 0,
+        volume: r.day?.volume || 0,
+        openInterest: r.open_interest || 0,
+        impliedVolatility: r.implied_volatility || 0,
+        delta: r.greeks?.delta || 0,
+        gamma: r.greeks?.gamma || 0,
+        theta: r.greeks?.theta || 0,
+        vega: r.greeks?.vega || 0,
+      });
+    }
+
+    this.log.info(
+      { symbol, contracts: contracts.length, expirations: expirationSet.size, underlyingPrice },
+      'Polygon options chain fetched with real Greeks',
+    );
+
+    return {
+      symbol,
+      expirations: [...expirationSet].sort(),
+      contracts,
+      timestamp: Date.now(),
+    };
   }
 
   async healthCheck(): Promise<boolean> {

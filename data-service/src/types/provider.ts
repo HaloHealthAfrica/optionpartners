@@ -9,7 +9,7 @@ import type {
   Timeframe,
 } from './market-data';
 
-export type ProviderName = 'twelvedata' | 'unusual_whales' | 'polygon' | 'cboe' | 'fred';
+export type ProviderName = 'twelvedata' | 'unusual_whales' | 'polygon' | 'marketdata' | 'computed' | 'cboe' | 'fred';
 
 export type ProviderPriority = 'primary' | 'secondary' | 'tertiary';
 

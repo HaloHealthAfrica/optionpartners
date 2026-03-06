@@ -238,7 +238,17 @@ export function createV1Routes(ctx: V1RouteContext): Router {
 
       for (const [key, _ids] of groups) {
         const [underlying, exp] = key.split(':');
-        const chain = await ctx.marketDataAdapter!.getOptionsChain(underlying, exp);
+        const chainCacheKey = `${underlying}:${exp}:all`;
+
+        const cached = await ctx.cacheManager.get<import('../providers/marketdata/adapter').NormalizedOptionContract[]>('chain', chainCacheKey);
+        const chain = cached
+          ? cached.data
+          : await ctx.marketDataAdapter!.getOptionsChain(underlying, exp);
+
+        if (!cached) {
+          await ctx.cacheManager.set('chain', chainCacheKey, chain);
+        }
+
         for (const c of chain) {
           if (requestedSet.has(c.canonicalId)) {
             greeks.push({

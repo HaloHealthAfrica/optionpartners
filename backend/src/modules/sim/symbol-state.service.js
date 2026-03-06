@@ -164,15 +164,20 @@ class SymbolStateService {
     const space = payload.space || {};
     const bar = payload.bar || {};
     const riskCtx = payload.risk_context || {};
+    const strat = payload.strat || payload.trigger || {};
 
     state.previous_macro_bias = state.macro_bias;
 
-    const biasRaw = (consensus.bias_consensus || macroState.macro_class || '').toUpperCase();
-    if (biasRaw.includes('BULL') || biasRaw === 'MARKUP') state.macro_bias = 'BULLISH';
-    else if (biasRaw.includes('BEAR') || biasRaw === 'MARKDOWN') state.macro_bias = 'BEARISH';
+    // Bias: new `bias` → old `bias_consensus` → macro_class fallback
+    const biasRaw = (consensus.bias || consensus.bias_consensus || macroState.macro_class || '').toUpperCase();
+    if (biasRaw.includes('BULL') || biasRaw === 'MARKUP' || biasRaw.includes('TREND_UP')) state.macro_bias = 'BULLISH';
+    else if (biasRaw.includes('BEAR') || biasRaw === 'MARKDOWN' || biasRaw.includes('TREND_DOWN')) state.macro_bias = 'BEARISH';
     else state.macro_bias = 'NEUTRAL';
 
-    state.macro_strength = parseFloat(consensus.bias_score ?? macroState.macro_strength ?? 0) || 0;
+    // Strength: new `weighted_score` → old `bias_score` → macro_bias_score → macro_strength
+    state.macro_strength = parseFloat(
+      consensus.weighted_score ?? consensus.bias_score ?? macroState.macro_bias_score ?? macroState.macro_strength ?? 0
+    ) || 0;
 
     const regimeType = (regime.type || '').toUpperCase();
     if (regimeType.includes('TREND')) state.regime = 'TREND';
@@ -181,19 +186,37 @@ class SymbolStateService {
     else if (regimeType.includes('CONTRAC')) state.regime = 'CONTRACTION';
     else state.regime = regimeType || null;
 
-    state.volatility_state = regime.atr_state_15m || null;
+    // Volatility state: new `atr_state` → old `atr_state_15m`
+    state.volatility_state = regime.atr_state || regime.atr_state_15m || null;
 
-    state.room_to_resistance = this._normalizeRoom(space.room_to_resistance ?? space.resistance_room);
-    state.room_to_support = this._normalizeRoom(space.room_to_support ?? space.support_room);
+    // Room-to-move: new ATR-distance format → old categorical format
+    if (space.dist_res_atr != null) {
+      const dist = parseFloat(space.dist_res_atr);
+      state.room_to_resistance = dist >= 2 ? 'HIGH' : dist >= 1 ? 'MODERATE' : 'LOW';
+    } else {
+      state.room_to_resistance = this._normalizeRoom(space.room_to_resistance ?? space.resistance_room);
+    }
+    if (space.dist_sup_atr != null) {
+      const dist = parseFloat(space.dist_sup_atr);
+      state.room_to_support = dist >= 2 ? 'HIGH' : dist >= 1 ? 'MODERATE' : 'LOW';
+    } else {
+      state.room_to_support = this._normalizeRoom(space.room_to_support ?? space.support_room);
+    }
 
     if (bar.close) state.last_price = parseFloat(bar.close);
-    if (bar.atr || riskCtx.atr) state.atr = parseFloat(bar.atr || riskCtx.atr);
+
+    // ATR: bar.atr → risk_context.atr → chart_tf timeframe ATR
+    const chartTf = payload.chart_tf;
+    const chartTfData = (payload.mtf?.timeframes || []).find(t => t.tf === chartTf);
+    const atrValue = bar.atr || riskCtx.atr || chartTfData?.atr;
+    if (atrValue) state.atr = parseFloat(atrValue);
 
     state.latest_macro_raw = {
       consensus,
       regime,
       macroState,
       space,
+      strat,
       levels: payload.levels || {},
       intent: payload.intent || {},
       riskContext: riskCtx,

@@ -11,7 +11,7 @@ const configSchema = z.object({
   twelveData: z.object({
     apiKey: z.string().default(''),
     baseUrl: z.string().default('https://api.twelvedata.com'),
-    rateLimit: z.coerce.number().default(800),
+    rateLimit: z.coerce.number().default(610),
   }),
 
   unusualWhales: z.object({
@@ -29,7 +29,7 @@ const configSchema = z.object({
   polygon: z.object({
     apiKey: z.string().default(''),
     baseUrl: z.string().default('https://api.polygon.io'),
-    rateLimit: z.coerce.number().default(5),
+    rateLimit: z.coerce.number().default(100),
   }),
 
   cboe: z.object({

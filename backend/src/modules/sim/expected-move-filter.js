@@ -21,14 +21,23 @@ const logger = require('../../utils/logger');
  * @param {number} params.atr14          - 14-day ATR of the underlying
  * @param {number} params.delta          - Option delta (absolute value used)
  * @param {number} params.optionPremium  - Option mid price (per share)
- * @param {number} [params.targetPctMove=0.50] - Target gain as decimal (50%)
+ * @param {number} [params.targetPctMove=0.15] - Target gain as decimal (env: SIM_EM_TARGET_PCT)
  * @param {number} [params.dte]          - Days to expiration for time scaling
  * @param {number} [params.gamma]        - Option gamma for convexity term
  * @returns {{ pass: boolean, reason?: string, details: Object }}
  */
 function validateExpectedMove({ atr14, delta, optionPremium, targetPctMove, dte, gamma }) {
-  const defaultTarget = parseFloat(process.env.SIM_EM_TARGET_PCT || '0.30');
+  const defaultTarget = parseFloat(process.env.SIM_EM_TARGET_PCT || '0.15');
   targetPctMove = targetPctMove ?? defaultTarget;
+
+  // Scale target down for longer-DTE options: the filter should be less strict
+  // for swing trades where theta decay is slower and there's more time for
+  // the underlying to move. Short-DTE options keep the full target.
+  const effectiveDteForScaling = (typeof dte === 'number' && dte > 0) ? dte : 14;
+  if (effectiveDteForScaling > 14) {
+    const dteDamping = Math.min(1, 14 / effectiveDteForScaling);
+    targetPctMove = targetPctMove * dteDamping;
+  }
   if (typeof atr14 !== 'number' || atr14 <= 0) {
     return { pass: true, reason: 'ATR unavailable — skipping expected move filter', details: {} };
   }

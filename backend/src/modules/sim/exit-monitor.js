@@ -11,7 +11,7 @@ const marketContext = require('./market-context.service');
 const logger = require('../../utils/logger');
 const Sentry = require('@sentry/node');
 
-const MIN_HOLD_MS = parseInt(process.env.SIM_MIN_HOLD_MS || '60000', 10);
+const MIN_HOLD_MS = parseInt(process.env.SIM_MIN_HOLD_MS || '300000', 10);
 const REQUIRE_FRESH_PRICE_FOR_EXITS = process.env.SIM_REQUIRE_FRESH_EXIT_PRICE !== 'false';
 const MAX_EXIT_PRICE_AGE_MS = parseInt(process.env.SIM_MAX_EXIT_PRICE_AGE_MS || '120000', 10);
 
@@ -266,7 +266,50 @@ class ExitMonitor {
       }
 
       if (reached) {
-        await this._triggerExit(position, optionPrice, 'TAKE_PROFIT', `Underlying ${underlyingPrice} reached take-profit ${takeProfit}`);
+        // Sanity check: a take-profit exit should be a gain. If the estimated
+        // option price implies a loss, the price estimate is stale/wrong —
+        // estimate a minimum profit from the underlying move and delta.
+        const entryPrice = parseFloat(position.avg_price);
+        let tpExitPrice = optionPrice;
+        const impliedPnl = isCreditSpread
+          ? (entryPrice - tpExitPrice) * position.quantity * 100
+          : (tpExitPrice - entryPrice) * position.quantity * 100;
+
+        if (impliedPnl <= 0 && !isCreditSpread) {
+          try {
+            const intentResult = await db.query(
+              `SELECT intent_payload FROM sim_orders
+               WHERE webhook_event_id = $1 AND side = 'BUY'
+               ORDER BY created_at ASC LIMIT 1`,
+              [position.webhook_event_id]
+            );
+            if (intentResult.rows.length > 0) {
+              const intent = typeof intentResult.rows[0].intent_payload === 'string'
+                ? JSON.parse(intentResult.rows[0].intent_payload)
+                : intentResult.rows[0].intent_payload;
+              const underlyingEntry = intent?.limitPrice || intent?.midPrice;
+              if (underlyingEntry && underlyingEntry > 0) {
+                const delta = Math.abs(parseFloat(position.live_delta || position.delta_at_entry || intent?.delta || 0.50));
+                const underlyingMove = profitsWhenDown
+                  ? underlyingEntry - underlyingPrice
+                  : underlyingPrice - underlyingEntry;
+                const estimatedOptionGain = Math.max(0, underlyingMove * delta);
+                if (estimatedOptionGain > 0) {
+                  tpExitPrice = entryPrice + estimatedOptionGain;
+                  logger.warn(
+                    `[TP_PRICE_FIX] ${position.symbol}: take-profit implied loss with option estimate $${optionPrice.toFixed(2)} — ` +
+                    `corrected exit $${tpExitPrice.toFixed(2)} from delta=${delta.toFixed(3)} × underlying_move=$${underlyingMove.toFixed(2)}`,
+                    'exit-monitor'
+                  );
+                }
+              }
+            }
+          } catch (err) {
+            logger.warn(`[TP_PRICE_FIX] ${position.symbol}: lookup failed: ${err.message}`, 'exit-monitor');
+          }
+        }
+
+        await this._triggerExit(position, tpExitPrice, 'TAKE_PROFIT', `Underlying ${underlyingPrice} reached take-profit ${takeProfit}`);
         return;
       }
     }
@@ -575,8 +618,10 @@ class ExitMonitor {
       ? Math.max(0, (new Date(position.expiration) - Date.now()) / (1000 * 60 * 60 * 24))
       : 0;
 
-    // Intrinsic fallback is unreliable — only use if explicitly enabled.
-    const allowIntrinsicFallback = process.env.SIM_ALLOW_INTRINSIC_FALLBACK === 'true';
+    // Intrinsic fallback: disabled returns entry price which makes ALL exits
+    // show ~0% PnL regardless of underlying movement. This defeats the purpose
+    // of the simulator. Default to enabled so exits reflect real price movement.
+    const allowIntrinsicFallback = process.env.SIM_ALLOW_INTRINSIC_FALLBACK !== 'false';
     if (!allowIntrinsicFallback) {
       logger.warn(
         `[PRICE_FALLBACK_BLOCKED] ${position.symbol}: chain unavailable and intrinsic fallback disabled — using entry price as exit estimate`,

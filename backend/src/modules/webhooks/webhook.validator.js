@@ -19,7 +19,7 @@ const MAX_AGE_BY_SOURCE = {
   TREND:          8 * 24 * 60 * 60 * 1000,
   MTF_BIAS:       8 * 24 * 60 * 60 * 1000,
   SATY_PHASE:     8 * 24 * 60 * 60 * 1000,
-  STRAT:          30 * 60 * 1000,            // 30 minutes
+  STRAT:          2 * 60 * 60 * 1000,        // 2 hours (V1 base; V2 uses LTF-aware override below)
   SIGNALS:        30 * 60 * 1000,
   ORB:            30 * 60 * 1000,
   SQUEEZE_PRO:    30 * 60 * 1000,
@@ -99,8 +99,8 @@ function generateDedupeKey(payload) {
       break;
     case 'MTF_BIAS':
       discriminator = payload.event_id_raw || [
-        payload.mtf?.consensus?.bias_consensus,
-        payload.trigger?.pattern,
+        payload.mtf?.consensus?.bias || payload.mtf?.consensus?.bias_consensus,
+        payload.strat?.pattern || payload.trigger?.pattern,
         payload.chart_tf,
       ].join(':');
       break;
@@ -202,7 +202,20 @@ function validateTimestamp(payload, source) {
     return { valid: false, error: 'Invalid timestamp format' };
   }
 
-  const maxAge = (source && MAX_AGE_BY_SOURCE[source]) || MAX_PAYLOAD_AGE_MS;
+  let maxAge = (source && MAX_AGE_BY_SOURCE[source]) || MAX_PAYLOAD_AGE_MS;
+
+  // STRAT V2 Plan Engine: meta.ts is the bar open timestamp, not the signal
+  // generation time. The LTF (lower timeframe) bar can span hours, so a
+  // TRIGGERED event at the end of a 360-min bar will have meta.ts that is
+  // naturally ~6 hours old. Use the LTF duration + buffer as the max age.
+  if (source === 'STRAT' && payload.setup?.ltf) {
+    const ltfMinutes = parseInt(payload.setup.ltf, 10);
+    if (ltfMinutes > 0) {
+      const ltfBasedMaxAge = (ltfMinutes + 30) * 60 * 1000; // LTF duration + 30 min buffer
+      maxAge = Math.max(maxAge, ltfBasedMaxAge);
+    }
+  }
+
   const age = Date.now() - payloadTime;
   if (age > maxAge) {
     return { valid: false, error: `Payload too old: ${Math.round(age / 1000)}s (max ${Math.round(maxAge / 1000)}s)` };

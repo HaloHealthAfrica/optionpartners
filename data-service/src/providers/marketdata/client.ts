@@ -196,9 +196,12 @@ export class MarketDataClient {
     symbol: string,
     expiration: string,
     side?: 'call' | 'put',
+    opts?: { strikeLimit?: number; minBid?: number },
   ): Promise<MarketDataOptionContract[]> {
     const params: Record<string, string> = { expiration };
     if (side) params.side = side;
+    if (opts?.strikeLimit) params.strikeLimit = String(opts.strikeLimit);
+    if (opts?.minBid != null) params.minBid = String(opts.minBid);
 
     const data = await this.requestWithRetry<RawChainResponse>(
       `/v1/options/chain/${encodeURIComponent(symbol)}/`,

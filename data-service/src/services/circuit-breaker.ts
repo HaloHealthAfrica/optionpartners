@@ -72,11 +72,11 @@ export class CircuitBreaker {
 
     stats.successes++;
     stats.lastSuccessTime = Date.now();
+    stats.failures = 0;
 
     if (stats.state === 'half-open') {
       const oldState = stats.state;
       stats.state = 'closed';
-      stats.failures = 0;
       stats.halfOpenAttempts = 0;
       log.info({ provider, transition: `${oldState} → closed` }, 'Circuit breaker state transition: HALF_OPEN → CLOSED');
     }
@@ -129,6 +129,15 @@ export class CircuitBreaker {
 
   getConsecutiveFailures(provider: ProviderName): number {
     return this.circuits.get(provider)?.failures ?? 0;
+  }
+
+  setLongBackoff(provider: ProviderName, durationMs: number): void {
+    const stats = this.circuits.get(provider);
+    if (stats) {
+      stats.state = 'open';
+      stats.lastFailureTime = Date.now() + durationMs - (this.configs.get(provider)?.resetTimeoutMs ?? 30_000);
+      log.warn({ provider, durationMs }, 'Long backoff set — circuit breaker locked open');
+    }
   }
 
   reset(provider: ProviderName): void {

@@ -189,7 +189,8 @@ class DecisionRouter {
 
     if (signal.action !== 'CLOSE') {
       // Strategy suppression gate: strategies in this list are blocked from live execution
-      const SUPPRESSED_STRATEGIES = (process.env.SUPPRESSED_STRATEGIES || 'SIGNALS').split(',').map(s => s.trim().toUpperCase());
+      const rawSuppressed = process.env.SUPPRESSED_STRATEGIES;
+      const SUPPRESSED_STRATEGIES = (rawSuppressed != null ? rawSuppressed : 'SIGNALS').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
       const stratUpper = (signal.strategy || '').toUpperCase();
       if (SUPPRESSED_STRATEGIES.includes(stratUpper)) {
         const reason = `Strategy ${signal.strategy} is suppressed (SIM_ONLY) — 0% WR on executed trades, consuming excessive filter capacity`;
@@ -447,9 +448,10 @@ class DecisionRouter {
 
         // ── Phase 5: Expected move filter (DTE-calibrated with gamma convexity) ──
         if (regimeMetrics?.atr14) {
+          const emDefaultPct = parseFloat(process.env.SIM_EM_TARGET_PCT || '0.15');
           const targetPct = adaptedConfig.takeProfitReduction
-            ? 0.50 - adaptedConfig.takeProfitReduction
-            : 0.50;
+            ? emDefaultPct - adaptedConfig.takeProfitReduction
+            : emDefaultPct;
           const constructedDte = signal.meta?.selectedDte || adaptedConfig.dte_target || null;
           const constructedGamma = signal.meta?.greeks?.gamma || null;
           const emFilter = expectedMoveFilter.validateExpectedMove({
@@ -498,6 +500,7 @@ class DecisionRouter {
           limitPrice: signal.limitPrice,
           stopLoss: tradeDecision.risk_parameters.stop_level || signal.stopLoss,
           stopSource: tradeDecision.risk_parameters.stop_source || null,
+          maxLoss: tradeDecision.risk_parameters.max_loss || null,
           takeProfit: signal.takeProfit,
           bidPrice: signal.bidPrice,
           askPrice: signal.askPrice,

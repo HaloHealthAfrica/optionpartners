@@ -17,6 +17,8 @@ import { createV1Routes } from './api/v1-routes';
 import { apiKeyAuth } from './api/auth-middleware';
 import { MarketDataClient } from './providers/marketdata/client';
 import { MarketDataAdapter } from './providers/marketdata/adapter';
+import { MarketDataAppProvider } from './providers/marketdata/provider';
+import { computedGexProvider } from './providers/computed-gex-provider';
 import { circuitBreaker } from './services/circuit-breaker';
 
 async function main() {
@@ -53,7 +55,7 @@ async function main() {
   const orchestrator = new DataOrchestrator();
   let registeredProviderCount = 0;
 
-  // TwelveData provider registration
+  // TwelveData provider registration (primary stock/candles)
   if (config.twelveData.apiKey) {
     orchestrator.registerProvider(new TwelveDataClient());
     logger.info('TwelveData provider registered successfully (primary stock/candles) - API key present');
@@ -63,20 +65,34 @@ async function main() {
     logger.warn('TwelveData provider failed to register - API key missing or empty');
   }
 
-  // Unusual Whales provider registration
+  // Unusual Whales provider registration (primary options chain + GEX/flow/IV)
   if (config.unusualWhales.apiKey) {
     orchestrator.registerProvider(new UnusualWhalesClient());
-    logger.info('Unusual Whales provider registered successfully (primary options/GEX/flow) - API key present');
+    logger.info('Unusual Whales provider registered successfully (primary options chain + GEX/flow/IV) - API key present');
     registeredProviderCount++;
   } else {
     orchestrator.trackProviderRegistrationFailure('unusual_whales', 'API key missing or empty', false);
     logger.warn('Unusual Whales provider failed to register - API key missing or empty');
   }
 
-  // Polygon provider registration
+  // Computed GEX provider (fallback GEX — derived from chain data, zero API calls)
+  orchestrator.registerProvider(computedGexProvider);
+  logger.info('Computed GEX provider registered (fallback GEX from chain data — zero extra API calls)');
+
+  // MarketData.app provider registration (fallback options chain — real-time, 100K daily credits)
+  if (config.marketData.apiToken) {
+    orchestrator.registerProvider(new MarketDataAppProvider());
+    logger.info('MarketData.app provider registered successfully (fallback options chain) - API token present');
+    registeredProviderCount++;
+  } else {
+    orchestrator.trackProviderRegistrationFailure('marketdata', 'API token missing or empty', false);
+    logger.warn('MarketData.app provider not registered - MARKETDATA_API_TOKEN not set');
+  }
+
+  // Polygon provider registration (tertiary options chain — 15-min delayed, real Greeks)
   if (config.polygon.apiKey) {
     orchestrator.registerProvider(new PolygonClient());
-    logger.info('Polygon provider registered successfully (tertiary fallback) - API key present');
+    logger.info('Polygon provider registered successfully (tertiary options chain) - API key present');
     registeredProviderCount++;
   } else {
     orchestrator.trackProviderRegistrationFailure('polygon', 'API key missing or empty', false);

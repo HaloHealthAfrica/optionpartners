@@ -65,6 +65,12 @@ export abstract class BaseProvider {
         this.log.error({ path, status, latencyMs: latency, error: message }, 'Request failed');
 
         if (status === 429) {
+          const body = err.response?.data;
+          const isDailyLimit = typeof body?.code === 'string' && body.code.includes('daily');
+          if (isDailyLimit) {
+            this.log.error({ path }, 'Daily API request limit exhausted — suppressing requests for 30 min');
+            circuitBreaker.setLongBackoff(this.name, 30 * 60_000);
+          }
           throw new ProviderError(this.name, 'RATE_LIMITED', `Rate limited by ${this.name}`);
         }
         if (status === 401 || status === 403) {

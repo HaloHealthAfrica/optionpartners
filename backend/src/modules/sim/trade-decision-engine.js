@@ -68,11 +68,12 @@ class TradeDecisionEngine {
 
     // ── Session quality gate: prefer 9:30-10:00 ET window ──
     // The 9:30-10:00 window has 68.2% WR with MEDIUM_CONFIDENCE.
-    // Trades outside this window require valid regime classification to proceed.
+    // Trades outside this window with unknown regime get a conviction penalty.
     const sessionGate = this._applySessionQualityGate(symbolState, rationale);
     if (sessionGate.blocked) {
       return this._blocked(ticker, 0, rationale);
     }
+    let sessionPenalty = sessionGate.penalty || 0;
 
     // ── PIVOT_MB: Self-contained mechanical evaluation ──
     if (signal.strategy === 'pivot_motherbar') {
@@ -113,6 +114,12 @@ class TradeDecisionEngine {
       calibratedWeights = await calibrationStore.getWeightMap(userId);
     } catch (_) { /* proceed with static weights */ }
     let conviction = this._computeConviction(signal, symbolState, rationale, calibratedWeights, marketContext);
+
+    // Apply session penalty after conviction is computed
+    if (sessionPenalty > 0) {
+      conviction = Math.max(0, conviction - sessionPenalty);
+      rationale.push(`CONVICTION after session penalty: ${conviction}`);
+    }
 
     // Apply macro penalty after conviction is computed
     if (macroCheck.penalty > 0) {
@@ -302,18 +309,35 @@ class TradeDecisionEngine {
     }
 
     // Spread check: configurable threshold, skip when chain data is stale
+    // or during the first 15 min of RTH when spreads are naturally wider.
     const maxSpread = parseFloat(process.env.SIM_MAX_SPREAD_PCT || '0.20');
     if (state.bid_ask_spread_pct != null && state.bid_ask_spread_pct > maxSpread) {
       const chainAge = globalState?.chain_updated_at
         ? (Date.now() - new Date(globalState.chain_updated_at).getTime()) / 1000
         : null;
+      const etMinsNow = getETMinutes();
+      const isRTH = etMinsNow >= 570 && etMinsNow <= 960;
+      const isEarlySession = etMinsNow >= 570 && etMinsNow < 585; // 9:30-9:45 ET
+      const spreadPctFmt = (state.bid_ask_spread_pct * 100).toFixed(1);
+      const maxPctFmt = (maxSpread * 100).toFixed(0);
+
       if (chainAge != null && chainAge > 600) {
         rationale.push(
-          `WARN: Bid-ask spread ${(state.bid_ask_spread_pct * 100).toFixed(1)}% exceeds ${(maxSpread * 100).toFixed(0)}% max ` +
+          `WARN: Bid-ask spread ${spreadPctFmt}% exceeds ${maxPctFmt}% max ` +
           `but chain data is stale (${Math.round(chainAge)}s old) — skipping spread gate`
         );
+      } else if (!isRTH) {
+        rationale.push(
+          `WARN: Bid-ask spread ${spreadPctFmt}% exceeds ${maxPctFmt}% max ` +
+          `but outside RTH — chain spreads are unreliable, skipping spread gate`
+        );
+      } else if (isEarlySession && state.bid_ask_spread_pct <= maxSpread * 2) {
+        rationale.push(
+          `WARN: Bid-ask spread ${spreadPctFmt}% exceeds ${maxPctFmt}% max ` +
+          `but within early-session grace period (9:30-9:45 ET) — allowing up to ${(maxSpread * 200).toFixed(0)}%`
+        );
       } else {
-        rationale.push(`FAIL_CLOSED: Bid-ask spread ${(state.bid_ask_spread_pct * 100).toFixed(1)}% exceeds ${(maxSpread * 100).toFixed(0)}% max`);
+        rationale.push(`FAIL_CLOSED: Bid-ask spread ${spreadPctFmt}% exceeds ${maxPctFmt}% max`);
         return this._blocked(ticker, 0, rationale);
       }
     }
@@ -499,8 +523,11 @@ class TradeDecisionEngine {
         failures.push(`pattern=${patternStr} (FAILED — heuristic, low reliability)`);
       }
 
+      // REVERSAL without continuity: conviction penalty applied in
+      // _computeConviction (-15), not a hard precondition failure.
+      // These setups fight the HTF but have valid R:R when levels are clean.
       if (strat.continuity === false && strat.pattern_kind === 'REVERSAL') {
-        failures.push('continuity=false with REVERSAL pattern (fighting HTF)');
+        rationale.push('STRAT_NOTE: REVERSAL without continuity — conviction penalty will apply');
       }
     }
 
@@ -979,6 +1006,25 @@ class TradeDecisionEngine {
       rationale.push(`STOP: ATR trailing (2x ATR=${effectiveAtr}) @ ${stopLevel.toFixed(2)}`);
     }
 
+    // Enforce minimum stop distance: stops closer than 0.5% of underlying
+    // price are noise and cause instant stop-outs from normal bid-ask bounce.
+    if (stopLevel && state.last_price) {
+      const stopDistancePct = Math.abs(state.last_price - stopLevel) / state.last_price;
+      const minStopDistancePct = parseFloat(process.env.SIM_MIN_STOP_DISTANCE_PCT || '0.005');
+      if (stopDistancePct < minStopDistancePct) {
+        const oldStop = stopLevel;
+        if (isLong) {
+          stopLevel = state.last_price * (1 - minStopDistancePct);
+        } else {
+          stopLevel = state.last_price * (1 + minStopDistancePct);
+        }
+        rationale.push(
+          `STOP_WIDENED: Original stop ${oldStop.toFixed(2)} was ${(stopDistancePct * 100).toFixed(2)}% from price ` +
+          `(min ${(minStopDistancePct * 100).toFixed(1)}%) — widened to ${stopLevel.toFixed(2)}`
+        );
+      }
+    }
+
     // Max loss from signal risk data
     if (entrySignal?.max_loss) {
       maxLoss = entrySignal.max_loss;
@@ -1076,10 +1122,10 @@ class TradeDecisionEngine {
   /**
    * Enforce session quality preferences based on empirical edge data.
    * 9:30-10:00 ET: free pass (validated edge window, 68.2% WR)
-   * Outside 9:30-10:00: require regime != UNKNOWN (quality gate)
-   *
-   * This concentrates risk in the highest-edge window while allowing
-   * trades outside it only when regime classification is functional.
+   * Outside 9:30-10:00 with valid regime: normal flow
+   * Outside 9:30-10:00 with UNKNOWN regime: conviction penalty instead of hard block,
+   *   since the IV rank fallback in decision-router already handles missing regime data
+   *   and a hard block prevents all trading when the data service is down.
    */
   _applySessionQualityGate(state, rationale) {
     const etMinutes = getETMinutes();
@@ -1090,17 +1136,16 @@ class TradeDecisionEngine {
       return { blocked: false, penalty: 0 };
     }
 
-    // Outside the validated window: require valid regime classification
     const regime = (state.regime || state.volatility_regime || '').toUpperCase();
     const regimeUnknown = !regime || regime === 'UNKNOWN' || regime === 'N/A' || regime === '';
 
     if (regimeUnknown) {
       const phase = deriveSessionPhase();
       rationale.push(
-        `SESSION_GATE: Outside 9:30-10:00 window (phase=${phase}) with regime=${regime || 'UNKNOWN'} — ` +
-        `valid regime required for post-opening trades`
+        `SESSION_PENALTY: Outside 9:30-10:00 window (phase=${phase}) with regime=${regime || 'UNKNOWN'} — ` +
+        `applying -15 conviction penalty (regime fallback active)`
       );
-      return { blocked: true, penalty: 0 };
+      return { blocked: false, penalty: 15 };
     }
 
     rationale.push(`SESSION: Outside 9:30-10:00 window but regime=${regime} is valid — allowing`);

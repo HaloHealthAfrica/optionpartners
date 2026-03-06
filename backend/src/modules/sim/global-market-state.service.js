@@ -157,6 +157,13 @@ class GlobalMarketStateService {
   async refreshChain(symbol, { force = false } = {}) {
     const sym = symbol.toUpperCase();
 
+    // Only fetch chains for core ETFs that the data-service poller caches.
+    // Individual stock chains are too credit-expensive (~500 credits each on TD).
+    const CHAIN_SYMBOLS = (process.env.GMS_CHAIN_SYMBOLS || 'SPY,QQQ,IWM').split(',').map(s => s.trim().toUpperCase());
+    if (!CHAIN_SYMBOLS.includes(sym)) {
+      return { skipped: true, reason: 'not_in_chain_symbols' };
+    }
+
     if (!force) {
       const existing = await this.getState(sym);
       if (this.isChainFresh(existing)) {

@@ -269,7 +269,8 @@ class TradeFinalizerService {
       return null;
     }
 
-    // Debit trades: risk = |entryPrice - stopLoss| * multiplier * qty
+    // Debit trades: use maxLoss from order intent (dollar risk per contract),
+    // NOT |optionPrice - underlyingStopLevel| which mixes price domains.
     const orderResult = await db.query(
       `SELECT intent_payload FROM sim_orders
        WHERE webhook_event_id = $1 AND side = 'BUY'
@@ -282,11 +283,26 @@ class TradeFinalizerService {
         ? JSON.parse(orderResult.rows[0].intent_payload)
         : orderResult.rows[0].intent_payload;
 
-      if (intent.stopLoss) {
-        const riskPerUnit = Math.abs(parseFloat(position.avg_price) - intent.stopLoss);
-        const totalRisk = riskPerUnit * position.quantity * multiplier;
+      // Prefer maxLoss (dollar risk per contract, already in correct units)
+      if (intent.maxLoss && intent.maxLoss > 0) {
+        const totalRisk = intent.maxLoss * position.quantity;
         if (totalRisk > 0) {
           return Math.round((pnl / totalRisk) * 10000) / 10000;
+        }
+      }
+
+      // Fallback: compute from stop distance on the UNDERLYING, then scale
+      // by delta to approximate option risk (not exact but better than mixing domains)
+      if (intent.stopLoss) {
+        const entryUnderlying = intent.limitPrice || intent.midPrice;
+        if (entryUnderlying && entryUnderlying > 0) {
+          const underlyingRisk = Math.abs(entryUnderlying - intent.stopLoss);
+          const delta = Math.abs(intent.delta || position.delta_at_entry || 0.50);
+          const optionRisk = underlyingRisk * delta;
+          const totalRisk = optionRisk * position.quantity * multiplier;
+          if (totalRisk > 0) {
+            return Math.round((pnl / totalRisk) * 10000) / 10000;
+          }
         }
       }
     }

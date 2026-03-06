@@ -4,7 +4,7 @@ import { snapshotStore } from '../persistence/snapshot-store';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 
 const SESSION_INTERVALS: Record<string, number> = {
-  [MarketSession.RTH]:         5 * 60 * 1000,   // 5 min
+  [MarketSession.RTH]:         10 * 60 * 1000,  // 10 min (UW daily limit: 1500 req)
   [MarketSession.PRE_MARKET]:  30 * 60 * 1000,  // 30 min
   [MarketSession.POST_MARKET]: 30 * 60 * 1000,  // 30 min
 };

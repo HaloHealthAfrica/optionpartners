@@ -89,7 +89,10 @@ export class MarketDataAdapter {
   ): Promise<NormalizedOptionContract[]> {
     this.log.debug({ symbol, expiration, right }, 'Getting options chain');
 
-    const contracts = await this.client.getOptionChain(symbol, expiration, right);
+    const contracts = await this.client.getOptionChain(symbol, expiration, right, {
+      strikeLimit: 40,
+      minBid: 0.01,
+    });
 
     return contracts.map((c) => this.normalizeContract(c));
   }

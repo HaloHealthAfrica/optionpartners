@@ -399,7 +399,7 @@ async function warmupSymbol(req, res) {
       await symbolStateService.update('MTF_BIAS', {
         ticker: symbol,
         mtf: {
-          consensus: { bias_consensus: 'neutral', bias_score: 50 },
+          consensus: { bias: 'neutral', weighted_score: 50 },
           regime: { type: 'TREND', chop_score: 20 },
         },
         macro: { state: {} },

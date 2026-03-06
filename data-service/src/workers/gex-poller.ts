@@ -3,9 +3,9 @@ import { MarketSession, isActiveSession } from './market-session';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 
 const SESSION_INTERVALS: Record<string, number> = {
-  [MarketSession.RTH]:         2 * 60 * 1000,   // 2 min
-  [MarketSession.PRE_MARKET]:  10 * 60 * 1000,  // 10 min
-  [MarketSession.POST_MARKET]: 10 * 60 * 1000,  // 10 min
+  [MarketSession.RTH]:         5 * 60 * 1000,   // 5 min (UW daily limit: 1500 req)
+  [MarketSession.PRE_MARKET]:  15 * 60 * 1000,  // 15 min
+  [MarketSession.POST_MARKET]: 15 * 60 * 1000,  // 15 min
 };
 
 export class GexPoller extends BasePoller {
