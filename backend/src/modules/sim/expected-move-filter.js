@@ -26,7 +26,9 @@ const logger = require('../../utils/logger');
  * @param {number} [params.gamma]        - Option gamma for convexity term
  * @returns {{ pass: boolean, reason?: string, details: Object }}
  */
-function validateExpectedMove({ atr14, delta, optionPremium, targetPctMove = 0.50, dte, gamma }) {
+function validateExpectedMove({ atr14, delta, optionPremium, targetPctMove, dte, gamma }) {
+  const defaultTarget = parseFloat(process.env.SIM_EM_TARGET_PCT || '0.30');
+  targetPctMove = targetPctMove ?? defaultTarget;
   if (typeof atr14 !== 'number' || atr14 <= 0) {
     return { pass: true, reason: 'ATR unavailable — skipping expected move filter', details: {} };
   }

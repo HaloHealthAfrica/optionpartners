@@ -64,16 +64,35 @@ class SimExecutor {
         }
       }
 
-      // 3b. Prevent duplicate positions for the same user+symbol+contract
+      // 3b. Prevent duplicate positions for the same contract identity.
+      // Position identity = underlying_symbol + contract_type + strike + expiration.
+      // Allows: different strikes, different expirations, opposite direction (CALL vs PUT).
       if (intent.side === 'BUY' && !intent.positionId) {
+        const dupConditions = ['user_id = $1', 'underlying_symbol = $2', "status = 'OPEN'"];
+        const dupParams = [userId, intent.symbol];
+        let dupIdx = 3;
+
+        if (intent.contractType && intent.contractType !== 'STOCK') {
+          dupConditions.push(`contract_type = $${dupIdx++}`);
+          dupParams.push(intent.contractType);
+        }
+        if (intent.strike != null) {
+          dupConditions.push(`strike = $${dupIdx++}`);
+          dupParams.push(intent.strike);
+        }
+        if (intent.expiration != null) {
+          dupConditions.push(`expiration = $${dupIdx++}`);
+          dupParams.push(intent.expiration);
+        }
+
         const existing = await client.query(
-          `SELECT id FROM sim_positions
-           WHERE user_id = $1 AND underlying_symbol = $2 AND status = 'OPEN'
-           LIMIT 1`,
-          [userId, intent.symbol]
+          `SELECT id FROM sim_positions WHERE ${dupConditions.join(' AND ')} LIMIT 1`,
+          dupParams
         );
         if (existing.rows.length > 0) {
-          const order = await this._createOrder(client, intent, userId, 'REJECTED', 'Duplicate position — already open for this symbol');
+          const key = [intent.symbol, intent.contractType, intent.strike, intent.expiration].filter(Boolean).join('/');
+          const order = await this._createOrder(client, intent, userId, 'REJECTED',
+            `Duplicate position — already open for ${key}`);
           await client.query('COMMIT');
           return { order, fill: null, position: null };
         }

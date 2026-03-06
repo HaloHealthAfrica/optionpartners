@@ -211,6 +211,186 @@ class AIProvider {
   }
 
   /**
+   * Generate a streaming response — writes chunks to an Express SSE response.
+   * @param {string} prompt
+   * @param {Object} settings - { provider, apiKey, apiUrl, modelName }
+   * @param {import('express').Response} res - Express response configured for SSE
+   * @returns {Promise<string>} Full concatenated response
+   */
+  static async generateStreamingResponse(prompt, settings, res) {
+    const { provider, apiKey, modelName } = settings;
+
+    switch (provider) {
+      case 'openai':
+        return this.streamOpenAI(prompt, apiKey, modelName, 'https://api.openai.com/v1', res);
+      case 'claude':
+        return this.streamClaude(prompt, apiKey, modelName, res);
+      case 'gemini':
+        return this.streamGemini(prompt, apiKey, modelName, res);
+      case 'lmstudio':
+      case 'ollama':
+      case 'local':
+        return this.streamOpenAI(prompt, apiKey, modelName, settings.apiUrl, res);
+      case 'perplexity':
+        return this.streamOpenAI(prompt, apiKey, modelName, 'https://api.perplexity.ai', res);
+      default:
+        return this.streamOpenAI(prompt, apiKey, modelName, settings.apiUrl || 'https://api.openai.com/v1', res);
+    }
+  }
+
+  /**
+   * Stream via OpenAI-compatible API (OpenAI, LM Studio, Ollama, Perplexity).
+   */
+  static async streamOpenAI(prompt, apiKey, modelName, baseUrl, res) {
+    const url = `${baseUrl}/chat/completions`;
+    const isReasoningModel = /^(o\d|gpt-5-nano)/i.test(modelName);
+    const isOpenAIAPI = baseUrl && baseUrl.includes('api.openai.com');
+    const tokenLimit = isReasoningModel ? 16384 : 4096;
+    const tokenParam = isOpenAIAPI
+      ? { max_completion_tokens: tokenLimit }
+      : { max_tokens: 4096 };
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const body = {
+      model: modelName || 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'You are a professional trading performance analyst helping traders improve their performance.' },
+        { role: 'user', content: prompt }
+      ],
+      stream: true,
+      ...tokenParam,
+      ...(!isReasoningModel && { temperature: 0.7 }),
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      let msg = `HTTP ${response.status}`;
+      try { const e = await response.json(); msg = e.error?.message || msg; } catch {}
+      throw new Error(msg);
+    }
+
+    let fullText = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) {
+            fullText += content;
+            res.write(`data: ${JSON.stringify({ chunk: content })}\n\n`);
+          }
+        } catch {}
+      }
+    }
+
+    return fullText;
+  }
+
+  /**
+   * Stream via Anthropic Claude API.
+   */
+  static async streamClaude(prompt, apiKey, modelName, res) {
+    if (!apiKey) throw new Error('Anthropic API key not configured');
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: modelName || 'claude-3-haiku-20240307',
+        max_tokens: 4096,
+        stream: true,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    if (!response.ok) {
+      let msg = `HTTP ${response.status}`;
+      try { const e = await response.json(); msg = e.error?.message || msg; } catch {}
+      throw new Error(`Claude API error: ${msg}`);
+    }
+
+    let fullText = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+        try {
+          const parsed = JSON.parse(trimmed.slice(6));
+          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+            fullText += parsed.delta.text;
+            res.write(`data: ${JSON.stringify({ chunk: parsed.delta.text })}\n\n`);
+          }
+        } catch {}
+      }
+    }
+
+    return fullText;
+  }
+
+  /**
+   * Stream via Gemini API (uses generateContentStream).
+   */
+  static async streamGemini(prompt, apiKey, modelName, res) {
+    if (!apiKey) throw new Error('Gemini API key not configured');
+
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: modelName || 'gemini-1.5-flash' });
+
+    const streamResult = await model.generateContentStream(prompt);
+    let fullText = '';
+
+    for await (const chunk of streamResult.stream) {
+      const text = chunk.text();
+      if (text) {
+        fullText += text;
+        res.write(`data: ${JSON.stringify({ chunk: text })}\n\n`);
+      }
+    }
+
+    return fullText;
+  }
+
+  /**
    * Check if provider is configured correctly
    */
   static isConfigured(settings) {

@@ -60,6 +60,10 @@
                 >
                   {{ item.badge.text }}
                 </span>
+                <span
+                  v-if="item.notification && getNotificationCount(item.notification) > 0"
+                  class="ml-2 w-2 h-2 rounded-full bg-purple-500 animate-pulse"
+                ></span>
               </div>
               <p v-if="item.description" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
                 {{ item.description }}
@@ -84,6 +88,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { useSimulationStore } from '@/stores/simulation'
+
+const simulationStore = useSimulationStore()
 
 const props = defineProps({
   title: {
@@ -162,6 +169,11 @@ const handleClickOutside = (event) => {
   if (dropdownRef.value && !dropdownRef.value.contains(event.target)) {
     closeDropdown()
   }
+}
+
+const getNotificationCount = (key) => {
+  if (key === 'adaptiveInsightUnread') return simulationStore.autoInsightUnread
+  return 0
 }
 
 const getBadgeClasses = (type) => {

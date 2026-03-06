@@ -51,7 +51,7 @@ function verifySignature(payload, signature, secret) {
  */
 function generateDedupeKey(payload) {
   const source = detectIndicatorSource(payload);
-  const symbol = payload.ticker || payload.symbol || payload.meta?.symbol || '';
+  const symbol = payload.ticker || payload.symbol || payload.meta?.ticker || payload.meta?.symbol || '';
 
   const ts = _resolveTimestamp(payload, source);
 
@@ -228,7 +228,7 @@ function validatePayload(payload) {
 
   // Known indicators carry their own direction semantics — symbol is sufficient
   if (source !== 'UNKNOWN') {
-    const symbol = payload.ticker || payload.symbol || payload.meta?.symbol || payload.instrument?.ticker || payload.instrument?.symbol;
+    const symbol = payload.ticker || payload.symbol || payload.meta?.ticker || payload.meta?.symbol || payload.instrument?.ticker || payload.instrument?.symbol;
     if (!symbol || typeof symbol !== 'string') {
       return { valid: false, error: `[${source}] Missing required field: ticker or symbol` };
     }
@@ -236,7 +236,7 @@ function validatePayload(payload) {
   }
 
   // Generic / unknown payloads keep the original strict validation
-  const symbol = payload.ticker || payload.symbol;
+  const symbol = payload.ticker || payload.symbol || payload.meta?.ticker || payload.meta?.symbol;
   if (!symbol || typeof symbol !== 'string') {
     return { valid: false, error: 'Missing required field: ticker or symbol' };
   }

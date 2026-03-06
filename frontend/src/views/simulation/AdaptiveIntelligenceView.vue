@@ -20,12 +20,95 @@
           <option :value="365">Last year</option>
         </select>
         <button
+          @click="showLiveFeed = !showLiveFeed"
+          class="relative inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+        >
+          <SignalIcon class="h-4 w-4 mr-1.5" />
+          Live
+          <span v-if="store.liveFeedConnected" class="absolute -top-1 -right-1 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white dark:border-gray-800"></span>
+        </button>
+        <button
           @click="refreshActiveTab"
           class="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
         >
           <ArrowPathIcon class="h-4 w-4 mr-1.5" :class="{ 'animate-spin': store.adaptiveLoading }" />
           Refresh
         </button>
+      </div>
+    </div>
+
+    <!-- Live Market Context Bar -->
+    <div v-if="store.liveContext" class="mb-4 bg-white dark:bg-gray-800 rounded-lg shadow px-4 py-2.5 flex items-center gap-6 overflow-x-auto text-xs">
+      <div class="flex items-center gap-1.5 flex-shrink-0">
+        <div class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
+        <span class="text-gray-400 font-medium">LIVE</span>
+      </div>
+      <div v-if="store.liveContext.regime" class="flex items-center gap-1 flex-shrink-0">
+        <span class="text-gray-500">Regime:</span>
+        <span class="font-semibold" :class="{
+          'text-blue-600': store.liveContext.regime?.regime === 'TRENDING',
+          'text-red-500': store.liveContext.regime?.regime === 'HIGH_VOL_EXPANSION',
+          'text-amber-600': store.liveContext.regime?.regime === 'LOW_VOL_CHOP',
+          'text-gray-700 dark:text-gray-300': store.liveContext.regime?.regime === 'NEUTRAL',
+        }">{{ store.liveContext.regime?.regime || 'N/A' }}</span>
+      </div>
+      <div v-if="store.liveContext.regime?.vix != null" class="flex items-center gap-1 flex-shrink-0">
+        <span class="text-gray-500">VIX:</span>
+        <span class="font-semibold text-gray-900 dark:text-white">{{ store.liveContext.regime.vix.toFixed(1) }}</span>
+      </div>
+      <div v-if="store.liveContext.gex" class="flex items-center gap-1 flex-shrink-0">
+        <span class="text-gray-500">GEX:</span>
+        <span class="font-semibold" :class="store.liveContext.gex?.environment === 'POSITIVE' ? 'text-green-600' : 'text-red-500'">{{ store.liveContext.gex?.environment || 'N/A' }}</span>
+      </div>
+      <div v-if="store.liveContext.sessionPhase" class="flex items-center gap-1 flex-shrink-0">
+        <span class="text-gray-500">Session:</span>
+        <span class="font-semibold text-gray-700 dark:text-gray-300">{{ store.liveContext.sessionPhase.replace('_', ' ') }}</span>
+      </div>
+      <div v-if="store.liveContext.trends?.length" class="flex items-center gap-1 flex-shrink-0">
+        <span class="text-gray-500">Trends:</span>
+        <span v-for="t in store.liveContext.trends.slice(0, 4)" :key="t.symbol" class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700">
+          <span class="font-medium text-gray-700 dark:text-gray-300">{{ t.symbol }}</span>
+          <span :class="t.trend === 'BULLISH' ? 'text-green-600' : t.trend === 'BEARISH' ? 'text-red-500' : 'text-gray-400'">
+            {{ t.trend === 'BULLISH' ? '\u2191' : t.trend === 'BEARISH' ? '\u2193' : '\u2194' }}
+          </span>
+        </span>
+      </div>
+    </div>
+
+    <!-- Auto-Insight Notification Banner -->
+    <div
+      v-if="store.autoInsightUnread > 0 && store.autoInsight && !autoInsightDismissed"
+      class="mb-4 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50 dark:bg-purple-900/20 p-4"
+    >
+      <div class="flex items-start gap-3">
+        <div class="flex-shrink-0 w-10 h-10 rounded-full bg-purple-100 dark:bg-purple-800 flex items-center justify-center">
+          <SparklesIcon class="h-5 w-5 text-purple-600 dark:text-purple-400" />
+        </div>
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-semibold text-purple-900 dark:text-purple-200">
+            New AI Insight
+            <span class="ml-1.5 text-xs font-normal text-purple-600 dark:text-purple-400">
+              ({{ store.autoInsight.tradeCount || store.autoInsight.trade_count }} trades since last calibration)
+            </span>
+          </p>
+          <p class="text-xs text-purple-700 dark:text-purple-400 mt-1 line-clamp-3">
+            {{ store.autoInsight.summary || store.autoInsight.analysis?.substring(0, 250) }}
+          </p>
+        </div>
+        <div class="flex gap-2 flex-shrink-0">
+          <button
+            @click="viewAutoInsight"
+            class="inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-lg bg-purple-600 text-white hover:bg-purple-700"
+          >
+            View Full Analysis
+          </button>
+          <button
+            @click="dismissAutoInsight"
+            class="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-lg text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/30"
+          >
+            Dismiss
+          </button>
+        </div>
       </div>
     </div>
 
@@ -937,6 +1020,89 @@
       </div>
     </div>
 
+    <!-- ═══ Tab: AI Insights ═══ -->
+    <div v-else-if="activeTab === 'aiInsights'">
+      <!-- No analysis yet — start button -->
+      <div v-if="!store.aiInsightsStreaming && !store.aiInsightsStreamText && !store.aiInsights?.analysis" class="text-center py-12">
+        <div class="max-w-lg mx-auto">
+          <SparklesIcon class="h-12 w-12 mx-auto text-indigo-400 dark:text-indigo-500 mb-4" />
+          <h4 class="text-lg font-medium text-gray-900 dark:text-white mb-2">
+            AI-Powered System Analysis
+          </h4>
+          <p class="text-gray-600 dark:text-gray-400 mb-6 text-sm">
+            AI will interpret your calibration drift, regime edge matrix, temporal patterns, signal quality, and guard
+            effectiveness — then give you specific, data-grounded recommendations.
+          </p>
+          <button
+            @click="handleStreamInsights"
+            :disabled="store.aiInsightsLoading"
+            class="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+          >
+            <SparklesIcon class="h-4 w-4" />
+            <span>Generate AI Insights</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Streaming / completed analysis -->
+      <div v-else class="space-y-4">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
+          <!-- Header bar -->
+          <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <SparklesIcon class="h-5 w-5 text-indigo-500" />
+              <h3 class="text-sm font-semibold text-gray-900 dark:text-white">AI System Analysis</h3>
+              <span v-if="store.aiInsights?.dataSnapshot" class="text-xs text-gray-400">
+                {{ store.aiInsights.dataSnapshot.totalTrades }} trades, {{ store.aiInsights.dataSnapshot.lookbackDays }}d lookback
+              </span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span v-if="store.aiInsightsStreaming" class="flex items-center gap-1.5 text-xs text-indigo-600">
+                <div class="animate-pulse flex gap-0.5">
+                  <div class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                  <div class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                  <div class="w-1.5 h-1.5 bg-indigo-500 rounded-full animate-bounce" style="animation-delay: 300ms"></div>
+                </div>
+                Analyzing...
+              </span>
+              <button
+                v-if="!store.aiInsightsStreaming"
+                @click="handleStreamInsights"
+                class="inline-flex items-center px-2.5 py-1 text-xs font-medium rounded-lg text-indigo-700 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20"
+              >
+                <ArrowPathIcon class="h-3.5 w-3.5 mr-1" />
+                Re-analyze
+              </button>
+            </div>
+          </div>
+
+          <!-- AI response content -->
+          <div class="px-6 py-5 prose prose-sm dark:prose-invert max-w-none ai-insights-content" v-html="renderedInsights">
+          </div>
+        </div>
+
+        <!-- Follow-up input -->
+        <div v-if="!store.aiInsightsStreaming && store.aiInsightsStreamText" class="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+          <form @submit.prevent="handleInsightFollowup" class="flex gap-2">
+            <input
+              v-model="insightFollowup"
+              type="text"
+              placeholder="Ask a follow-up: 'Should I suppress momentum in LOW_VOL_CHOP?'"
+              class="flex-1 text-sm rounded-lg border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 px-3 py-2"
+              :disabled="store.aiInsightsStreaming"
+            />
+            <button
+              type="submit"
+              :disabled="!insightFollowup.trim() || store.aiInsightsStreaming"
+              class="inline-flex items-center px-3 py-2 text-sm font-medium rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              Ask
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+
     <!-- ═══ Tab: Backtest (placeholder) ═══ -->
     <div v-else-if="activeTab === 'backtest'">
       <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
@@ -945,12 +1111,84 @@
         <p class="mt-2 text-xs max-w-md mx-auto">Replay historical webhooks through modified engine rules to validate changes before deployment.</p>
       </div>
     </div>
+
+    <!-- ═══ Live Activity Feed (slide-out panel) ═══ -->
+    <Transition name="slide-right">
+      <div
+        v-if="showLiveFeed"
+        class="fixed right-0 top-0 h-full w-96 bg-white dark:bg-gray-800 shadow-2xl z-50 flex flex-col"
+      >
+        <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 rounded-full" :class="store.liveFeedConnected ? 'bg-green-500 animate-pulse' : 'bg-gray-400'"></div>
+            <h3 class="text-sm font-semibold text-gray-900 dark:text-white">Live Activity</h3>
+            <span class="text-xs text-gray-400">{{ store.liveFeedEvents.length }} events</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="flex gap-1">
+              <button @click="feedFilter = 'all'" class="px-2 py-0.5 text-[10px] rounded-full" :class="feedFilter === 'all' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400' : 'text-gray-400 hover:text-gray-600'">All</button>
+              <button @click="feedFilter = 'finalized'" class="px-2 py-0.5 text-[10px] rounded-full" :class="feedFilter === 'finalized' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'text-gray-400 hover:text-gray-600'">Trades</button>
+              <button @click="feedFilter = 'blocked'" class="px-2 py-0.5 text-[10px] rounded-full" :class="feedFilter === 'blocked' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 'text-gray-400 hover:text-gray-600'">Blocks</button>
+            </div>
+            <button @click="showLiveFeed = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+              <XMarkIcon class="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+          <div v-if="filteredFeedEvents.length === 0" class="p-8 text-center text-xs text-gray-400">
+            <SignalIcon class="h-8 w-8 mx-auto mb-2 opacity-50" />
+            <p>No events yet. Events will appear here in real-time as webhooks fire.</p>
+          </div>
+          <div v-for="(evt, i) in filteredFeedEvents" :key="i" class="px-4 py-3 border-b border-gray-100 dark:border-gray-700/50">
+            <div class="flex items-start gap-3">
+              <div class="mt-0.5 flex-shrink-0 w-2 h-2 rounded-full"
+                :class="{
+                  'bg-green-500': evt.type === 'finalized' && evt.pnl > 0,
+                  'bg-red-500': evt.type === 'finalized' && evt.pnl <= 0,
+                  'bg-blue-500': evt.type === 'approved',
+                  'bg-amber-500': evt.type === 'blocked',
+                }"
+              ></div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-xs font-semibold" :class="{
+                      'text-green-600': evt.type === 'approved',
+                      'text-red-500': evt.type === 'blocked',
+                      'text-gray-900 dark:text-white': evt.type === 'finalized',
+                    }">
+                      {{ evt.type === 'finalized' ? 'CLOSED' : evt.type === 'approved' ? 'TRADED' : 'BLOCKED' }}
+                    </span>
+                    <span class="text-xs font-bold text-gray-900 dark:text-white">{{ evt.symbol }}</span>
+                    <span v-if="evt.action" class="text-[10px] text-gray-400">{{ evt.action }}</span>
+                  </div>
+                  <span class="text-[10px] text-gray-400">{{ formatTime(evt.timestamp) }}</span>
+                </div>
+                <div class="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
+                  <span v-if="evt.conviction != null" class="text-gray-500">Conv: {{ evt.conviction }}</span>
+                  <span v-if="evt.strategy" class="text-gray-500">{{ evt.strategy }}</span>
+                  <span v-if="evt.pnl != null" class="font-semibold" :class="evt.pnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ evt.pnl.toFixed(2) }}</span>
+                  <span v-if="evt.rMultiple != null" class="text-gray-500">{{ evt.rMultiple > 0 ? '+' : '' }}{{ evt.rMultiple.toFixed(2) }}R</span>
+                  <span v-if="evt.gate" class="text-amber-600">{{ evt.gate }}</span>
+                </div>
+                <p v-if="evt.reason" class="mt-1 text-[10px] text-gray-400 line-clamp-2">{{ evt.reason }}</p>
+                <div v-if="evt.rationale" class="mt-1 space-y-0.5">
+                  <p v-for="(r, ri) in evt.rationale.slice(0, 3)" :key="ri" class="text-[10px] text-gray-400">{{ r }}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useSimulationStore } from '@/stores/simulation'
+import { marked } from 'marked'
 import {
   ArrowPathIcon,
   AdjustmentsHorizontalIcon,
@@ -959,6 +1197,9 @@ import {
   WrenchScrewdriverIcon,
   BeakerIcon,
   ShieldCheckIcon,
+  SparklesIcon,
+  XMarkIcon,
+  SignalIcon,
 } from '@heroicons/vue/24/outline'
 
 const store = useSimulationStore()
@@ -966,6 +1207,10 @@ const store = useSimulationStore()
 const activeTab = ref('calibration')
 const lookbackDays = ref(90)
 const bannerDismissed = ref(false)
+const autoInsightDismissed = ref(false)
+const showLiveFeed = ref(false)
+const feedFilter = ref('all')
+const insightFollowup = ref('')
 
 const tabs = [
   { id: 'calibration',  label: 'Calibration' },
@@ -973,8 +1218,61 @@ const tabs = [
   { id: 'guards',       label: 'Guard Effectiveness' },
   { id: 'regime',       label: 'Regime Edge' },
   { id: 'temporal',     label: 'Temporal Edge' },
+  { id: 'aiInsights',   label: 'AI Insights', badge: 'New' },
   { id: 'backtest',     label: 'Backtest', badge: 'Soon' },
 ]
+
+const filteredFeedEvents = computed(() => {
+  if (feedFilter.value === 'all') return store.liveFeedEvents
+  return store.liveFeedEvents.filter(e => e.type === feedFilter.value)
+})
+
+const renderedInsights = computed(() => {
+  const text = store.aiInsightsStreamText || store.aiInsights?.analysis || ''
+  if (!text) return ''
+  try {
+    return marked.parse(text)
+  } catch {
+    return text.replace(/\n/g, '<br>')
+  }
+})
+
+async function handleStreamInsights() {
+  try {
+    await store.streamAIInsights(lookbackDays.value)
+  } catch (err) {
+    console.error('[AI_INSIGHTS] Stream failed:', err)
+  }
+}
+
+async function handleInsightFollowup() {
+  if (!insightFollowup.value.trim()) return
+  const question = insightFollowup.value.trim()
+  insightFollowup.value = ''
+  store.aiInsightsStreamText.value += `\n\n---\n\n**You asked:** ${question}\n\n`
+  // For now, re-run insights with the question appended to context
+  // Full conversational follow-up can be added via AI sessions
+}
+
+function viewAutoInsight() {
+  autoInsightDismissed.value = true
+  store.markAutoInsightRead()
+  activeTab.value = 'aiInsights'
+  if (store.autoInsight?.analysis) {
+    store.aiInsightsStreamText = store.autoInsight.analysis
+  }
+}
+
+function dismissAutoInsight() {
+  autoInsightDismissed.value = true
+  store.markAutoInsightRead()
+}
+
+function formatTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
 
 const heatmapHours = computed(() => {
   if (!store.temporalEdgeData?.heatmap) return []
@@ -1070,6 +1368,7 @@ async function loadTabData(tabId) {
     } else if (tabId === 'temporal' && !store.temporalEdgeData) {
       await store.fetchTemporalEdge(days)
     }
+    // aiInsights tab doesn't auto-load — user clicks "Generate"
   } catch {
     // Error is captured in store
   }
@@ -1146,6 +1445,58 @@ onMounted(async () => {
     store.fetchCalibrationStatus(),
     store.fetchActiveWeights(),
     store.fetchCalibrationLog(),
+    store.fetchLiveContext(),
+    store.fetchAutoInsight(),
   ])
+
+  store.connectLiveFeed()
+
+  // Refresh live context periodically
+  _contextInterval = setInterval(() => {
+    store.fetchLiveContext()
+  }, 60000)
+})
+
+let _contextInterval = null
+
+onUnmounted(() => {
+  store.disconnectLiveFeed()
+  if (_contextInterval) clearInterval(_contextInterval)
 })
 </script>
+
+<style scoped>
+.slide-right-enter-active,
+.slide-right-leave-active {
+  transition: transform 0.3s ease;
+}
+.slide-right-enter-from,
+.slide-right-leave-to {
+  transform: translateX(100%);
+}
+
+.ai-insights-content :deep(h1) {
+  @apply text-lg font-bold text-gray-900 dark:text-white mt-6 mb-3 first:mt-0;
+}
+.ai-insights-content :deep(h2) {
+  @apply text-base font-semibold text-gray-800 dark:text-gray-200 mt-5 mb-2;
+}
+.ai-insights-content :deep(h3) {
+  @apply text-sm font-semibold text-gray-700 dark:text-gray-300 mt-4 mb-2;
+}
+.ai-insights-content :deep(ul) {
+  @apply list-disc pl-5 space-y-1 text-sm text-gray-700 dark:text-gray-300;
+}
+.ai-insights-content :deep(ol) {
+  @apply list-decimal pl-5 space-y-2 text-sm text-gray-700 dark:text-gray-300;
+}
+.ai-insights-content :deep(strong) {
+  @apply font-semibold text-gray-900 dark:text-white;
+}
+.ai-insights-content :deep(p) {
+  @apply text-sm text-gray-700 dark:text-gray-300 mb-2;
+}
+.ai-insights-content :deep(hr) {
+  @apply border-gray-200 dark:border-gray-700 my-4;
+}
+</style>

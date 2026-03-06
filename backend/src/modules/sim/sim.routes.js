@@ -79,4 +79,18 @@ router.get('/adaptive/calibration/log', adaptiveIntelligence.getCalibrationLog);
 router.get('/adaptive/signal-quality', adaptiveIntelligence.getSignalQuality);
 router.get('/adaptive/guard-effectiveness', adaptiveIntelligence.getGuardEffectiveness);
 
+// AI Insights (LLM interpretation of adaptive data)
+router.get('/adaptive/ai-insights', adaptiveIntelligence.getAIInsights);
+router.get('/adaptive/ai-insights/stream', adaptiveIntelligence.streamAIInsights);
+
+// Live market context
+router.get('/adaptive/live-context', adaptiveIntelligence.getLiveContext);
+
+// Auto-insights (triggered by trade count)
+router.get('/adaptive/auto-insight', adaptiveIntelligence.getAutoInsight);
+router.post('/adaptive/auto-insight/read', adaptiveIntelligence.markAutoInsightRead);
+
+// SSE event stream for real-time updates
+router.get('/stream', adaptiveIntelligence.streamEvents);
+
 module.exports = router;

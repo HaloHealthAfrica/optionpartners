@@ -417,7 +417,8 @@ const baseNavigation = [
         name: 'Adaptive Intelligence',
         to: '/sim/adaptive',
         route: 'sim-adaptive',
-        description: 'Feedback loop: conviction calibration, regime edge, temporal patterns'
+        description: 'Feedback loop: conviction calibration, regime edge, temporal patterns',
+        notification: 'adaptiveInsightUnread'
       }
     ]
   },

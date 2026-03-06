@@ -553,6 +553,172 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  // AI Insights (LLM interpretation of adaptive data)
+  const aiInsights = ref(null)
+  const aiInsightsLoading = ref(false)
+  const aiInsightsStreaming = ref(false)
+  const aiInsightsStreamText = ref('')
+
+  // Live market context
+  const liveContext = ref(null)
+
+  // Auto-insight notifications
+  const autoInsight = ref(null)
+  const autoInsightUnread = ref(0)
+
+  // SSE live feed events
+  const liveFeedEvents = ref([])
+  const liveFeedConnected = ref(false)
+  let _eventSource = null
+
+  async function fetchAIInsights(lookbackDays = 90) {
+    try {
+      aiInsightsLoading.value = true
+      const { data } = await api.get('/sim/adaptive/ai-insights', { params: { lookbackDays } })
+      aiInsights.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    } finally {
+      aiInsightsLoading.value = false
+    }
+  }
+
+  function streamAIInsights(lookbackDays = 90) {
+    aiInsightsStreaming.value = true
+    aiInsightsStreamText.value = ''
+    aiInsights.value = null
+
+    const token = localStorage.getItem('token')
+    const baseUrl = api.defaults.baseURL || ''
+    const url = `${baseUrl}/sim/adaptive/ai-insights/stream?lookbackDays=${lookbackDays}&token=${encodeURIComponent(token)}`
+
+    return new Promise((resolve, reject) => {
+      const evtSource = new EventSource(url)
+
+      evtSource.onmessage = (event) => {
+        try {
+          const parsed = JSON.parse(event.data)
+          if (parsed.type === 'start') {
+            aiInsights.value = { dataSnapshot: parsed.dataSnapshot }
+          } else if (parsed.chunk) {
+            aiInsightsStreamText.value += parsed.chunk
+          } else if (parsed.type === 'done') {
+            aiInsightsStreaming.value = false
+            evtSource.close()
+            resolve(aiInsightsStreamText.value)
+          } else if (parsed.type === 'error') {
+            aiInsightsStreaming.value = false
+            error.value = parsed.error
+            evtSource.close()
+            reject(new Error(parsed.error))
+          }
+        } catch {}
+      }
+
+      evtSource.onerror = () => {
+        aiInsightsStreaming.value = false
+        evtSource.close()
+        reject(new Error('Stream connection failed'))
+      }
+    })
+  }
+
+  async function fetchLiveContext() {
+    try {
+      const { data } = await api.get('/sim/adaptive/live-context')
+      liveContext.value = data
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Live context fetch failed:', err)
+    }
+  }
+
+  async function fetchAutoInsight() {
+    try {
+      const { data } = await api.get('/sim/adaptive/auto-insight')
+      autoInsight.value = data.insight
+      autoInsightUnread.value = data.unreadCount
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Auto insight fetch failed:', err)
+    }
+  }
+
+  async function markAutoInsightRead() {
+    try {
+      await api.post('/sim/adaptive/auto-insight/read')
+      autoInsightUnread.value = 0
+    } catch (err) {
+      console.error('[SIM_STORE] Mark auto insight read failed:', err)
+    }
+  }
+
+  function connectLiveFeed() {
+    if (_eventSource) return
+
+    const token = localStorage.getItem('token')
+    const baseUrl = api.defaults.baseURL || ''
+    const url = `${baseUrl}/sim/stream?token=${encodeURIComponent(token)}`
+
+    _eventSource = new EventSource(url)
+    liveFeedConnected.value = false
+
+    _eventSource.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data)
+        if (parsed.type === 'connected') {
+          liveFeedConnected.value = true
+        }
+      } catch {}
+    }
+
+    _eventSource.addEventListener('trade:finalized', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        liveFeedEvents.value.unshift({ type: 'finalized', ...data })
+        if (liveFeedEvents.value.length > 100) liveFeedEvents.value.pop()
+      } catch {}
+    })
+
+    _eventSource.addEventListener('trade:approved', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        liveFeedEvents.value.unshift({ type: 'approved', ...data })
+        if (liveFeedEvents.value.length > 100) liveFeedEvents.value.pop()
+      } catch {}
+    })
+
+    _eventSource.addEventListener('trade:blocked', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        liveFeedEvents.value.unshift({ type: 'blocked', ...data })
+        if (liveFeedEvents.value.length > 100) liveFeedEvents.value.pop()
+      } catch {}
+    })
+
+    _eventSource.addEventListener('insight:auto', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        autoInsightUnread.value++
+        autoInsight.value = data
+      } catch {}
+    })
+
+    _eventSource.onerror = () => {
+      liveFeedConnected.value = false
+    }
+  }
+
+  function disconnectLiveFeed() {
+    if (_eventSource) {
+      _eventSource.close()
+      _eventSource = null
+      liveFeedConnected.value = false
+    }
+  }
+
   return {
     accountState, positions, orders, trades, equityCurve,
     strategyBreakdown, dteBreakdown, webhookEvents, simRuns,
@@ -578,5 +744,12 @@ export const useSimulationStore = defineStore('simulation', () => {
     fetchCalibrationStatus, fetchActiveWeights, applyCalibration,
     revertCalibration, toggleAutoCalibration, fetchCalibrationLog,
     fetchSignalQuality, fetchGuardEffectiveness,
+    // AI Insights + Live Context + Auto-Insights + Live Feed
+    aiInsights, aiInsightsLoading, aiInsightsStreaming, aiInsightsStreamText,
+    liveContext, autoInsight, autoInsightUnread,
+    liveFeedEvents, liveFeedConnected,
+    fetchAIInsights, streamAIInsights, fetchLiveContext,
+    fetchAutoInsight, markAutoInsightRead,
+    connectLiveFeed, disconnectLiveFeed,
   }
 })

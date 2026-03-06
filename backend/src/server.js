@@ -61,6 +61,7 @@ const webhookRoutes = require('./modules/webhooks/webhook.routes');
 const simRoutes = require('./modules/sim/sim.routes');
 const webhookProcessor = require('./modules/sim/webhook-processor');
 const exitMonitor = require('./modules/sim/exit-monitor');
+const trendDataScheduler = require('./modules/sim/trend-data-scheduler');
 const BillingService = require('./services/billingService');
 const priceMonitoringService = require('./services/priceMonitoringService');
 const backupScheduler = require('./services/backupScheduler.service');
@@ -655,6 +656,13 @@ async function startServer() {
         gmsTimer = setInterval(gmsRefreshTick, startInterval);
         console.log(`✓ Global market state poller started (session=${startSession}, interval=${startInterval / 1000}s)`);
       }
+
+      // Start trend data scheduler (daily reset + active EMA-based polling)
+      if (process.env.ENABLE_TREND_SCHEDULER !== 'false') {
+        const trendInterval = parseInt(process.env.TREND_POLL_INTERVAL_MS || '600000', 10);
+        trendDataScheduler.start(trendInterval);
+        console.log(`✓ Trend data scheduler started (interval=${trendInterval / 1000}s)`);
+      }
     } else {
       console.log('Webhook processor disabled (ENABLE_WEBHOOK_PROCESSOR=false)');
     }
@@ -681,6 +689,7 @@ process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully...');
   webhookProcessor.stop();
   exitMonitor.stop();
+  trendDataScheduler.stop();
   await priceMonitoringService.stop();
   OptionsScheduler.stop();
   brokerSyncScheduler.stop();
@@ -701,6 +710,7 @@ process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully...');
   webhookProcessor.stop();
   exitMonitor.stop();
+  trendDataScheduler.stop();
   await priceMonitoringService.stop();
   OptionsScheduler.stop();
   brokerSyncScheduler.stop();

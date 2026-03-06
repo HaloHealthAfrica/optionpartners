@@ -19,6 +19,7 @@ const riskScaler = require('./risk-scaler');
 const expectedMoveFilter = require('./expected-move-filter');
 const db = require('../../config/database');
 const globalMarketState = require('./global-market-state.service');
+const simEventBus = require('./sim-event-bus');
 const logger = require('../../utils/logger');
 const { assertSimMode } = require('../../config/tradingMode');
 
@@ -58,7 +59,7 @@ class DecisionRouter {
 
     const indicatorSource = detectIndicatorSource(webhookPayload);
     const isKnownIndicator = indicatorSource !== 'UNKNOWN';
-    const symbol = (webhookPayload.ticker || webhookPayload.symbol || '').toUpperCase();
+    const symbol = (webhookPayload.ticker || webhookPayload.symbol || webhookPayload.meta?.ticker || webhookPayload.meta?.symbol || '').toUpperCase();
 
     Sentry.addBreadcrumb({
       category: 'decision-router',
@@ -312,6 +313,16 @@ class DecisionRouter {
       if (tradeDecision.action === 'BLOCK') {
         const reason = tradeDecision.rationale.join('; ');
         await this._logRejection(userId, webhookEventId, signal, 'TRADE_ENGINE', reason);
+
+        simEventBus.sendToUser(userId, 'trade:blocked', {
+          symbol: signal.symbol,
+          strategy: signal.strategy,
+          gate: 'TRADE_ENGINE',
+          reason,
+          conviction: tradeDecision.conviction_score,
+          timestamp: new Date().toISOString(),
+        });
+
         return {
           approved: false,
           reason,
@@ -416,7 +427,7 @@ class DecisionRouter {
       const side = isEntry ? 'BUY' : (signal.action === 'BUY' ? 'BUY' : 'SELL');
       const baseQty = signal.quantity || 1;
 
-      return {
+      const approvedResult = {
         approved: true,
         signal,
         indicatorSource,
@@ -444,6 +455,19 @@ class DecisionRouter {
           webhookEventId,
         },
       };
+
+      simEventBus.sendToUser(userId, 'trade:approved', {
+        symbol: signal.symbol,
+        action: tradeDecision.action,
+        strategy: signal.strategy,
+        conviction: tradeDecision.conviction_score,
+        contractType: resolvedContractType,
+        rationale: tradeDecision.rationale?.slice(0, 5),
+        timestamp: new Date().toISOString(),
+      });
+      simEventBus.emit('trade:approved', { userId, decision: approvedResult });
+
+      return approvedResult;
     }
 
     // ── Handle CLOSE action ──

@@ -217,6 +217,127 @@ async function getGuardEffectiveness(req, res) {
   }
 }
 
+// AI Insights — LLM interpretation of adaptive intelligence data
+const aiInsightsService = require('./ai-insights.service');
+const autoInsightService = require('./auto-insight.service');
+const liveContextService = require('./live-context.service');
+const simEventBus = require('../sim-event-bus');
+const AIProvider = require('../../../utils/aiProvider');
+const AICreditService = require('../../../services/aiCreditService');
+
+async function getAIInsights(req, res) {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || '90', 10);
+    const result = await aiInsightsService.generateInsights(req.user.id, { lookbackDays });
+    res.json(result);
+  } catch (err) {
+    logger.error(`AI insights failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+
+    if (err.message.includes('Insufficient credits')) {
+      return res.status(402).json({ error: err.message });
+    }
+    if (err.message.includes('No completed trades')) {
+      return res.status(404).json({ error: err.message });
+    }
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function streamAIInsights(req, res) {
+  try {
+    const lookbackDays = parseInt(req.query.lookbackDays || '90', 10);
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    const { prompt, aiSettings, dataSnapshot } = await aiInsightsService.prepareInsightsStream(
+      req.user.id, { lookbackDays }
+    );
+
+    res.write(`data: ${JSON.stringify({ type: 'start', dataSnapshot })}\n\n`);
+
+    const fullText = await AIProvider.generateStreamingResponse(prompt, aiSettings, res);
+
+    await AICreditService.useCredits(req.user.id, AICreditService.getCost('NEW_SESSION'));
+
+    res.write(`data: ${JSON.stringify({ type: 'done', fullText: fullText.substring(0, 100) + '...' })}\n\n`);
+    res.end();
+  } catch (err) {
+    logger.error(`Stream AI insights failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+
+    if (!res.headersSent) {
+      if (err.message.includes('Insufficient credits')) {
+        return res.status(402).json({ error: err.message });
+      }
+      return res.status(500).json({ error: err.message });
+    }
+    res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+    res.end();
+  }
+}
+
+async function getLiveContext(req, res) {
+  try {
+    const ctx = await liveContextService.buildContext(req.user.id);
+    res.json(ctx);
+  } catch (err) {
+    logger.error(`Live context failed: ${err.message}`, 'adaptive-intelligence');
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function getAutoInsight(req, res) {
+  try {
+    const insight = await autoInsightService.getLatestInsight(req.user.id);
+    const unread = await autoInsightService.getUnreadCount(req.user.id);
+    res.json({ insight, unreadCount: unread });
+  } catch (err) {
+    logger.error(`Auto insight fetch failed: ${err.message}`, 'adaptive-intelligence');
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function markAutoInsightRead(req, res) {
+  try {
+    await autoInsightService.markRead(req.user.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+}
+
+function streamEvents(req, res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
+
+  const clientId = simEventBus.addClient(req.user.id, res);
+
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(`: heartbeat ${Date.now()}\n\n`);
+    } catch {
+      clearInterval(heartbeat);
+    }
+  }, 30000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    simEventBus.removeClient(req.user.id, clientId);
+  });
+}
+
 module.exports = {
   getCalibration,
   getRegimeEdge,
@@ -231,4 +352,10 @@ module.exports = {
   getCalibrationLog,
   getSignalQuality,
   getGuardEffectiveness,
+  getAIInsights,
+  streamAIInsights,
+  getLiveContext,
+  getAutoInsight,
+  markAutoInsightRead,
+  streamEvents,
 };

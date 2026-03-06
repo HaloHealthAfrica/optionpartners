@@ -3,7 +3,8 @@ const User = require('../models/User');
 
 const authenticate = async (req, res, next) => {
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
+    // Support token from Authorization header or query param (for SSE/EventSource)
+    const token = req.header('Authorization')?.replace('Bearer ', '') || req.query.token;
 
     if (!token) {
       throw new Error();

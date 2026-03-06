@@ -22,6 +22,11 @@ function _isV2(payload) {
   return PLAN_EVENT_SET.has(event) && payload.setup && typeof payload.setup === 'object';
 }
 
+function _isAdaptive(payload) {
+  const metaSystem = payload.meta?.system || '';
+  return metaSystem.includes('Adaptive Strat');
+}
+
 /**
  * Derive confidence from pattern quality when no explicit score is provided.
  * Maps the Strat methodology hierarchy to confidence values.
@@ -38,6 +43,8 @@ function _deriveV2Confidence(payload) {
 }
 
 function normalize(payload) {
+  if (_isAdaptive(payload)) return _normalizeAdaptive(payload);
+
   const v2 = _isV2(payload);
 
   const symbol = v2
@@ -181,8 +188,71 @@ function normalize(payload) {
   };
 }
 
+/**
+ * Normalize Adaptive Strat v6 payloads.
+ * These use meta.ticker, signal.pattern for setup, strat_details for FTFC,
+ * and scores.intraday/swing for confidence.
+ */
+function _normalizeAdaptive(payload) {
+  const symbol = (payload.meta?.ticker || '').toUpperCase();
+  const timestamp = payload.meta?.timestamp || null;
+
+  const pattern = payload.signal?.pattern || 'STRAT';
+  const patternLower = pattern.toLowerCase();
+  const direction = normalizeDirection(
+    patternLower.includes('bull') ? 'long'
+    : patternLower.includes('bear') ? 'short'
+    : null
+  );
+
+  const entry = parseFloat(payload.signal?.price) || null;
+  const target = parseFloat(payload.signal?.target) || null;
+  const targets = target ? [target] : [];
+  const stop = null;
+
+  const scores = payload.scores || {};
+  const bestScore = Math.max(scores.intraday || 0, scores.swing || 0, scores.leaps || 0);
+  const confidence = bestScore > 0 ? Math.min(100, bestScore) : null;
+  const action = direction === 'long' ? 'BUY' : direction === 'short' ? 'SELL' : null;
+
+  const indicatorMeta = {
+    engine: payload.meta?.system || 'Adaptive Strat',
+    pattern,
+    direction,
+    strat_details: payload.strat_details || null,
+    ftfc: payload.strat_details?.ftfc_summary || null,
+    daily_candle: payload.strat_details?.daily_candle || null,
+    scores,
+    liquidity_map: payload.liquidity_map || null,
+    orb_status: payload.signal?.orb_status || null,
+  };
+
+  return {
+    source: 'STRAT',
+    symbol,
+    direction,
+    action,
+    timeframe: null,
+    timestamp,
+    entry,
+    stop,
+    targets,
+    score: bestScore || null,
+    confidence,
+    strategy: `STRAT_ADAPTIVE_${pattern.replace(/\s+/g, '_').toUpperCase()}`,
+    indicatorMeta,
+  };
+}
+
 function validate(payload) {
   const errors = [];
+
+  if (_isAdaptive(payload)) {
+    if (!payload.meta?.ticker) errors.push('Missing meta.ticker');
+    if (!payload.signal || typeof payload.signal !== 'object') errors.push('Missing signal object');
+    return { valid: errors.length === 0, errors };
+  }
+
   const v2 = _isV2(payload);
 
   if (v2) {
@@ -213,4 +283,4 @@ function validate(payload) {
   return { valid: errors.length === 0, errors };
 }
 
-module.exports = { normalize, validate, _isV2 };
+module.exports = { normalize, validate, _isV2, _isAdaptive };

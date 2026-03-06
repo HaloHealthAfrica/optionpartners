@@ -273,9 +273,21 @@ class TradeDecisionEngine {
       }
     }
 
-    if (state.bid_ask_spread_pct != null && state.bid_ask_spread_pct > 0.10) {
-      rationale.push(`FAIL_CLOSED: Bid-ask spread ${(state.bid_ask_spread_pct * 100).toFixed(1)}% exceeds 10% max`);
-      return this._blocked(ticker, 0, rationale);
+    // Spread check: configurable threshold, skip when chain data is stale
+    const maxSpread = parseFloat(process.env.SIM_MAX_SPREAD_PCT || '0.20');
+    if (state.bid_ask_spread_pct != null && state.bid_ask_spread_pct > maxSpread) {
+      const chainAge = globalState?.chain_updated_at
+        ? (Date.now() - new Date(globalState.chain_updated_at).getTime()) / 1000
+        : null;
+      if (chainAge != null && chainAge > 600) {
+        rationale.push(
+          `WARN: Bid-ask spread ${(state.bid_ask_spread_pct * 100).toFixed(1)}% exceeds ${(maxSpread * 100).toFixed(0)}% max ` +
+          `but chain data is stale (${Math.round(chainAge)}s old) — skipping spread gate`
+        );
+      } else {
+        rationale.push(`FAIL_CLOSED: Bid-ask spread ${(state.bid_ask_spread_pct * 100).toFixed(1)}% exceeds ${(maxSpread * 100).toFixed(0)}% max`);
+        return this._blocked(ticker, 0, rationale);
+      }
     }
 
     if (accountState) {

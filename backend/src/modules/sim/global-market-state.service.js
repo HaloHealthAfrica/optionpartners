@@ -150,8 +150,31 @@ class GlobalMarketStateService {
       }
     }
 
+    const maxRetries = parseInt(process.env.GMS_CHAIN_MAX_RETRIES || '3', 10);
+    let chainData = null;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        chainData = await dataServiceProxy.getOptionsChain(sym);
+        if (chainData) break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxRetries) {
+          const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+          logger.warn(`[GMS] ${sym}: chain attempt ${attempt}/${maxRetries} failed (${err.message}), retrying in ${delayMs}ms`, 'global-market-state');
+          await new Promise(r => setTimeout(r, delayMs));
+        }
+      }
+    }
+
+    if (!chainData && lastErr) {
+      await this._recordFailure(sym, 'chain', lastErr.message);
+      logger.error(`[GMS] ${sym}: chain refresh failed after ${maxRetries} attempts: ${lastErr.message}`, 'global-market-state');
+      return null;
+    }
+
     try {
-      const chainData = await dataServiceProxy.getOptionsChain(sym);
       const contracts = chainData?.data?.contracts || [];
 
       if (contracts.length === 0) {

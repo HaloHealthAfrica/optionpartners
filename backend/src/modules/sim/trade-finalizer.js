@@ -8,6 +8,8 @@ const strategyScorecardService = require('./strategy-scorecard.service');
 const adaptiveGuards = require('./adaptive-guards');
 const calibrationStore = require('./adaptive-intelligence/calibration-store.service');
 const convictionCalibrator = require('./adaptive-intelligence/conviction-calibrator.service');
+const autoInsightService = require('./adaptive-intelligence/auto-insight.service');
+const simEventBus = require('./sim-event-bus');
 const Sentry = require('@sentry/node');
 
 const CONTRACT_MULTIPLIER = 100;
@@ -97,6 +99,23 @@ class TradeFinalizerService {
 
     const trade = result.rows[0];
 
+    // Emit real-time event for SSE clients
+    simEventBus.sendToUser(userId, 'trade:finalized', {
+      id: trade.id,
+      symbol: trade.symbol,
+      contractType: trade.contract_type,
+      strategy: trade.strategy,
+      side: trade.side,
+      pnl: parseFloat(trade.pnl),
+      pnlPercent: parseFloat(trade.pnl_percent),
+      entryPrice: parseFloat(trade.entry_price),
+      exitPrice: parseFloat(trade.exit_price),
+      exitReason: trade.exit_reason,
+      rMultiple: trade.r_multiple ? parseFloat(trade.r_multiple) : null,
+      timestamp: new Date().toISOString(),
+    });
+    simEventBus.emit('trade:finalized', { userId, trade });
+
     // Take an equity snapshot after each trade closes
     await ledgerService.takeEquitySnapshot(userId);
 
@@ -122,6 +141,11 @@ class TradeFinalizerService {
           logger.info(`[AUTO_CALIBRATION] Applied after ${calStatus.count} trades for user ${userId}`, 'sim-finalizer');
         }
       }
+
+      // Check for auto-insight trigger (runs in background, non-blocking)
+      autoInsightService.checkAndGenerate(userId, calStatus.count, trade).catch(err => {
+        logger.error(`Auto-insight check failed: ${err.message}`, 'sim-finalizer');
+      });
     } catch (err) {
       logger.error(`Calibration counter update failed: ${err.message}`, 'sim-finalizer');
       Sentry.captureException(err, { tags: { module: 'sim-finalizer' } });

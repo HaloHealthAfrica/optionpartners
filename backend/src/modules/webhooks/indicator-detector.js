@@ -44,9 +44,9 @@ function detectIndicatorSource(payload) {
   // STRAT via explicit journal.engine (definitive — this IS a STRAT-only webhook)
   if (journalEngine === 'STRAT_V6_FULL' || journalEngine === 'STRAT') return 'STRAT';
 
-  // Strat Plan Engine v2 — structured plan lifecycle webhooks
+  // Strat Plan Engine v2 + Adaptive Strat v6 — structured plan lifecycle webhooks
   const metaSystem = (payload.meta?.system || '');
-  if (metaSystem.includes('Strat Plan Engine')) return 'STRAT';
+  if (metaSystem.includes('Strat Plan Engine') || metaSystem.includes('Adaptive Strat')) return 'STRAT';
 
   const planEvent = (payload.event || '').toUpperCase();
   if (STRAT_PLAN_EVENTS.has(planEvent) && payload.setup && typeof payload.setup === 'object') return 'STRAT';
