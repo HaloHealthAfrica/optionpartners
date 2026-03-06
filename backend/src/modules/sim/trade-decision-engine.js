@@ -238,12 +238,18 @@ class TradeDecisionEngine {
       rationale.push('WARN: No chain data — proceeding without options liquidity validation');
     }
 
-    // Chain staleness check
+    // Chain staleness check — use longer TTL outside RTH since options
+    // markets are closed and previous-session chain data is still valid.
     if (chainUpdatedAt) {
       const chainAgeMs = Date.now() - new Date(chainUpdatedAt).getTime();
-      if (chainAgeMs > STATE_TTL_MS) {
+      const etMins = getETMinutes();
+      const isRTH = etMins >= 570 && etMins <= 960; // 9:30-16:00 ET
+      const chainTtlMs = isRTH
+        ? STATE_TTL_MS
+        : parseInt(process.env.SIM_CHAIN_TTL_OFF_HOURS_MS || '64800000', 10); // 18h default
+      if (chainAgeMs > chainTtlMs) {
         if (requireChain) {
-          rationale.push(`FAIL_CLOSED: Chain data stale (${Math.round(chainAgeMs / 1000)}s old, max ${STATE_TTL_MS / 1000}s)`);
+          rationale.push(`FAIL_CLOSED: Chain data stale (${Math.round(chainAgeMs / 1000)}s old, max ${chainTtlMs / 1000}s)`);
           return this._blocked(ticker, 0, rationale);
         }
         rationale.push(`WARN: Chain data stale (${Math.round(chainAgeMs / 1000)}s) — proceeding anyway`);

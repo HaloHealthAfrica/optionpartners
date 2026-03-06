@@ -654,6 +654,8 @@ async function startServer() {
           : (startSession === 'ETH' ? GMS_ETH_INTERVAL : GMS_OVERNIGHT_INTERVAL);
         currentGmsSession = startSession;
         gmsTimer = setInterval(gmsRefreshTick, startInterval);
+        // Immediate first tick so chain data is fresh right after startup
+        setImmediate(() => gmsRefreshTick().catch(() => {}));
         console.log(`✓ Global market state poller started (session=${startSession}, interval=${startInterval / 1000}s)`);
       }
 
