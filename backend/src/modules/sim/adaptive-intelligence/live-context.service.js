@@ -61,7 +61,7 @@ class LiveContextService {
     if (ctx.trends && ctx.trends.length > 0) {
       parts.push('- Symbol Trends:');
       for (const t of ctx.trends.slice(0, 10)) {
-        parts.push(`  ${t.symbol}: trend=${t.trend || 'N/A'}, ema9=${t.emaFast || '-'}, ema21=${t.emaSlow || '-'}, last_price=${t.lastPrice || '-'}`);
+        parts.push(`  ${t.symbol}: macro=${t.trend || 'N/A'}, local=${t.localBias || 'N/A'}, regime=${t.regime || 'N/A'}, last_price=${t.lastPrice || '-'}, alignment=${t.alignmentScore || '-'}`);
       }
     }
 
@@ -69,9 +69,10 @@ class LiveContextService {
       parts.push('- Active Symbol States:');
       for (const s of ctx.symbolStates.slice(0, 10)) {
         const signals = [];
-        if (s.latestDirection) signals.push(`dir=${s.latestDirection}`);
-        if (s.latestStrategy) signals.push(`strat=${s.latestStrategy}`);
-        if (s.signalCount) signals.push(`signals=${s.signalCount}`);
+        if (s.latestDirection) signals.push(`bias=${s.latestDirection}`);
+        if (s.latestStrategy) signals.push(`regime=${s.latestStrategy}`);
+        if (s.localBias) signals.push(`local=${s.localBias}`);
+        if (s.ivPercentile != null) signals.push(`iv_pctl=${s.ivPercentile}`);
         parts.push(`  ${s.symbol}: ${signals.join(', ') || 'idle'}`);
       }
     }
@@ -82,20 +83,25 @@ class LiveContextService {
   async _getLatestRegime(userId) {
     try {
       const result = await db.query(
-        `SELECT regime, vix, hv_percentile, iv_rank, created_at
-         FROM volatility_snapshots
-         WHERE user_id = $1
-         ORDER BY created_at DESC LIMIT 1`,
-        [userId]
+        `SELECT vs.regime, vs.captured_at,
+                iv.iv_rank, iv.iv_percentile, iv.current_iv
+         FROM volatility_snapshots vs
+         LEFT JOIN LATERAL (
+           SELECT iv_rank, iv_percentile, current_iv
+           FROM iv_snapshots
+           WHERE symbol = vs.symbol
+           ORDER BY captured_at DESC LIMIT 1
+         ) iv ON true
+         ORDER BY vs.captured_at DESC LIMIT 1`
       );
       if (result.rows.length === 0) return null;
       const row = result.rows[0];
       return {
         regime: row.regime,
-        vix: row.vix ? parseFloat(row.vix) : null,
-        hvPercentile: row.hv_percentile ? parseFloat(row.hv_percentile) : null,
+        vix: row.current_iv ? parseFloat(row.current_iv) : null,
+        hvPercentile: null,
         ivRank: row.iv_rank ? parseFloat(row.iv_rank) : null,
-        updatedAt: row.created_at,
+        updatedAt: row.captured_at,
       };
     } catch (err) {
       logger.error(`LiveContext: regime fetch failed: ${err.message}`, 'live-context');
@@ -106,17 +112,25 @@ class LiveContextService {
   async _getLatestGex() {
     try {
       const result = await db.query(
-        `SELECT net_gex, flip_price, gex_environment, created_at
+        `SELECT net_gex, flip_price, total_gex, captured_at
          FROM gex_snapshots
-         ORDER BY created_at DESC LIMIT 1`
+         ORDER BY captured_at DESC LIMIT 1`
       );
       if (result.rows.length === 0) return null;
       const row = result.rows[0];
+      const netGex = row.net_gex ? parseFloat(row.net_gex) : null;
+      let environment = 'UNKNOWN';
+      if (netGex != null) {
+        if (netGex > 500_000_000) environment = 'STRONG_POSITIVE';
+        else if (netGex > 0) environment = 'POSITIVE';
+        else if (netGex > -500_000_000) environment = 'NEGATIVE';
+        else environment = 'STRONG_NEGATIVE';
+      }
       return {
-        netGex: row.net_gex ? parseFloat(row.net_gex) : null,
+        netGex,
         flipPrice: row.flip_price ? parseFloat(row.flip_price) : null,
-        environment: row.gex_environment,
-        updatedAt: row.created_at,
+        environment,
+        updatedAt: row.captured_at,
       };
     } catch (err) {
       logger.error(`LiveContext: GEX fetch failed: ${err.message}`, 'live-context');
@@ -127,10 +141,10 @@ class LiveContextService {
   async _getLatestTrends(userId, symbols) {
     try {
       let query = `
-        SELECT symbol, trend_direction as trend,
-               ema_fast, ema_slow, last_price, updated_at
+        SELECT symbol, macro_bias, local_bias, regime,
+               last_price, alignment_score, conflict_score, updated_at
         FROM symbol_state
-        WHERE user_id = $1 AND trend_direction IS NOT NULL
+        WHERE user_id = $1 AND macro_bias IS NOT NULL
       `;
       const params = [userId];
 
@@ -144,10 +158,11 @@ class LiveContextService {
       const result = await db.query(query, params);
       return result.rows.map(row => ({
         symbol: row.symbol,
-        trend: row.trend,
-        emaFast: row.ema_fast ? parseFloat(row.ema_fast) : null,
-        emaSlow: row.ema_slow ? parseFloat(row.ema_slow) : null,
+        trend: row.macro_bias,
+        localBias: row.local_bias,
+        regime: row.regime,
         lastPrice: row.last_price ? parseFloat(row.last_price) : null,
+        alignmentScore: row.alignment_score ? parseFloat(row.alignment_score) : null,
         updatedAt: row.updated_at,
       }));
     } catch (err) {
@@ -159,8 +174,9 @@ class LiveContextService {
   async _getSymbolStates(userId, symbols) {
     try {
       let query = `
-        SELECT symbol, latest_direction, latest_strategy,
-               signal_count, updated_at
+        SELECT symbol, macro_bias, local_bias, regime,
+               alignment_score, conflict_score,
+               liquidity_ok, chain_ok, iv_percentile, updated_at
         FROM symbol_state
         WHERE user_id = $1
       `;
@@ -176,9 +192,11 @@ class LiveContextService {
       const result = await db.query(query, params);
       return result.rows.map(row => ({
         symbol: row.symbol,
-        latestDirection: row.latest_direction,
-        latestStrategy: row.latest_strategy,
-        signalCount: row.signal_count,
+        latestDirection: row.macro_bias,
+        latestStrategy: row.regime || 'N/A',
+        localBias: row.local_bias,
+        alignmentScore: row.alignment_score ? parseFloat(row.alignment_score) : null,
+        ivPercentile: row.iv_percentile ? parseFloat(row.iv_percentile) : null,
         updatedAt: row.updated_at,
       }));
     } catch (err) {

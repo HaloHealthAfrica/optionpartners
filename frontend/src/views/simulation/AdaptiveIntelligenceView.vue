@@ -1022,6 +1022,23 @@
 
     <!-- ═══ Tab: AI Insights ═══ -->
     <div v-else-if="activeTab === 'aiInsights'">
+      <!-- Error banner -->
+      <div v-if="store.aiInsightsError" class="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+        <div class="flex items-start gap-3">
+          <ExclamationTriangleIcon class="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
+          <div class="flex-1 min-w-0">
+            <h4 class="text-sm font-medium text-red-800 dark:text-red-300">AI Insights Failed</h4>
+            <p class="text-sm text-red-700 dark:text-red-400 mt-1">{{ store.aiInsightsError }}</p>
+            <p class="text-xs text-red-600 dark:text-red-500 mt-2">
+              Check your AI provider settings under Settings &gt; AI Provider. Make sure your API key is valid and has quota remaining.
+            </p>
+          </div>
+          <button @click="store.aiInsightsError = null" class="text-red-400 hover:text-red-600">
+            <XMarkIcon class="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
       <!-- No analysis yet — start button -->
       <div v-if="!store.aiInsightsStreaming && !store.aiInsightsStreamText && !store.aiInsights?.analysis" class="text-center py-12">
         <div class="max-w-lg mx-auto">
@@ -1200,6 +1217,7 @@ import {
   SparklesIcon,
   XMarkIcon,
   SignalIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/vue/24/outline'
 
 const store = useSimulationStore()
@@ -1239,9 +1257,13 @@ const renderedInsights = computed(() => {
 
 async function handleStreamInsights() {
   try {
+    store.aiInsightsError = null
     await store.streamAIInsights(lookbackDays.value)
   } catch (err) {
     console.error('[AI_INSIGHTS] Stream failed:', err)
+    if (!store.aiInsightsError) {
+      store.aiInsightsError = err.message || 'AI Insights failed. Please check your settings.'
+    }
   }
 }
 

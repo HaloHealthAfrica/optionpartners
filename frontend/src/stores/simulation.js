@@ -558,6 +558,7 @@ export const useSimulationStore = defineStore('simulation', () => {
   const aiInsightsLoading = ref(false)
   const aiInsightsStreaming = ref(false)
   const aiInsightsStreamText = ref('')
+  const aiInsightsError = ref(null)
 
   // Live market context
   const liveContext = ref(null)
@@ -588,6 +589,7 @@ export const useSimulationStore = defineStore('simulation', () => {
   function streamAIInsights(lookbackDays = 90) {
     aiInsightsStreaming.value = true
     aiInsightsStreamText.value = ''
+    aiInsightsError.value = null
     aiInsights.value = null
 
     const token = localStorage.getItem('token')
@@ -610,7 +612,7 @@ export const useSimulationStore = defineStore('simulation', () => {
             resolve(aiInsightsStreamText.value)
           } else if (parsed.type === 'error') {
             aiInsightsStreaming.value = false
-            error.value = parsed.error
+            aiInsightsError.value = parsed.error
             evtSource.close()
             reject(new Error(parsed.error))
           }
@@ -619,8 +621,11 @@ export const useSimulationStore = defineStore('simulation', () => {
 
       evtSource.onerror = () => {
         aiInsightsStreaming.value = false
+        if (!aiInsightsStreamText.value && !aiInsightsError.value) {
+          aiInsightsError.value = 'Stream connection failed. Check your AI provider settings and API key quota.'
+        }
         evtSource.close()
-        reject(new Error('Stream connection failed'))
+        reject(new Error(aiInsightsError.value || 'Stream connection failed'))
       }
     })
   }
@@ -745,7 +750,7 @@ export const useSimulationStore = defineStore('simulation', () => {
     revertCalibration, toggleAutoCalibration, fetchCalibrationLog,
     fetchSignalQuality, fetchGuardEffectiveness,
     // AI Insights + Live Context + Auto-Insights + Live Feed
-    aiInsights, aiInsightsLoading, aiInsightsStreaming, aiInsightsStreamText,
+    aiInsights, aiInsightsLoading, aiInsightsStreaming, aiInsightsStreamText, aiInsightsError,
     liveContext, autoInsight, autoInsightUnread,
     liveFeedEvents, liveFeedConnected,
     fetchAIInsights, streamAIInsights, fetchLiveContext,
