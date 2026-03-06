@@ -32,9 +32,11 @@ class OptionsConstructor {
    *     min_open_interest, min_volume, max_bid_ask_spread_pct, spread_width }
    * @param {Object} [regimeContext] - Regime context for dynamic scoring weights.
    *   { regime, hvPercentile, atrRatio }
+   * @param {number[]} [excludedStrikes] - Strikes already held as open positions.
+   *   These are filtered out so the constructor picks the next-best available strike.
    * @returns {Promise<{ success: boolean, signal?: Object, reason?: string }>}
    */
-  async construct(signal, userId, engineOverrides = null, regimeContext = null) {
+  async construct(signal, userId, engineOverrides = null, regimeContext = null, excludedStrikes = []) {
     try {
       const direction = this._resolveDirection(signal);
       if (!direction) {
@@ -76,7 +78,7 @@ class OptionsConstructor {
         return this._constructSpread(signal, recipe, expirationContracts, expiration, direction, regimeContext);
       }
 
-      return this._constructSingleLeg(signal, recipe, expirationContracts, expiration, regimeContext);
+      return this._constructSingleLeg(signal, recipe, expirationContracts, expiration, regimeContext, excludedStrikes);
     } catch (err) {
       logger.error(`Options constructor error: ${err.message}`, 'options-constructor');
       Sentry.captureException(err, { tags: { module: 'options-constructor' } });
@@ -303,12 +305,31 @@ class OptionsConstructor {
 
   // --- Single leg construction (CALL or PUT) ---
 
-  _constructSingleLeg(signal, recipe, contracts, expiration, regimeContext = null) {
+  _constructSingleLeg(signal, recipe, contracts, expiration, regimeContext = null, excludedStrikes = []) {
     const optionType = recipe.contract_type === 'CALL' ? 'call' : 'put';
-    const candidates = contracts.filter((c) => c.type === optionType);
+    let candidates = contracts.filter((c) => c.type === optionType);
 
     if (candidates.length === 0) {
       return { success: false, reason: `No ${optionType} contracts at expiration ${expiration}` };
+    }
+
+    if (excludedStrikes.length > 0) {
+      const excludedSet = new Set(excludedStrikes.map(Number));
+      const before = candidates.length;
+      candidates = candidates.filter((c) => !excludedSet.has(Number(c.strike)));
+      if (candidates.length < before) {
+        logger.info(
+          `[STRIKE_EXCLUSION] Filtered ${before - candidates.length} already-held strike(s): [${[...excludedSet].join(', ')}] — ${candidates.length} candidates remain`,
+          'options-constructor'
+        );
+      }
+    }
+
+    if (candidates.length === 0) {
+      return {
+        success: false,
+        reason: `All eligible strikes already held as open positions (excluded: ${excludedStrikes.join(', ')})`,
+      };
     }
 
     const strike = this._selectStrikeByDelta(candidates, recipe, regimeContext);
@@ -324,6 +345,7 @@ class OptionsConstructor {
       return { success: false, reason: liquidityCheck.reason };
     }
 
+    const isAlternative = excludedStrikes.length > 0;
     const enrichedSignal = {
       ...signal,
       contractType: recipe.contract_type,
@@ -339,6 +361,8 @@ class OptionsConstructor {
       meta: {
         ...signal.meta,
         constructedBy: 'options-constructor',
+        alternativeStrike: isAlternative,
+        excludedStrikes: isAlternative ? excludedStrikes : undefined,
         recipe: {
           strategy: recipe.strategy,
           direction: recipe.direction,
@@ -359,6 +383,13 @@ class OptionsConstructor {
         riskScore: strike._riskScore || null,
       },
     };
+
+    if (isAlternative) {
+      logger.info(
+        `[ALTERNATIVE_STRIKE] ${signal.symbol} → $${strike.strike} (skipped held strikes: [${excludedStrikes.join(', ')}]) score=${strike._riskScore?.composite?.toFixed(1) || 'N/A'}`,
+        'options-constructor'
+      );
+    }
 
     return { success: true, signal: enrichedSignal };
   }

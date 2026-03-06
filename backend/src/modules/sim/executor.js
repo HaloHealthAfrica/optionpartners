@@ -99,6 +99,13 @@ class SimExecutor {
       }
 
       // 4. Create sim order
+      const isAlternativeStrike = intent.meta?.alternativeStrike === true;
+      if (isAlternativeStrike) {
+        logger.info(
+          `[ALTERNATIVE_ENTRY] ${intent.symbol} ${intent.contractType} $${intent.strike} — entered on alternative strike (excluded: [${(intent.meta?.excludedStrikes || []).join(', ')}])`,
+          'sim-executor'
+        );
+      }
       const order = await this._createOrder(client, intent, userId, 'FILLED');
 
       // 5. Create sim fill

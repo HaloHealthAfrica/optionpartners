@@ -349,6 +349,23 @@ class DecisionRouter {
           return { approved: false, reason, signal, indicatorSource };
         }
 
+        // ── Cooldown: enforce minimum interval between entries on the same symbol ──
+        const cooldownResult = await this._checkEntryCooldown(userId, effectiveSymbol);
+        if (!cooldownResult.allowed) {
+          await this._logRejection(userId, webhookEventId, signal, 'ENTRY_COOLDOWN', cooldownResult.reason);
+          return { approved: false, reason: cooldownResult.reason, signal, indicatorSource };
+        }
+
+        // ── Gather open-position strikes so the constructor picks an alternative ──
+        const resolvedContractType = tradeDecision.contractType || 'CALL';
+        const excludedStrikes = await this._getOpenPositionStrikes(userId, effectiveSymbol, resolvedContractType);
+        if (excludedStrikes.length > 0) {
+          logger.info(
+            `[STRIKE_AVOIDANCE] ${effectiveSymbol} ${resolvedContractType}: ${excludedStrikes.length} open strike(s) to exclude: [${excludedStrikes.join(', ')}]`,
+            'decision-router'
+          );
+        }
+
         const engineOverrides = {
           contract_type: tradeDecision.contractType,
           target_delta: adaptedConfig.delta_target,
@@ -374,11 +391,12 @@ class DecisionRouter {
         } : null;
 
         regimeAuditContext.finalParamsUsed = engineOverrides;
+        regimeAuditContext.excludedStrikes = excludedStrikes.length > 0 ? excludedStrikes : undefined;
         if (regimeContext) {
           regimeAuditContext.adjustedWeights = optionsConstructor._getDynamicWeights(regimeContext);
         }
 
-        const construction = await optionsConstructor.construct(signal, userId, engineOverrides, regimeContext);
+        const construction = await optionsConstructor.construct(signal, userId, engineOverrides, regimeContext, excludedStrikes);
         if (!construction.success) {
           await this._logRejection(userId, webhookEventId, signal, 'OPTIONS_CONSTRUCTOR', construction.reason);
           return {
@@ -1003,6 +1021,57 @@ class DecisionRouter {
     } catch (err) {
       logger.warn(`Portfolio Greeks check failed: ${err.message} — allowing trade`, 'decision-router');
       return { allowed: true };
+    }
+  }
+
+  /**
+   * Enforce a minimum cooldown between entries on the same symbol.
+   * Prevents rapid-fire stacking when multiple signals arrive in quick succession.
+   * Cooldown is configurable via SIM_ENTRY_COOLDOWN_MS (default 5 minutes).
+   */
+  async _checkEntryCooldown(userId, symbol) {
+    const cooldownMs = parseInt(process.env.SIM_ENTRY_COOLDOWN_MS || '300000', 10); // 5 min default
+    try {
+      const result = await db.query(
+        `SELECT created_at FROM sim_orders
+         WHERE user_id = $1 AND symbol = $2 AND side = 'BUY' AND status = 'FILLED'
+         ORDER BY created_at DESC LIMIT 1`,
+        [userId, symbol]
+      );
+      if (result.rows.length > 0) {
+        const lastEntryAt = new Date(result.rows[0].created_at);
+        const elapsedMs = Date.now() - lastEntryAt.getTime();
+        if (elapsedMs < cooldownMs) {
+          const remainingSec = Math.ceil((cooldownMs - elapsedMs) / 1000);
+          return {
+            allowed: false,
+            reason: `Entry cooldown: last ${symbol} entry was ${Math.round(elapsedMs / 1000)}s ago — wait ${remainingSec}s (cooldown ${Math.round(cooldownMs / 1000)}s)`,
+          };
+        }
+      }
+      return { allowed: true };
+    } catch (err) {
+      logger.warn(`Entry cooldown check failed: ${err.message} — allowing trade`, 'decision-router');
+      return { allowed: true };
+    }
+  }
+
+  /**
+   * Return strikes already held as OPEN positions for a symbol + contract type.
+   * Used to exclude them from strike selection so the constructor picks the next best.
+   */
+  async _getOpenPositionStrikes(userId, symbol, contractType) {
+    try {
+      const result = await db.query(
+        `SELECT DISTINCT strike FROM sim_positions
+         WHERE user_id = $1 AND underlying_symbol = $2 AND contract_type = $3 AND status = 'OPEN'
+           AND strike IS NOT NULL`,
+        [userId, symbol, contractType]
+      );
+      return result.rows.map((r) => parseFloat(r.strike));
+    } catch (err) {
+      logger.warn(`Open position strikes lookup failed: ${err.message}`, 'decision-router');
+      return [];
     }
   }
 
