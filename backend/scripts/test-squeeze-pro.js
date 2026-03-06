@@ -215,6 +215,24 @@ function testDetection() {
     detectIndicatorSource({ source: 'PIVOT_MB', symbol: 'SPY' }) === 'PIVOT_MB',
     'PIVOT_MB detection still works (no collision)'
   );
+
+  // Fingerprint-based detection: squeeze object without explicit source
+  assert(
+    detectIndicatorSource({ ticker: 'SPY', direction: 'SHORT', close: 590, squeeze: { compression_score: 65 } }) === 'SQUEEZE_PRO',
+    'Detects via squeeze object fingerprint (no source field)'
+  );
+
+  // Fingerprint-based detection: top-level compression_score
+  assert(
+    detectIndicatorSource({ ticker: 'IWM', direction: 'DOWN', close: 200, compression_score: 70 }) === 'SQUEEZE_PRO',
+    'Detects via top-level compression_score (no source field)'
+  );
+
+  // Payload with squeeze object but no ticker should NOT match
+  assert(
+    detectIndicatorSource({ squeeze: { compression_score: 80 }, direction: 'LONG' }) !== 'SQUEEZE_PRO',
+    'squeeze object without ticker does NOT match SQUEEZE_PRO'
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -246,8 +264,14 @@ function testNormalizerEntry() {
   assert(noCompression.valid === false, 'Missing compression_score fails validation');
   assert(noCompression.errors.some(e => e.includes('compression_score')), 'Error mentions compression_score');
 
+  // signal_type inference: 'INVALID' is inferred as ENTRY when direction + close present
   const badSignalType = validate(makeEntryPayload({ signal_type: 'INVALID' }));
-  assert(badSignalType.valid === false, 'Invalid signal_type fails validation');
+  assert(badSignalType.valid === true, 'Invalid signal_type inferred as ENTRY when entry fields present');
+  assert(badSignalType.errors.length === 0, 'No errors when signal_type inferred');
+
+  // Truly unresolvable: no direction, no close, no signal_type
+  const unresolvable = validate({ ticker: 'SPY', signal_type: 'INVALID' });
+  assert(unresolvable.valid === false, 'Unresolvable signal_type fails when context missing');
 
   // normalize() — LONG ENTRY
   const longNorm = normalize(makeEntryPayload());

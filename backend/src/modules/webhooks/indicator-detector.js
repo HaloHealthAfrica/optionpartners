@@ -57,6 +57,10 @@ function detectIndicatorSource(payload) {
 
   if (payload.source === 'SQUEEZE_PRO' || payload.source === 'SQZ_ULTRA_PRO') return 'SQUEEZE_PRO';
 
+  // Fingerprint-based SQUEEZE_PRO detection: squeeze object or compression fields
+  if (payload.squeeze && typeof payload.squeeze === 'object' && payload.ticker && payload.direction) return 'SQUEEZE_PRO';
+  if (payload.compression_score != null && payload.ticker && payload.direction) return 'SQUEEZE_PRO';
+
   if (payload.source === 'PIVOT_MB' || payload.signal_type === 'PIVOT_MOTHERBAR') return 'PIVOT_MB';
 
   // SIGNALS check runs BEFORE component/level STRAT detection because SIGNALS

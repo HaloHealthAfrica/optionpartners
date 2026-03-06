@@ -4,12 +4,40 @@ const { normalizeDirection } = require('../indicator-detector');
 
 const REQUIRED_FIELDS = ['ticker', 'direction', 'close'];
 
+/**
+ * Infer signal_type from payload context when not explicitly provided.
+ * EXIT indicators: exit_reason present, action is CLOSE/close, or signal_type
+ * contains exit-like keywords.  Everything else defaults to ENTRY.
+ */
+function _inferSignalType(payload) {
+  const raw = (payload.signal_type || '').toUpperCase().trim();
+
+  if (raw === 'ENTRY' || raw === 'EXIT') return raw;
+
+  if (payload.exit_reason) return 'EXIT';
+
+  const action = (payload.action || payload.order_action || '').toUpperCase();
+  if (action === 'CLOSE') return 'EXIT';
+
+  if (['SELL_TO_CLOSE', 'STC', 'CLOSE_POSITION', 'FLATTEN'].includes(raw)) return 'EXIT';
+
+  // Anything else with a direction + close price is an entry
+  if (payload.direction && payload.close != null) return 'ENTRY';
+
+  return null;
+}
+
 function validate(payload) {
   const errors = [];
-  const signalType = (payload.signal_type || '').toUpperCase();
+  const signalType = _inferSignalType(payload);
 
-  if (!['ENTRY', 'EXIT'].includes(signalType)) {
-    errors.push(`Invalid signal_type: ${payload.signal_type} (expected ENTRY or EXIT)`);
+  if (!signalType) {
+    errors.push(`Invalid signal_type: ${payload.signal_type} (expected ENTRY or EXIT, could not infer from context)`);
+  }
+
+  // Patch inferred value onto payload so normalize() sees it
+  if (signalType && !['ENTRY', 'EXIT'].includes((payload.signal_type || '').toUpperCase().trim())) {
+    payload._inferred_signal_type = signalType;
   }
 
   for (const field of REQUIRED_FIELDS) {
@@ -20,7 +48,8 @@ function validate(payload) {
 
   if (signalType === 'ENTRY') {
     const squeeze = payload.squeeze || {};
-    if (squeeze.compression_score == null) {
+    const hasCompression = squeeze.compression_score != null || payload.compression_score != null;
+    if (!hasCompression) {
       errors.push('Missing squeeze.compression_score');
     }
   }
@@ -29,7 +58,7 @@ function validate(payload) {
 }
 
 function normalize(payload) {
-  const signalType = (payload.signal_type || '').toUpperCase();
+  const signalType = payload._inferred_signal_type || (payload.signal_type || '').toUpperCase();
   const isExit = signalType === 'EXIT';
   const symbol = (payload.ticker || '').toUpperCase();
   const direction = normalizeDirection(payload.direction);
@@ -41,7 +70,7 @@ function normalize(payload) {
   const htf = payload.htf || {};
   const levels = payload.levels || {};
 
-  const compressionScore = parseFloat(squeeze.compression_score) || 0;
+  const compressionScore = parseFloat(squeeze.compression_score ?? payload.compression_score) || 0;
   const entry = parseFloat(levels.entry || payload.close) || null;
 
   // Pick the tighter stop between slow_ema and swing_stop
