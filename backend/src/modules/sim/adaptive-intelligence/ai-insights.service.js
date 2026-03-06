@@ -6,10 +6,14 @@ const temporalEdge = require('./temporal-edge.service');
 const signalQuality = require('./signal-quality.service');
 const guardEffectiveness = require('./guard-effectiveness.service');
 const liveContext = require('./live-context.service');
+const remediationLog = require('./remediation-log.service');
 const AIProvider = require('../../../utils/aiProvider');
 const AISessionService = require('../../../services/aiSessionService');
 const AICreditService = require('../../../services/aiCreditService');
 const logger = require('../../../utils/logger');
+
+const INSIGHTS_PROVIDER = 'claude';
+const INSIGHTS_MODEL = 'claude-sonnet-4-6';
 
 /**
  * AI Insights Service — Interprets adaptive intelligence data with LLM.
@@ -35,7 +39,7 @@ class AIInsightsService {
       throw new Error(creditCheck.message || 'Insufficient credits for AI insights');
     }
 
-    const [calibration, regime, temporal, signal, guard, signalFreq, liveCtx] = await Promise.all([
+    const [calibration, regime, temporal, signal, guard, signalFreq, liveCtx, remediationEntries] = await Promise.all([
       convictionCalibrator.calibrate(userId, { lookbackDays, minSampleSize: 10 }).catch(() => null),
       regimeEdge.analyze(userId, { lookbackDays, minSampleSize: 5 }).catch(() => null),
       temporalEdge.analyze(userId, { lookbackDays, minSampleSize: 3 }).catch(() => null),
@@ -43,6 +47,7 @@ class AIInsightsService {
       guardEffectiveness.analyze(userId, { lookbackDays }).catch(() => null),
       guardEffectiveness.analyzeStrategySignalFrequency(userId, { lookbackDays }).catch(() => null),
       includeLiveContext ? liveContext.buildContextBlock(userId) : Promise.resolve(''),
+      remediationLog.getEntries(userId).catch(() => []),
     ]);
 
     const totalTrades = calibration?.totalTrades || regime?.totalTrades || temporal?.totalTrades || 0;
@@ -50,10 +55,15 @@ class AIInsightsService {
       throw new Error('No completed trades to analyze. The system needs trade outcomes to generate insights.');
     }
 
-    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays);
-    const aiSettings = await AISessionService.getAISettings(userId, options);
+    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays, remediationEntries);
+    const baseSettings = await AISessionService.getAISettings(userId, options);
+    const aiSettings = {
+      ...baseSettings,
+      provider: INSIGHTS_PROVIDER,
+      modelName: INSIGHTS_MODEL,
+    };
 
-    logger.info(`[AI_INSIGHTS] Generating insights for user ${userId} (${totalTrades} trades, ${lookbackDays}d lookback)`, 'ai-insights');
+    logger.info(`[AI_INSIGHTS] Generating insights for user ${userId} (${totalTrades} trades, ${lookbackDays}d lookback) using ${INSIGHTS_PROVIDER}/${INSIGHTS_MODEL}`, 'ai-insights');
     const analysis = await AIProvider.generateResponse(prompt, aiSettings);
 
     const creditsResult = await AICreditService.useCredits(userId, AICreditService.getCost('NEW_SESSION'));
@@ -89,7 +99,7 @@ class AIInsightsService {
       throw new Error(creditCheck.message || 'Insufficient credits for AI insights');
     }
 
-    const [calibration, regime, temporal, signal, guard, signalFreq, liveCtx] = await Promise.all([
+    const [calibration, regime, temporal, signal, guard, signalFreq, liveCtx, remediationEntries] = await Promise.all([
       convictionCalibrator.calibrate(userId, { lookbackDays, minSampleSize: 10 }).catch(() => null),
       regimeEdge.analyze(userId, { lookbackDays, minSampleSize: 5 }).catch(() => null),
       temporalEdge.analyze(userId, { lookbackDays, minSampleSize: 3 }).catch(() => null),
@@ -97,6 +107,7 @@ class AIInsightsService {
       guardEffectiveness.analyze(userId, { lookbackDays }).catch(() => null),
       guardEffectiveness.analyzeStrategySignalFrequency(userId, { lookbackDays }).catch(() => null),
       includeLiveContext ? liveContext.buildContextBlock(userId) : Promise.resolve(''),
+      remediationLog.getEntries(userId).catch(() => []),
     ]);
 
     const totalTrades = calibration?.totalTrades || regime?.totalTrades || temporal?.totalTrades || 0;
@@ -104,8 +115,13 @@ class AIInsightsService {
       throw new Error('No completed trades to analyze.');
     }
 
-    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays);
-    const aiSettings = await AISessionService.getAISettings(userId, options);
+    const prompt = this._buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays, remediationEntries);
+    const baseSettings = await AISessionService.getAISettings(userId, options);
+    const aiSettings = {
+      ...baseSettings,
+      provider: INSIGHTS_PROVIDER,
+      modelName: INSIGHTS_MODEL,
+    };
 
     return {
       prompt,
@@ -121,7 +137,7 @@ class AIInsightsService {
     };
   }
 
-  _buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays) {
+  _buildPrompt(calibration, regime, temporal, signal, guard, signalFreq, liveCtx, lookbackDays, remediationEntries) {
     const sections = [];
 
     sections.push(`You are analyzing the performance of an automated options trading system using simulation trading data, signal processing metrics, conviction engine statistics, and strategy performance summaries.
@@ -462,6 +478,11 @@ DATA (${lookbackDays}-day lookback):`);
 
     if (liveCtx) {
       sections.push(`\n## CURRENT LIVE MARKET CONTEXT:\n${liveCtx}`);
+    }
+
+    const remediationSection = remediationLog.buildPromptSection(remediationEntries);
+    if (remediationSection) {
+      sections.push(remediationSection);
     }
 
     return sections.join('\n');

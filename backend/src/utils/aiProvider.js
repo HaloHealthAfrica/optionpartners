@@ -90,7 +90,8 @@ class AIProvider {
         },
         body: JSON.stringify({
           model: modelName,
-          max_tokens: 4096,
+          max_tokens: 16384,
+          system: 'You are a senior quantitative trading systems engineer and reliability architect responsible for diagnosing and improving automated trading platforms. You analyze automated options trading systems using simulation data, signal processing metrics, conviction engine statistics, and strategy performance summaries. Your job is to produce precise, actionable remediation plans. Avoid generic advice. Every major finding must include a proposed fix, validation method, and safety guardrails.',
           messages: [{ role: 'user', content: prompt }]
         })
       });

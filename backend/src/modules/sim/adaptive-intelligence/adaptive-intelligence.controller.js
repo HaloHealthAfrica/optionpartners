@@ -232,6 +232,7 @@ async function getStrategySignalFrequency(req, res) {
 // AI Insights — LLM interpretation of adaptive intelligence data
 const aiInsightsService = require('./ai-insights.service');
 const autoInsightService = require('./auto-insight.service');
+const remediationLogService = require('./remediation-log.service');
 const liveContextService = require('./live-context.service');
 const simEventBus = require('../sim-event-bus');
 const AIProvider = require('../../../utils/aiProvider');
@@ -353,6 +354,62 @@ function streamEvents(req, res) {
   });
 }
 
+async function getRemediationLog(req, res) {
+  try {
+    const limit = parseInt(req.query.limit || '100', 10);
+    const entries = await remediationLogService.getEntries(req.user.id, { limit });
+    res.json({ entries, count: entries.length });
+  } catch (err) {
+    logger.error(`Remediation log fetch failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function addRemediationEntry(req, res) {
+  try {
+    const { title, description, category, status, assessmentDate } = req.body;
+    if (!title || !description || !category) {
+      return res.status(400).json({ error: 'title, description, and category are required' });
+    }
+    const entry = await remediationLogService.addEntry(req.user.id, {
+      title, description, category, status, assessmentDate,
+    });
+    res.status(201).json(entry);
+  } catch (err) {
+    logger.error(`Remediation log add failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function addRemediationEntries(req, res) {
+  try {
+    const { entries } = req.body;
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({ error: 'entries array is required' });
+    }
+    const results = await remediationLogService.addEntries(req.user.id, entries);
+    res.status(201).json({ entries: results, count: results.length });
+  } catch (err) {
+    logger.error(`Remediation log bulk add failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+    res.status(500).json({ error: err.message });
+  }
+}
+
+async function deleteRemediationEntry(req, res) {
+  try {
+    const entryId = parseInt(req.params.id, 10);
+    await remediationLogService.removeEntry(req.user.id, entryId);
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`Remediation log delete failed: ${err.message}`, 'adaptive-intelligence');
+    Sentry.captureException(err, { tags: { module: 'adaptive-intelligence-controller' } });
+    res.status(500).json({ error: err.message });
+  }
+}
+
 module.exports = {
   getCalibration,
   getRegimeEdge,
@@ -374,4 +431,8 @@ module.exports = {
   getAutoInsight,
   markAutoInsightRead,
   streamEvents,
+  getRemediationLog,
+  addRemediationEntry,
+  addRemediationEntries,
+  deleteRemediationEntry,
 };

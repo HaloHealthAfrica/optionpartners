@@ -84,6 +84,12 @@ router.get('/adaptive/strategy-signal-frequency', adaptiveIntelligence.getStrate
 router.get('/adaptive/ai-insights', adaptiveIntelligence.getAIInsights);
 router.get('/adaptive/ai-insights/stream', adaptiveIntelligence.streamAIInsights);
 
+// Remediation log (tracks fixes applied from health assessments)
+router.get('/adaptive/remediation-log', adaptiveIntelligence.getRemediationLog);
+router.post('/adaptive/remediation-log', adaptiveIntelligence.addRemediationEntry);
+router.post('/adaptive/remediation-log/bulk', adaptiveIntelligence.addRemediationEntries);
+router.delete('/adaptive/remediation-log/:id', adaptiveIntelligence.deleteRemediationEntry);
+
 // Live market context
 router.get('/adaptive/live-context', adaptiveIntelligence.getLiveContext);
 
