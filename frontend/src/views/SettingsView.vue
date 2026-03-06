@@ -2692,7 +2692,7 @@ function getModelPlaceholder() {
         case "gemini":
             return "e.g., gemini-1.5-pro";
         case "claude":
-            return "e.g., claude-3-5-sonnet";
+            return "e.g., claude-sonnet-4-6";
         case "openai":
             return "e.g., gpt-4o";
         case "ollama":
@@ -2799,12 +2799,12 @@ function getCusipModelPlaceholder() {
         case "gemini":
             return "e.g., gemini-1.5-pro";
         case "claude":
-            return "e.g., claude-3-5-sonnet-20241022";
-        case "openai":
-            return "e.g., gpt-4o";
-        case "ollama":
-            return "e.g., llama3.2";
-        case "perplexity":
+            return "e.g., claude-sonnet-4-6";
+                        case "openai":
+                            return "e.g., gpt-4o";
+                        case "ollama":
+                            return "e.g., llama3.2";
+                        case "perplexity":
             return "e.g., llama-3.1-sonar-large-128k-online";
         case "lmstudio":
             return "e.g., local-model";
@@ -3231,7 +3231,7 @@ function getAdminModelPlaceholder() {
         case "gemini":
             return "gemini-1.5-flash";
         case "claude":
-            return "claude-3-5-sonnet-20241022";
+            return "claude-sonnet-4-6";
         case "openai":
             return "gpt-4o";
         case "ollama":
@@ -3339,7 +3339,7 @@ function getAdminCusipModelPlaceholder() {
         case "gemini":
             return "gemini-1.5-flash";
         case "claude":
-            return "claude-3-5-sonnet-20241022";
+            return "claude-sonnet-4-6";
         case "openai":
             return "gpt-4o";
         case "ollama":

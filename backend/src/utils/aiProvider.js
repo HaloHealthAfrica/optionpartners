@@ -75,7 +75,7 @@ class AIProvider {
   /**
    * Generate using Claude/Anthropic API
    */
-  static async generateClaude(prompt, apiKey, modelName = 'claude-3-5-haiku-20241022') {
+  static async generateClaude(prompt, apiKey, modelName = 'claude-sonnet-4-6') {
     if (!apiKey) {
       throw new Error('Anthropic API key not configured');
     }
@@ -315,7 +315,7 @@ class AIProvider {
   static async streamClaude(prompt, apiKey, modelName, res) {
     if (!apiKey) throw new Error('Anthropic API key not configured');
 
-    const model = modelName || 'claude-3-5-haiku-20241022';
+    const model = modelName || 'claude-sonnet-4-6';
     console.log(`[AI_PROVIDER] Streaming Claude: model=${model}`);
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
