@@ -169,6 +169,64 @@
         </section>
       </div>
 
+      <!-- Webhook Detail Table -->
+      <section class="mb-8">
+        <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Webhook Details</h2>
+        <div class="rounded-xl bg-slate-900/80 border border-slate-800 overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-slate-800">
+              <thead>
+                <tr>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Time</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Category</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Symbol</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Outcome</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Data Quality</th>
+                  <th class="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase">Details</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-800">
+                <tr
+                  v-for="w in recentWebhooks"
+                  :key="w.id"
+                  class="hover:bg-slate-800/50"
+                >
+                  <td class="px-4 py-3 font-mono text-sm text-slate-300">{{ formatTime(w.received_at) }}</td>
+                  <td class="px-4 py-3">
+                    <span class="text-xs font-medium px-2 py-0.5 rounded bg-slate-700 text-slate-300">
+                      {{ w.indicator_source }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 font-mono text-sm">{{ w.symbol }}</td>
+                  <td class="px-4 py-3">
+                    <span
+                      class="text-xs font-medium px-2 py-0.5 rounded"
+                      :class="outcomeClass(w.outcome)"
+                    >
+                      {{ w.outcome }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3">
+                    <span
+                      class="text-xs font-medium px-2 py-0.5 rounded"
+                      :class="dataQualityClass(w.data_quality)"
+                    >
+                      {{ w.data_quality }}
+                    </span>
+                  </td>
+                  <td class="px-4 py-3 text-sm text-slate-400 max-w-xs truncate" :title="w.error_message || ''">
+                    {{ w.error_message || '-' }}
+                  </td>
+                </tr>
+                <tr v-if="!recentWebhooks?.length" class="text-slate-500">
+                  <td colspan="6" class="px-4 py-8 text-center text-sm">No webhooks in time window</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- Rate Limit -->
       <section class="mb-8">
         <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Rate Limiting</h2>
@@ -334,14 +392,25 @@ const queueHealthClass = computed(() => {
 
 const freshnessRows = computed(() => data.value?.symbolFreshness ?? [])
 const latencyRows = computed(() => data.value?.processing?.latency ?? [])
+const recentWebhooks = computed(() => data.value?.recentWebhooks ?? [])
+
+function outcomeClass(outcome) {
+  if (outcome === 'Success') return 'bg-emerald-900/50 text-emerald-400'
+  if (outcome === 'Block') return 'bg-red-900/50 text-red-400'
+  return 'bg-blue-900/50 text-blue-400'
+}
+
+function dataQualityClass(quality) {
+  if (quality === 'Enriched') return 'bg-emerald-900/50 text-emerald-400'
+  if (quality === 'Missing') return 'bg-amber-900/50 text-amber-400'
+  return 'bg-slate-700 text-slate-400'
+}
 
 async function fetch() {
   loading.value = true
   error.value = null
   try {
-    const isAdmin = authStore.user?.role === 'admin' || authStore.user?.role === 'owner'
     const params = { timeRangeHours: 24 }
-    if (isAdmin) params.all = 'true'
     const { data: res } = await api.get('/sim/pipeline-observatory', { params })
     data.value = res
   } catch (err) {

@@ -725,7 +725,7 @@ async function getPipelineObservatory(req, res) {
     const userId = req.user.id;
     const timeRangeHours = parseInt(req.query.timeRangeHours) || 24;
     const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
-    const allUsers = isAdmin && req.query.all === 'true';
+    const allUsers = isAdmin; // Admins always see all webhooks
 
     const webhookFilter = allUsers
       ? 'received_at > NOW() - INTERVAL \'1 hour\' * $1'
@@ -743,6 +743,7 @@ async function getPipelineObservatory(req, res) {
       queueHealth,
       connectivityState,
       rateLimitData,
+      recentWebhooksResult,
     ] = await Promise.all([
       Promise.resolve(webhookProcessor.getStatus()),
       ledgerService.getAccountState(userId).catch(() => null),
@@ -795,6 +796,16 @@ async function getPipelineObservatory(req, res) {
           limits: rateLimitService.RATE_LIMITS,
         };
       })(),
+      db.query(
+        `SELECT id, received_at, status, indicator_source, error_message,
+                raw_payload->>'symbol' AS symbol, raw_payload->>'ticker' AS ticker,
+                raw_payload->>'price' AS price, raw_payload->>'timestamp' AS payload_ts
+         FROM webhook_events
+         WHERE ${webhookFilter}
+         ORDER BY received_at DESC
+         LIMIT 50`,
+        webhookParams
+      ),
     ]);
 
     const maxPositions = parseInt(process.env.SIM_MAX_OPEN_POSITIONS || '5', 10);
@@ -815,6 +826,20 @@ async function getPipelineObservatory(req, res) {
       symbolFreshness: symbolFreshness.rows,
       processing: processingMetrics,
       queueHealth: queueHealth || {},
+      recentWebhooks: (recentWebhooksResult?.rows || []).map((r) => ({
+        id: r.id,
+        received_at: r.received_at,
+        status: r.status,
+        indicator_source: r.indicator_source || 'UNKNOWN',
+        symbol: r.symbol || r.ticker || '-',
+        outcome: r.status === 'PROCESSED' ? 'Success' : r.status === 'REJECTED' ? 'Block' : 'Pending',
+        data_quality: r.status === 'PROCESSED'
+          ? 'Enriched'
+          : r.error_message && /missing|required|invalid/i.test(r.error_message)
+            ? 'Missing'
+            : r.price || r.payload_ts ? 'Enriched' : 'Partial',
+        error_message: r.error_message || null,
+      })),
       timeRangeHours,
       timestamp: new Date().toISOString(),
     });

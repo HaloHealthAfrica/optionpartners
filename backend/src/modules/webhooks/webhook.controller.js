@@ -278,9 +278,9 @@ async function receiveTradingViewWebhook(req, res) {
  */
 async function listWebhooks(req, res) {
   try {
-    const { status, page, limit, all } = req.query;
+    const { status, page, limit } = req.query;
     const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
-    const allUsers = isAdmin && all === 'true';
+    const allUsers = isAdmin; // Admins always see all webhooks
     const result = await webhookService.list({
       userId: allUsers ? null : req.user.id,
       status,
@@ -303,7 +303,7 @@ async function listWebhooks(req, res) {
 async function getWebhookStats(req, res) {
   try {
     const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
-    const allUsers = isAdmin && req.query.all === 'true';
+    const allUsers = isAdmin; // Admins always see all webhooks
     const result = await db.query(
       allUsers
         ? `SELECT status, COUNT(*)::int as count FROM webhook_events GROUP BY status`
