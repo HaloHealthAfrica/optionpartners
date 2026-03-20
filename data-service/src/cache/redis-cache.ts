@@ -5,10 +5,12 @@ import type { DataType } from '../types';
 
 const log = createChildLogger('redis-cache');
 
-const TTL_MAP: Record<DataType, number> = {
-  quote: 15,
-  candles: 30,
-  options_chain: 270,
+// default TTLs (seconds) used when no override is configured
+const DEFAULT_TTL_MAP: Record<DataType, number> = {
+  // reduced TTLs for high‑velocity data
+  quote: 10,
+  candles: 20,
+  options_chain: 180,
   gex: 270,
   flow: 270,
   iv: 540,
@@ -22,7 +24,17 @@ const TTL_MAP: Record<DataType, number> = {
   hist_candles: 86400,
   hist_metrics: 21600,
   hist_regime: 900,
+  circuit: 86400, // Circuit breaker states persist for 24 hours
+  ratelimit: 3600, // Rate limiter states persist for 1 hour
 };
+
+function resolveTtl(dataType: DataType): number {
+  const override = config.cache?.ttl?.[dataType];
+  if (override && override > 0) {
+    return override;
+  }
+  return DEFAULT_TTL_MAP[dataType] ?? 30;
+}
 
 export class RedisCache {
   private client: Redis | null = null;
@@ -67,25 +79,29 @@ export class RedisCache {
     return this.connected && this.client !== null;
   }
 
-  async get<T>(dataType: DataType, key: string): Promise<T | undefined> {
+  async get<T>(dataType: DataType, key: string): Promise<{ data: T; provider?: string } | undefined> {
     if (!this.isConnected()) return undefined;
     try {
       const fullKey = `ds:${dataType}:${key}`;
       const raw = await this.client!.get(fullKey);
       if (!raw) return undefined;
-      return JSON.parse(raw) as T;
+      return JSON.parse(raw) as { data: T; provider?: string };
     } catch (err) {
       log.warn({ key, error: err instanceof Error ? err.message : err }, 'Redis get failed');
       return undefined;
     }
   }
 
-  async set<T>(dataType: DataType, key: string, value: T): Promise<void> {
+  async set<T>(dataType: DataType, key: string, value: { data: T; provider?: string } | T): Promise<void> {
     if (!this.isConnected()) return;
     try {
       const fullKey = `ds:${dataType}:${key}`;
-      const ttl = TTL_MAP[dataType] ?? 30;
-      await this.client!.set(fullKey, JSON.stringify(value), 'EX', ttl);
+      const ttl = resolveTtl(dataType);
+      // if caller passed raw value, wrap it
+      const payload = (value && (value as any).data !== undefined)
+        ? value
+        : { data: value as T };
+      await this.client!.set(fullKey, JSON.stringify(payload), 'EX', ttl);
     } catch (err) {
       log.warn({ key, error: err instanceof Error ? err.message : err }, 'Redis set failed');
     }

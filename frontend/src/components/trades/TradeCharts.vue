@@ -400,7 +400,7 @@ const props = defineProps({
 
 const emit = defineEmits(["deleted"]);
 
-const { showSuccess, showError } = useNotification();
+const { showSuccess, showError, showApiError } = useNotification();
 
 const selectedChart = ref(null);
 const chartToDelete = ref(null);
@@ -502,9 +502,10 @@ async function confirmDelete() {
         chartToDelete.value = null;
     } catch (error) {
         console.error("Failed to delete chart:", error);
-        showError(
+        showApiError(
             "Error",
-            error.response?.data?.error || "Failed to delete chart",
+            error,
+            "Failed to delete chart",
         );
         chartToDelete.value = null;
     }

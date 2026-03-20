@@ -4,10 +4,12 @@ const db = require('../../config/database');
 const executor = require('./executor');
 const tradeFinalizer = require('./trade-finalizer');
 const ledgerService = require('./ledger.service');
+const reconciliationService = require('./reconciliation.service');
 const NotificationService = require('../../services/notificationService');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 const globalMarketState = require('./global-market-state.service');
 const marketContext = require('./market-context.service');
+const entryExitValidation = require('./entry-exit-validation.service');
 const logger = require('../../utils/logger');
 const Sentry = require('@sentry/node');
 
@@ -705,6 +707,14 @@ class ExitMonitor {
   }
 
   async _triggerExit(position, exitPrice, reason, message) {
+    // Validate exit price and consistency
+    const exitValidation = await entryExitValidation.validateExit(position, exitPrice, reason);
+    if (!exitValidation.valid) {
+      exitValidation.warnings.forEach(w => {
+        logger.warn(`[EXIT_VALIDATION] ${w}`, 'exit-monitor');
+      });
+    }
+
     // Suspicious exit detection
     const holdMs = Date.now() - new Date(position.opened_at).getTime();
     const holdSec = holdMs / 1000;
@@ -840,6 +850,13 @@ class ExitMonitor {
       }
     } catch (err) {
       logger.error(`Reconciliation failed: ${err.message}`, 'exit-monitor');
+    }
+
+    // perform webhook<>trade reconciliation as well
+    try {
+      await reconciliationService.reconcileWebhooksToTrades();
+    } catch (err) {
+      logger.error(`Webhook/trade reconciliation failed: ${err.message}`, 'exit-monitor');
     }
   }
 

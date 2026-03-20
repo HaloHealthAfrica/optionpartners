@@ -246,7 +246,7 @@ const selectedTrade = ref(null)
 
 // Auth and notifications
 const authStore = useAuthStore()
-const { showSuccess, showError, showConfirmation } = useNotification()
+const { showSuccess, showApiError, showConfirmation } = useNotification()
 
 function formatNumber(num, decimals = 2) {
   return new Intl.NumberFormat('en-US', {
@@ -340,8 +340,7 @@ async function deleteTrade(trade) {
         showSuccess('Success', 'Trade deleted successfully')
       } catch (error) {
         console.error('Failed to delete trade:', error)
-        const errorMessage = error.response?.data?.error || 'Failed to delete trade'
-        showError('Error', errorMessage)
+        showApiError('Error', error, 'Failed to delete trade')
       }
     }
   )

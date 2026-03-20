@@ -6,6 +6,7 @@ const logger = require('../../utils/logger');
 const NotificationService = require('../../services/notificationService');
 const { assertSimMode } = require('../../config/tradingMode');
 const Sentry = require('@sentry/node');
+const entryExitValidation = require('./entry-exit-validation.service');
 
 /**
  * Simulated execution engine. Replaces broker execution entirely.
@@ -13,12 +14,16 @@ const Sentry = require('@sentry/node');
  */
 
 const DEFAULT_SLIPPAGE_PCT = parseFloat(process.env.SIM_SLIPPAGE_PCT || '0.001'); // 0.1%
+const DEFAULT_SIZE_FACTOR = parseFloat(process.env.SIM_SLIPPAGE_SIZE_FACTOR || '0.01'); // 1% per sqrt(qty)
+const DEFAULT_SIZE_MAX = parseFloat(process.env.SIM_SLIPPAGE_SIZE_MAX || '0.10'); // cap 10%
 const DEFAULT_COMMISSION = parseFloat(process.env.SIM_COMMISSION || '0.65');      // per contract
 const CONTRACT_MULTIPLIER = 100;
 
 class SimExecutor {
   constructor(opts = {}) {
     this.slippagePct = opts.slippagePct ?? DEFAULT_SLIPPAGE_PCT;
+    this.sizeFactor = opts.sizeFactor ?? DEFAULT_SIZE_FACTOR;
+    this.sizeMax = opts.sizeMax ?? DEFAULT_SIZE_MAX;
     this.commission = opts.commission ?? DEFAULT_COMMISSION;
   }
 
@@ -32,6 +37,15 @@ class SimExecutor {
    */
   async simulateOrder(intent, userId) {
     assertSimMode();
+
+    // Validate entry parameters before execution
+    const entryValidation = await entryExitValidation.validateEntry(intent);
+    if (!entryValidation.valid) {
+      logger.warn(
+        `[ENTRY_VALIDATION] Entry validation warnings: ${entryValidation.warnings.join('; ')}`,
+        'sim-executor'
+      );
+    }
 
     const client = await db.connect();
     try {
@@ -188,7 +202,7 @@ class SimExecutor {
    * 3. Contract type: options have wider slippage than stock
    */
   _calculateSlippage(basePrice, intent) {
-    // Component 1: Spread-based (most realistic for options)
+    // Component 1: Spread-based (most realistic for options); fallback to a percent of price
     let spreadSlippage;
     if (intent.bidPrice && intent.askPrice && intent.askPrice > intent.bidPrice) {
       spreadSlippage = (intent.askPrice - intent.bidPrice) / 2;
@@ -196,11 +210,15 @@ class SimExecutor {
       spreadSlippage = basePrice * this.slippagePct;
     }
 
-    // Component 2: Size impact — each additional contract past 5 adds 0.5% slippage
-    const qty = intent.quantity || 1;
-    const sizeMultiplier = qty <= 5 ? 1.0 : 1.0 + (qty - 5) * 0.005;
+    // Component 2: Size impact — use a sqrt curve capped at a configurable maximum.
+    // We subtract 1 so a single contract has zero extra slippage; larger sizes
+    // grow sublinearly and are capped by `sizeMax`.
+    const qty = Math.max(1, intent.quantity || 1);
+    // sizePct = min(sizeFactor * (sqrt(qty) - 1), sizeMax)
+    const sizePct = Math.min(this.sizeFactor * Math.max(0, Math.sqrt(qty) - 1), this.sizeMax);
+    const sizeMultiplier = 1 + sizePct;
 
-    // Component 3: Contract type factor
+    // Component 3: Contract type factor (options tend to suffer more slippage than stock)
     const typeFactor = intent.contractType === 'STOCK' ? 0.5
       : intent.contractType === 'CREDIT_SPREAD' ? 1.3
       : 1.0;
@@ -395,14 +413,35 @@ class SimExecutor {
   }
 
   async _updateLedger(client, userId, intent, fillPrice, multiplier, commission, position) {
+    // Load and lock account state to prevent concurrent modifications
+    const acctRes = await client.query(
+      `SELECT cash_balance, buying_power, margin_used, unrealized_pnl
+       FROM sim_account_state
+       WHERE user_id = $1
+       FOR UPDATE`,
+      [userId]
+    );
+    const acct = acctRes.rows[0];
+    if (!acct) throw new Error('Account state missing');
+
     const notional = fillPrice * intent.quantity * multiplier;
     const isCreditSpread = intent.contractType === 'CREDIT_SPREAD';
+
+    // helper for insufficient funds
+    function ensureSufficient(balance, needed, label) {
+      if (balance < needed) {
+        throw new Error(`Ledger update would drive ${label} negative (${balance} < ${needed})`);
+      }
+    }
 
     if (intent.side === 'BUY') {
       if (isCreditSpread) {
         // Credit spread ENTRY: receive premium, hold margin for max loss
         const spreadWidth = Math.abs((intent.strikeShort || 0) - (intent.strikeLong || 0));
         const marginRequired = (spreadWidth - fillPrice) * multiplier * intent.quantity;
+
+        // cash increases by notional minus commission, no negative risk
+        ensureSufficient(acct.buying_power, marginRequired, 'buying_power');
 
         await client.query(
           `UPDATE sim_account_state
@@ -415,6 +454,10 @@ class SimExecutor {
         );
       } else {
         // Debit trade ENTRY: pay premium
+        const debit = notional + commission;
+        ensureSufficient(acct.cash_balance, debit, 'cash_balance');
+        ensureSufficient(acct.buying_power, notional, 'buying_power');
+
         await client.query(
           `UPDATE sim_account_state
            SET cash_balance = cash_balance - $2 - $3,
@@ -437,6 +480,8 @@ class SimExecutor {
           (parseFloat(position.strike_short) || 0) - (parseFloat(position.strike_long) || 0)
         );
         const marginHeld = (spreadWidth - entryPrice) * multiplier * qty;
+        const debit = exitPrice * qty * multiplier + commission;
+        ensureSufficient(acct.cash_balance, debit, 'cash_balance');
 
         await client.query(
           `UPDATE sim_account_state
@@ -458,6 +503,7 @@ class SimExecutor {
         // Debit trade EXIT: receive proceeds from selling the option
         const pnl = (exitPrice - entryPrice) * qty * multiplier;
         const entryNotional = entryPrice * qty * multiplier;
+        // no negative checks here since cash increases
 
         await client.query(
           `UPDATE sim_account_state

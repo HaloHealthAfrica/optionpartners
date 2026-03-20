@@ -24,6 +24,8 @@ const MAX_AGE_BY_SOURCE = {
   ORB:            30 * 60 * 1000,
   SQUEEZE_PRO:    30 * 60 * 1000,
   PIVOT_MB:       30 * 60 * 1000,
+  REVERSAL:       30 * 60 * 1000,
+  CRT:            30 * 60 * 1000,
 };
 
 /**
@@ -119,6 +121,22 @@ function generateDedupeKey(payload) {
         payload.entry_price ?? payload.price,
       ].join(':');
       break;
+    case 'REVERSAL':
+      discriminator = [
+        payload.signal_type || payload.signal,
+        payload.setup_id,
+        payload.pattern,
+        payload.confidence ?? payload.probability_score ?? payload.confidence_score,
+      ].join(':');
+      break;
+    case 'CRT':
+      discriminator = payload.signal_id || [
+        payload.direction,
+        payload.option_type,
+        payload.entry,
+        payload.strike,
+      ].join(':');
+      break;
     case 'MARKET_CONTEXT':
       discriminator = [
         payload.event,
@@ -167,6 +185,12 @@ function _resolveTimestamp(payload, source) {
       break;
     case 'PIVOT_MB':
       if (payload.bar_time) return payload.bar_time;
+      break;
+    case 'REVERSAL':
+      if (payload.timestamp) return payload.timestamp;
+      break;
+    case 'CRT':
+      if (payload.timestamp) return payload.timestamp;
       break;
     case 'TREND':
       if (payload.meta?.bar_time) return payload.meta.bar_time;

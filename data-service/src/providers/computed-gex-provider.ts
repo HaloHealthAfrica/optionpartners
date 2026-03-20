@@ -3,6 +3,7 @@ import type {
   MarketDataProvider,
   ProviderName,
   ProviderCapabilities,
+  ProviderPriority,
   Quote,
   Candle,
   GexData,
@@ -18,6 +19,7 @@ const log = createChildLogger('computed-gex');
  */
 export class ComputedGexProvider implements MarketDataProvider {
   readonly name: ProviderName = 'computed';
+  readonly priority: ProviderPriority = 'tertiary';
   readonly capabilities: ProviderCapabilities = {
     candles: false,
     quotes: false,

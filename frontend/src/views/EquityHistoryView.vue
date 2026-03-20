@@ -281,7 +281,7 @@ import { ref, onMounted } from "vue";
 import { useNotification } from "@/composables/useNotification";
 import api from "@/services/api";
 
-const { showSuccess, showError, showDangerConfirmation } = useNotification();
+const { showSuccess, showError, showApiError, showDangerConfirmation } = useNotification();
 
 const loading = ref(true);
 const saving = ref(false);
@@ -529,9 +529,10 @@ async function saveEquity() {
         closeEquityModal();
         await loadEquitySnapshots();
     } catch (error) {
-        showError(
+        showApiError(
             "Error",
-            error.response?.data?.message || "Failed to save equity",
+            error,
+            "Failed to save equity",
         );
     } finally {
         saving.value = false;
@@ -555,7 +556,7 @@ function deleteEquity() {
                 closeEquityModal();
                 await loadEquitySnapshots();
             } catch (error) {
-                showError("Error", "Failed to delete equity entry");
+                showApiError("Error", error, "Failed to delete equity entry");
             } finally {
                 saving.value = false;
             }
@@ -615,7 +616,7 @@ async function loadEquitySnapshots() {
         updateCalendarData();
     } catch (error) {
         console.error("Error loading equity snapshots:", error);
-        showError("Error", "Failed to load equity history");
+        showApiError("Error", error, "Failed to load equity history");
     }
 }
 
@@ -624,7 +625,7 @@ onMounted(async () => {
         await loadEquitySnapshots();
     } catch (error) {
         console.error("Error loading equity history:", error);
-        showError("Error", "Failed to load equity history");
+        showApiError("Error", error, "Failed to load equity history");
     } finally {
         loading.value = false;
     }

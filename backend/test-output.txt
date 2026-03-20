@@ -1,0 +1,420 @@
+
+> tradetally-backend@2.2.0 test
+> jest src/modules/sim/tests/entry-exit-validation.test.js
+
+  console.log
+    [33m[WARN][0m [ENTRY_VALIDATION] Entry price $-10 seems unrealistic for AAPL | BUY 1x AAPL @ $-10
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [ENTRY_VALIDATION] Bid/ask spread 150.00% seems excessive for TSLA | BUY 1x TSLA @ $10
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [ENTRY_VALIDATION] Stop-loss $110 is above entry $100 for long position (should be below) | BUY 1x QQQ @ $100
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [ENTRY_VALIDATION] Take-profit $95 is below entry $100 for long position (should be above) | BUY 1x IWM @ $100
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [ENTRY_VALIDATION] Risk amount $0.01 is too small (min $1 risk) | BUY 1x SPY @ $100
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [ENTRY_VALIDATION] Quantity 5000 is unrealistic (valid: 1-1000) | BUY 5000x SPY @ $100
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Stop-loss exit with unexpected gain: $200.00 (likely stale price) | QQQ entry=$10 exit=$12 P&L=+$200.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Take-profit exit with loss: $-200.00 (likely stale price) | IWM entry=$10 exit=$8 P&L=-$200.00 reason=TAKE_PROFIT
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Exit price $999999 is 9999890.0% away from entry $10 | XYZ entry=$10 exit=$999999 P&L=+$99998900.00 reason=TAKE_PROFIT
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Exit price $999999 is outside position range [8.00, 15.00] by >10% | XYZ entry=$10 exit=$999999 P&L=+$99998900.00 reason=TAKE_PROFIT
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Exit price $0.01 is 99.9% away from entry $10 | AAPL entry=$10 exit=$0.01 P&L=-$999.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Exit price $0.01 is outside position range [5.00, 20.00] by >10% | AAPL entry=$10 exit=$0.01 P&L=-$999.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Stop-loss exit with unexpected gain: $50.00 (likely stale price) | SPY entry=$10 exit=$10.5 P&L=+$50.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Position held for only 2.0s (likely execution error) | SPY entry=$10 exit=$10.5 P&L=+$50.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Exit price $6 is 200.0% away from entry $2 | SPY entry=$2 exit=$6 P&L=-$400.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Exit price $6 is outside position range [1.50, 3.00] by >10% | SPY entry=$2 exit=$6 P&L=-$400.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [33m[WARN][0m [EXIT_VALIDATION] Credit spread exit $6 exceeds max width 5.00 (likely pricing error or expiry) | SPY entry=$2 exit=$6 P&L=-$400.00 reason=STOP_LOSS
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [31m[ERROR][0m [ENTRY_EXIT_PAIR] Entry and exit records have different IDs | undefined
+    Error: undefined
+    Stack: undefined
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [31m[ERROR][0m [ENTRY_EXIT_PAIR] Entry price changed from $undefined to undefined | undefined
+    Error: undefined
+    Stack: undefined
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [31m[ERROR][0m [ENTRY_EXIT_PAIR] Entry status is CLOSED, expected OPEN | undefined
+    Error: undefined
+    Stack: undefined
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [31m[ERROR][0m [ENTRY_EXIT_PAIR] Entry price changed from $undefined to undefined | undefined
+    Error: undefined
+    Stack: undefined
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+  console.log
+    [31m[ERROR][0m [ENTRY_EXIT_PAIR] Quantity changed from 5 to 3 | AAPL
+    Error: undefined
+    Stack: undefined
+
+      at Logger.log [as writeLog] (src/utils/logger.js:133:15)
+          at Array.forEach (<anonymous>)
+
+FAIL src/modules/sim/tests/entry-exit-validation.test.js
+  Entry/Exit Validation
+    validateEntry
+      ΓêÜ should accept valid entry order (4 ms)
+      ├ù should reject negative entry price (34 ms)
+      ├ù should warn on excessive bid/ask spread (2 ms)
+      ├ù should reject stop-loss above entry for long position (2 ms)
+      ΓêÜ should accept stop-loss below entry for long position
+      ├ù should reject take-profit below entry for long position (2 ms)
+      ├ù should warn on too-small risk amount (1 ms)
+      ├ù should warn on unrealistic quantity (1 ms)
+      ΓêÜ should accept credit spread entry with proper levels
+    validateExit
+      ΓêÜ should accept valid exit for profitable position
+      ├ù should warn on stop-loss exit with gain (2 ms)
+      ├ù should warn on take-profit exit with loss (2 ms)
+      ├ù should warn on unrealistic exit price (4 ms)
+      ├ù should warn on exit price extremely far from entry (3 ms)
+      ├ù should warn on very fast exit (2 ms)
+      ├ù should warn on credit spread exit above width (4 ms)
+    validateEntryExitPair
+      ΓêÜ should validate consistent entry-exit pair
+      ├ù should detect mismatched IDs (3 ms)
+      ├ù should detect wrong entry status (2 ms)
+      ├ù should detect quantity mismatch (1 ms)
+    Helper methods
+      ΓêÜ _isPriceReasonable should accept normal prices (1 ms)
+      ΓêÜ _isPriceReasonable should reject invalid prices
+      ├ù _validateStopLevel should validate long stop-loss (1 ms)
+      ├ù _validateTargetLevel should validate long take-profit (1 ms)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntry ΓÇ║ should reject negative entry price
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      41 |
+      42 |       const result = await entryExitValidation.validateEntry(intent);
+    > 43 |       expect(result.valid).toBeFalse();
+         |                            ^
+      44 |       expect(result.warnings.length).toBeGreaterThan(0);
+      45 |     });
+      46 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:43:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntry ΓÇ║ should warn on excessive bid/ask spread
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      58 |
+      59 |       const result = await entryExitValidation.validateEntry(intent);
+    > 60 |       expect(result.valid).toBeFalse();
+         |                            ^
+      61 |       expect(result.warnings.some(w => w.includes('spread'))).toBe(true);
+      62 |     });
+      63 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:60:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntry ΓÇ║ should reject stop-loss above entry for long position
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      73 |
+      74 |       const result = await entryExitValidation.validateEntry(intent);
+    > 75 |       expect(result.valid).toBeFalse();
+         |                            ^
+      76 |       expect(result.warnings.some(w => w.includes('Stop-loss'))).toBe(true);
+      77 |     });
+      78 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:75:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntry ΓÇ║ should reject take-profit below entry for long position
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      102 |
+      103 |       const result = await entryExitValidation.validateEntry(intent);
+    > 104 |       expect(result.valid).toBeFalse();
+          |                            ^
+      105 |       expect(result.warnings.some(w => w.includes('Take-profit'))).toBe(true);
+      106 |     });
+      107 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:104:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntry ΓÇ║ should warn on too-small risk amount
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      118 |
+      119 |       const result = await entryExitValidation.validateEntry(intent);
+    > 120 |       expect(result.valid).toBeFalse();
+          |                            ^
+      121 |       expect(result.warnings.some(w => w.includes('too small'))).toBe(true);
+      122 |     });
+      123 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:120:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntry ΓÇ║ should warn on unrealistic quantity
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      132 |
+      133 |       const result = await entryExitValidation.validateEntry(intent);
+    > 134 |       expect(result.valid).toBeFalse();
+          |                            ^
+      135 |       expect(result.warnings.some(w => w.includes('Quantity'))).toBe(true);
+      136 |     });
+      137 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:134:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateExit ΓÇ║ should warn on stop-loss exit with gain
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      192 |
+      193 |       const result = await entryExitValidation.validateExit(position, 12.00, 'STOP_LOSS');
+    > 194 |       expect(result.valid).toBeFalse();
+          |                            ^
+      195 |       expect(result.warnings.some(w => w.includes('Stop-loss'))).toBe(true);
+      196 |       expect(result.anomalies.stopLossGain).toBe(true);
+      197 |     });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:194:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateExit ΓÇ║ should warn on take-profit exit with loss
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      212 |
+      213 |       const result = await entryExitValidation.validateExit(position, 8.00, 'TAKE_PROFIT');
+    > 214 |       expect(result.valid).toBeFalse();
+          |                            ^
+      215 |       expect(result.warnings.some(w => w.includes('Take-profit'))).toBe(true);
+      216 |       expect(result.anomalies.takeProfitLoss).toBe(true);
+      217 |     });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:214:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateExit ΓÇ║ should warn on unrealistic exit price
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      232 |
+      233 |       const result = await entryExitValidation.validateExit(position, 999999.00, 'TAKE_PROFIT');
+    > 234 |       expect(result.valid).toBeFalse();
+          |                            ^
+      235 |       expect(result.warnings.some(w => w.includes('unrealistic'))).toBe(true);
+      236 |       expect(result.anomalies.unrealisticPrice).toBe(true);
+      237 |     });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:234:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateExit ΓÇ║ should warn on exit price extremely far from entry
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      253 |       // Exit at 0.01 is 99.9% loss
+      254 |       const result = await entryExitValidation.validateExit(position, 0.01, 'STOP_LOSS');
+    > 255 |       expect(result.valid).toBeFalse();
+          |                            ^
+      256 |       expect(result.warnings.some(w => w.includes('outside'))).toBe(true);
+      257 |       expect(result.anomalies.extremePriceMove).toBeDefined();
+      258 |     });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:255:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateExit ΓÇ║ should warn on very fast exit
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      274 |
+      275 |       const result = await entryExitValidation.validateExit(position, 10.50, 'STOP_LOSS');
+    > 276 |       expect(result.valid).toBeFalse();
+          |                            ^
+      277 |       expect(result.warnings.some(w => w.includes('only'))).toBe(true);
+      278 |       expect(result.anomalies.tooFastExit).toBe(true);
+      279 |     });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:276:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateExit ΓÇ║ should warn on credit spread exit above width
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      297 |       // Exit at 6 is above max width
+      298 |       const result = await entryExitValidation.validateExit(position, 6.00, 'STOP_LOSS');
+    > 299 |       expect(result.valid).toBeFalse();
+          |                            ^
+      300 |       expect(result.warnings.some(w => w.includes('spread'))).toBe(true);
+      301 |       expect(result.anomalies.spreadWidthExceeded).toBe(true);
+      302 |     });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:299:28)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntryExitPair ΓÇ║ should detect mismatched IDs
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      336 |
+      337 |       const result = await entryExitValidation.validateEntryExitPair(entryPos, exitPos);
+    > 338 |       expect(result.consistent).toBeFalse();
+          |                                 ^
+      339 |       expect(result.issues.length).toBeGreaterThan(0);
+      340 |     });
+      341 |
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:338:33)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntryExitPair ΓÇ║ should detect wrong entry status
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      345 |
+      346 |       const result = await entryExitValidation.validateEntryExitPair(entryPos, exitPos);
+    > 347 |       expect(result.consistent).toBeFalse();
+          |                                 ^
+      348 |     });
+      349 |
+      350 |     test('should detect quantity mismatch', async () => {
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:347:33)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ validateEntryExitPair ΓÇ║ should detect quantity mismatch
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      368 |
+      369 |       const result = await entryExitValidation.validateEntryExitPair(entryPos, exitPos);
+    > 370 |       expect(result.consistent).toBeFalse();
+          |                                 ^
+      371 |       expect(result.issues.some(i => i.includes('Quantity'))).toBe(true);
+      372 |     });
+      373 |   });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:370:33)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ Helper methods ΓÇ║ _validateStopLevel should validate long stop-loss
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      391 |
+      392 |       const invalid = entryExitValidation._validateStopLevel('BUY', 'OPTION', 100.00, 110.00);
+    > 393 |       expect(invalid.valid).toBeFalse();
+          |                             ^
+      394 |     });
+      395 |
+      396 |     test('_validateTargetLevel should validate long take-profit', () => {
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:393:29)
+
+  ΓùÅ Entry/Exit Validation ΓÇ║ Helper methods ΓÇ║ _validateTargetLevel should validate long take-profit
+
+    TypeError: expect(...).toBeFalse is not a function
+
+      399 |
+      400 |       const invalid = entryExitValidation._validateTargetLevel('BUY', 'OPTION', 100.00, 90.00);
+    > 401 |       expect(invalid.valid).toBeFalse();
+          |                             ^
+      402 |     });
+      403 |   });
+      404 | });
+
+      at Object.toBeFalse (src/modules/sim/tests/entry-exit-validation.test.js:401:29)
+
+Test Suites: 1 failed, 1 total
+Tests:       17 failed, 7 passed, 24 total
+Snapshots:   0 total
+Time:        1.233 s, estimated 2 s
+Ran all test suites matching /src\\modules\\sim\\tests\\entry-exit-validation.test.js/i.

@@ -258,7 +258,7 @@ async function run() {
     // ── STAGE 8: Active Cooldowns ──
     section('STAGE 8: ACTIVE COOLDOWNS');
     const cooldowns = await q(`
-      SELECT symbol, strategy, cooldown_until, reason, created_at
+      SELECT strategy, cooldown_until, reason, created_at
       FROM strategy_cooldowns
       WHERE cooldown_until > NOW()
       ORDER BY cooldown_until DESC
@@ -267,7 +267,7 @@ async function run() {
     if (cooldowns.length === 0) {
       console.log('No active cooldowns');
     } else {
-      cooldowns.forEach(c => console.log(`  ${c.symbol} ${c.strategy} until ${c.cooldown_until} — ${c.reason}`));
+      cooldowns.forEach(c => console.log(`  ${c.strategy} until ${c.cooldown_until} — ${c.reason}`));
     }
 
     // ── STAGE 9: Open Positions (blocking new entries?) ──

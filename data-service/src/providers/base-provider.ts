@@ -1,7 +1,6 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { createChildLogger } from '../utils/logger';
 import { rateLimiter } from '../services/rate-limiter';
-import { circuitBreaker } from '../services/circuit-breaker';
 import type { ProviderName, ProviderCapabilities, ProviderConfig } from '../types';
 
 export abstract class BaseProvider {
@@ -23,7 +22,6 @@ export abstract class BaseProvider {
     });
 
     rateLimiter.configure(providerConfig.name, providerConfig.rateLimit);
-    circuitBreaker.configure(providerConfig.name, providerConfig.circuitBreaker);
   }
 
   protected async request<T>(
@@ -32,10 +30,6 @@ export abstract class BaseProvider {
     params?: Record<string, unknown>,
     headers?: Record<string, string>,
   ): Promise<T> {
-    if (!circuitBreaker.canExecute(this.name)) {
-      throw new ProviderError(this.name, 'CIRCUIT_OPEN', 'Circuit breaker is open');
-    }
-
     await rateLimiter.acquire(this.name);
 
     const start = Date.now();
@@ -50,14 +44,12 @@ export abstract class BaseProvider {
 
       const latency = Date.now() - start;
       this.recordLatency(latency);
-      circuitBreaker.recordSuccess(this.name);
 
       this.log.debug({ path, latencyMs: latency }, 'Request succeeded');
       return response.data;
     } catch (err) {
       const latency = Date.now() - start;
       this.recordLatency(latency);
-      circuitBreaker.recordFailure(this.name);
 
       if (err instanceof AxiosError) {
         const status = err.response?.status;
@@ -65,12 +57,7 @@ export abstract class BaseProvider {
         this.log.error({ path, status, latencyMs: latency, error: message }, 'Request failed');
 
         if (status === 429) {
-          const body = err.response?.data;
-          const isDailyLimit = typeof body?.code === 'string' && body.code.includes('daily');
-          if (isDailyLimit) {
-            this.log.error({ path }, 'Daily API request limit exhausted — suppressing requests for 30 min');
-            circuitBreaker.setLongBackoff(this.name, 30 * 60_000);
-          }
+          this.log.error({ path }, 'Rate limited — will retry via orchestrator fallback');
           throw new ProviderError(this.name, 'RATE_LIMITED', `Rate limited by ${this.name}`);
         }
         if (status === 401 || status === 403) {

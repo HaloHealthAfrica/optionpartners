@@ -1475,7 +1475,7 @@ import { TIMEZONE_OPTIONS } from "@/utils/timezone";
 const router = useRouter();
 
 const authStore = useAuthStore();
-const { showSuccess, showError, showDangerConfirmation } = useNotification();
+const { showSuccess, showError, showApiError, showDangerConfirmation } = useNotification();
 
 // Profile form data
 const profileLoading = ref(false);
@@ -1689,10 +1689,7 @@ async function updateProfile() {
 
         await authStore.fetchUser();
     } catch (error) {
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update profile",
-        );
+        showApiError("Error", error, "Failed to update profile");
     } finally {
         profileLoading.value = false;
     }
@@ -1718,7 +1715,7 @@ async function setup2FA() {
         setupSecret.value = response.data.secret;
         backupCodes.value = response.data.backupCodes || [];
     } catch (error) {
-        showError("Error", "Failed to set up 2FA");
+        showApiError("Error", error, "Failed to set up 2FA");
     } finally {
         twoFactorLoading.value = false;
     }
@@ -1744,10 +1741,7 @@ async function enable2FA() {
         verificationCode.value = "";
         await fetch2FAStatus();
     } catch (error) {
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to enable 2FA",
-        );
+        showApiError("Error", error, "Failed to enable 2FA");
     } finally {
         twoFactorLoading.value = false;
     }
@@ -1776,10 +1770,7 @@ async function confirmDisable2FA() {
         disable2FAForm.value = { password: "", token: "" };
         await fetch2FAStatus();
     } catch (error) {
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to disable 2FA",
-        );
+        showApiError("Error", error, "Failed to disable 2FA");
     } finally {
         twoFactorLoading.value = false;
     }
@@ -1805,7 +1796,7 @@ async function fetchApiKeys() {
         const response = await api.get("/api-keys");
         apiKeys.value = response.data.apiKeys;
     } catch (error) {
-        showError("Error", "Failed to load API keys");
+        showApiError("Error", error, "Failed to load API keys");
     } finally {
         apiKeysLoading.value = false;
     }
@@ -1834,10 +1825,7 @@ async function createApiKey() {
 
         showSuccess("Success", "API key created successfully");
     } catch (error) {
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to create API key",
-        );
+        showApiError("Error", error, "Failed to create API key");
     } finally {
         createApiKeyLoading.value = false;
     }
@@ -1878,10 +1866,7 @@ async function toggleApiKey(apiKey) {
             `API key ${apiKey.isActive ? "deactivated" : "activated"}`,
         );
     } catch (error) {
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update API key",
-        );
+        showApiError("Error", error, "Failed to update API key");
     } finally {
         apiKeysLoading.value = false;
     }
@@ -1901,10 +1886,7 @@ function deleteApiKey(apiKey) {
 
                 showSuccess("Success", "API key deleted successfully");
             } catch (error) {
-                showError(
-                    "Error",
-                    error.response?.data?.error || "Failed to delete API key",
-                );
+                showApiError("Error", error, "Failed to delete API key");
             } finally {
                 apiKeysLoading.value = false;
             }
@@ -1952,7 +1934,7 @@ async function openCustomerPortal() {
         }
     } catch (error) {
         console.error("Error opening customer portal:", error);
-        showError("Error", "Failed to open customer portal. Please try again.");
+        showApiError("Error", error, "Failed to open customer portal. Please try again.");
     } finally {
         portalLoading.value = false;
     }
@@ -1993,7 +1975,7 @@ async function updateTradingProfile() {
         await api.put("/settings/trading-profile", tradingProfileForm.value);
         showSuccess("Success", "Trading profile updated successfully");
     } catch (error) {
-        showError("Error", "Failed to update trading profile");
+        showApiError("Error", error, "Failed to update trading profile");
     } finally {
         tradingProfileLoading.value = false;
     }

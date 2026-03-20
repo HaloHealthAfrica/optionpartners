@@ -166,8 +166,10 @@ class RegimeEdgeService {
 
     const grossWins = wins.reduce((a, b) => a + b, 0);
     const grossLosses = Math.abs(losses.reduce((a, b) => a + b, 0));
-    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? 999 : 0);
-    const profitFactorIsSentinel = profitFactor === 999;
+    // Fix 8: Use null instead of 999 sentinel — prevents corruption of downstream PF aggregation
+    const profitFactorRaw = grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? null : 0);
+    const profitFactor = profitFactorRaw != null ? Math.round(profitFactorRaw * 100) / 100 : null;
+    const profitFactorIsSentinel = profitFactorRaw === null && grossWins > 0;
 
     return {
       totalTrades: trades.length,
@@ -175,15 +177,18 @@ class RegimeEdgeService {
       avgPnl: Math.round(avgPnl * 100) / 100,
       avgR: Math.round(avgR * 1000) / 1000,
       totalPnl: Math.round(totalPnl * 100) / 100,
-      profitFactor: Math.round(profitFactor * 100) / 100,
+      profitFactor,
       profitFactorIsSentinel,
     };
   }
 
   _determineStatus(metrics, minSampleSize) {
     if (metrics.totalTrades < minSampleSize) return 'INSUFFICIENT_DATA';
-    if (metrics.winRate < 0.40 || metrics.profitFactor < 1.0) return 'SUPPRESSED';
-    if (metrics.winRate >= 0.60 && metrics.profitFactor >= 1.5) return 'STRONG';
+    // profitFactor null = infinite (no losses); treat as STRONG for status
+    const pfOk = metrics.profitFactor == null || metrics.profitFactor >= 1.0;
+    const pfStrong = metrics.profitFactor == null || metrics.profitFactor >= 1.5;
+    if (metrics.winRate < 0.40 || !pfOk) return 'SUPPRESSED';
+    if (metrics.winRate >= 0.60 && pfStrong) return 'STRONG';
     return 'ACTIVE';
   }
 

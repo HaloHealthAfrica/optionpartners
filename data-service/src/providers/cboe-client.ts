@@ -1,7 +1,6 @@
 import axios, { AxiosInstance } from 'axios';
 import { createChildLogger } from '../utils/logger';
 import { rateLimiter } from '../services/rate-limiter';
-import { circuitBreaker } from '../services/circuit-breaker';
 import { config } from '../config';
 import type { ProviderName, VixData, VixFuture } from '../types';
 
@@ -48,18 +47,9 @@ export class CboeClient {
     });
 
     rateLimiter.configure('cboe', config.cboe.rateLimit);
-    circuitBreaker.configure('cboe', {
-      failureThreshold: 3,
-      resetTimeoutMs: 120_000,
-      halfOpenMaxAttempts: 1,
-    });
   }
 
   async getVixData(): Promise<VixData> {
-    if (!circuitBreaker.canExecute('cboe')) {
-      throw new Error('CBOE circuit breaker is open');
-    }
-
     await rateLimiter.acquire('cboe');
 
     try {
@@ -67,8 +57,6 @@ export class CboeClient {
         this.fetchVixSpot(),
         this.fetchVixFutures(),
       ]);
-
-      circuitBreaker.recordSuccess('cboe');
 
       const spotRes = this.normalizeVixValue(rawSpot);
       const termStructure = this.classifyTermStructure(spotRes, futuresRes);
@@ -80,7 +68,6 @@ export class CboeClient {
         timestamp: Date.now(),
       };
     } catch (err) {
-      circuitBreaker.recordFailure('cboe');
       log.error({ error: err instanceof Error ? err.message : err }, 'Failed to fetch VIX data');
       throw err;
     }

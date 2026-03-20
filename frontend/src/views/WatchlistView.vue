@@ -247,7 +247,7 @@ export default {
     },
     setup() {
         const router = useRouter();
-        const { showSuccess, showError, showCriticalError, showConfirmation } =
+        const { showSuccess, showError, showApiCriticalError, showConfirmation } =
             useNotification();
         const authStore = useAuthStore();
 
@@ -296,7 +296,7 @@ export default {
                 watchlists.value = response.data.data;
             } catch (error) {
                 console.error("Error loading watchlists:", error);
-                showCriticalError("Error", "Failed to load watchlists");
+                showApiCriticalError("Error", error, "Failed to load watchlists");
             } finally {
                 loading.value = false;
             }
@@ -329,8 +329,9 @@ export default {
                         );
                     } catch (error) {
                         console.error("Error deleting watchlist:", error);
-                        showCriticalError(
+                        showApiCriticalError(
                             "Error",
+                            error,
                             "Failed to delete watchlist",
                         );
                     }
@@ -359,7 +360,7 @@ export default {
                 await loadWatchlists();
             } catch (error) {
                 console.error("Error saving watchlist:", error);
-                showCriticalError("Error", "Failed to save watchlist");
+                showApiCriticalError("Error", error, "Failed to save watchlist");
             } finally {
                 saving.value = false;
             }

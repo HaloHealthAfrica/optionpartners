@@ -101,7 +101,7 @@ import { useNotification } from '@/composables/useNotification'
 import api from '@/services/api'
 
 const route = useRoute()
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showApiError } = useNotification()
 
 const loading = ref(true)
 const verified = ref(false)
@@ -143,7 +143,7 @@ async function resendVerification() {
     showResendForm.value = false
     resendEmail.value = ''
   } catch (err) {
-    showError('Error', err.response?.data?.error || 'Failed to resend verification email')
+    showApiError('Error', err, 'Failed to resend verification email')
   } finally {
     resendLoading.value = false
   }

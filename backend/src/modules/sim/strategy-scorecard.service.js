@@ -24,7 +24,7 @@ class StrategyScorecardService {
 
     const trades = await db.query(
       `SELECT pnl, r_multiple FROM sim_trades
-       WHERE user_id = $1 AND strategy = $2
+       WHERE user_id = $1 AND strategy = $2 AND (backtest_run_id IS NULL)
        ORDER BY exit_time DESC
        LIMIT $3`,
       [userId, strategy, windowSize]
@@ -123,7 +123,7 @@ class StrategyScorecardService {
    */
   async recalculateAll(userId) {
     const strategies = await db.query(
-      'SELECT DISTINCT strategy FROM sim_trades WHERE user_id = $1 AND strategy IS NOT NULL',
+      'SELECT DISTINCT strategy FROM sim_trades WHERE user_id = $1 AND strategy IS NOT NULL AND (backtest_run_id IS NULL)',
       [userId]
     );
 

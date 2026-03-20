@@ -15,7 +15,7 @@ const Sentry = require('@sentry/node');
  * Replays candles sequentially, feeds them into the decision router,
  * and executes through the sim executor. Fully deterministic.
  */
-class ReplayService {
+class ReplayService { // replay engine updated to use live normalizers
   /**
    * Start a new replay run.
    * @param {string} userId
@@ -192,22 +192,35 @@ class ReplayService {
    * This enables the same pipeline for live and replay modes.
    */
   _candle2Payload(candle, symbol, strategy) {
+    // create a payload that mimics a STRAT-style webhook so that the replay
+    // data flows through the same normalizers used in production.
     const bullish = candle.close > candle.open;
     return {
       ticker: symbol,
-      action: bullish ? 'buy' : 'sell',
+      // STRAT detection triggers when entry/stop/target are numbers
+      entry: candle.open,
+      stop: candle.low,
+      target: candle.high,
+      // include trend so the STRAT normalizer can infer direction
+      trend: bullish ? 'UP' : 'DOWN',
       strategy: strategy,
-      contract_type: 'STOCK',
-      quantity: 1,
-      bid: candle.low,
-      ask: candle.high,
-      mid: (candle.open + candle.close) / 2,
-      time: candle.timestamp || candle.time || new Date().toISOString(),
+
+      // include some of the raw fields for completeness (many normalizers read them)
+      timeframe: candle.timeframe || null,
+      timestamp: candle.timestamp || candle.time || new Date().toISOString(),
       volume: candle.volume,
       open: candle.open,
       high: candle.high,
       low: candle.low,
       close: candle.close,
+
+      // generic fallback fields
+      action: bullish ? 'buy' : 'sell',
+      contract_type: 'STOCK',
+      quantity: 1,
+      bid: candle.low,
+      ask: candle.high,
+      mid: (candle.open + candle.close) / 2,
     };
   }
 

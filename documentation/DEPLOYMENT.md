@@ -179,6 +179,41 @@ docker-compose logs postgres
 4. **Regular backups** of your database
 5. **Keep Docker images updated**
 
+## Fly.io Data Service (optionpartners-data)
+
+The backend connects to a separate data-service for quotes, options chains, VIX, and macro regime. For Fly.io:
+
+1. **Backend (optionpartners)** — `fly.toml` sets `DATA_SERVICE_URL=https://optionpartners-data.fly.dev`. Set the API key as a secret:
+   ```bash
+   fly secrets set DATA_SERVICE_API_KEY=<your-secure-key> -a optionpartners
+   ```
+
+2. **Data-service (optionpartners-data)** — Ensure `API_KEY` matches the backend's `DATA_SERVICE_API_KEY`:
+   ```bash
+   fly secrets set API_KEY=<same-key-as-above> -a optionpartners-data
+   ```
+
+3. **Verify connectivity:**
+   ```bash
+   curl -s https://optionpartners-data.fly.dev/api/health
+   fly logs -a optionpartners  # Check for connectivity gate / data-service errors
+   ```
+
+## Simulation & Webhooks (Production Checklist)
+
+When deploying with simulation trading and webhook ingestion:
+
+1. **Run all pending migrations** before deploying. Migrations run automatically on startup (or manually via `node backend/src/utils/migrate.js`). The simulation and webhook features require migrations 177–183 (revenue target, webhook rate limits, processing metrics). If migrations fail, the app may start but webhook rate limiting will gracefully degrade.
+
+2. **Operator alerts (optional)** — Set `OPERATOR_ALERT_WEBHOOK_URL` to a Slack/PagerDuty webhook URL if you want kill-switch activations and critical events to be notified. If unset, alerts are logged only.
+
+3. **Safety guard tuning (optional)** — Defaults are usually sufficient:
+   - `SIM_MAX_TRADES_PER_MINUTE=20` — Throttles rapid-fire signals
+   - `SIM_MAX_MARGIN_PERCENT=0.5` — Max risk per trade as % of buying power
+   Adjust only if your strategy requires different limits.
+
+4. **Webhook rate limiting** — Uses `webhook_rate_limits` and related tables from migration 178. No separate enable/disable; it runs automatically. On database errors it allows requests through to avoid blocking legitimate traffic.
+
 ## Support
 
 For issues and support:

@@ -993,7 +993,7 @@ import { useAuthStore } from "@/stores/auth";
 import MdiIcon from "@/components/MdiIcon.vue";
 import { mdiCheckCircle, mdiCloseCircle } from "@mdi/js";
 
-const { showSuccess, showError } = useNotification();
+const { showSuccess, showError, showApiError } = useNotification();
 const authStore = useAuthStore();
 
 const users = ref([]);
@@ -1131,7 +1131,7 @@ async function fetchUsers(page = 1) {
         }
     } catch (err) {
         error.value = err.response?.data?.error || "Failed to load users";
-        showError("Error", error.value);
+        showApiError("Error", err, "Failed to load users");
     } finally {
         loading.value = false;
     }
@@ -1211,9 +1211,10 @@ async function updateUserRole(user, newRole) {
 
         showSuccess("Success", response.data.message);
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to update user role",
+            err,
+            "Failed to update user role",
         );
     } finally {
         isUpdating.value = false;
@@ -1238,9 +1239,10 @@ async function toggleUserStatus(user) {
 
         showSuccess("Success", response.data.message);
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to update user status",
+            err,
+            "Failed to update user status",
         );
     } finally {
         isUpdating.value = false;
@@ -1268,9 +1270,10 @@ async function toggleMarketingConsent(user) {
 
         showSuccess("Success", response.data.message);
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to update marketing consent",
+            err,
+            "Failed to update marketing consent",
         );
     } finally {
         isUpdating.value = false;
@@ -1299,9 +1302,10 @@ async function deleteUser() {
         showDeleteConfirm.value = false;
         userToDelete.value = null;
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to delete user",
+            err,
+            "Failed to delete user",
         );
     } finally {
         isUpdating.value = false;
@@ -1322,9 +1326,10 @@ async function verifyUser(user) {
 
         showSuccess("Success", response.data.message);
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to verify user",
+            err,
+            "Failed to verify user",
         );
     } finally {
         isUpdating.value = false;
@@ -1347,9 +1352,10 @@ async function approveUser(user) {
 
         showSuccess("Success", response.data.message);
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to approve user",
+            err,
+            "Failed to approve user",
         );
     } finally {
         isUpdating.value = false;
@@ -1479,9 +1485,10 @@ async function exportUsersToCSV() {
         );
     } catch (err) {
         console.error("Export failed:", err);
-        showError(
+        showApiError(
             "Export Failed",
-            err.response?.data?.error || "Failed to export users",
+            err,
+            "Failed to export users",
         );
     } finally {
         loading.value = false;
@@ -1510,7 +1517,7 @@ async function fetchTierInfo(userId) {
         tierInfo.value = response.data;
     } catch (err) {
         console.error("Failed to fetch tier info:", err);
-        showError("Error", "Failed to fetch tier information");
+        showApiError("Error", err, "Failed to fetch tier information");
     }
 }
 
@@ -1546,9 +1553,10 @@ async function setTierOverride() {
             response.data.message || "Tier override set successfully",
         );
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to set tier override",
+            err,
+            "Failed to set tier override",
         );
     } finally {
         isUpdating.value = false;
@@ -1588,9 +1596,10 @@ async function grant14DayTrial() {
 
         showSuccess("Success", "14-day Pro trial granted successfully");
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to grant trial",
+            err,
+            "Failed to grant trial",
         );
     } finally {
         isUpdating.value = false;
@@ -1630,9 +1639,10 @@ async function removeTierOverride() {
             response.data.message || "Tier override removed successfully",
         );
     } catch (err) {
-        showError(
+        showApiError(
             "Error",
-            err.response?.data?.error || "Failed to remove tier override",
+            err,
+            "Failed to remove tier override",
         );
     } finally {
         isUpdating.value = false;

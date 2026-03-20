@@ -159,7 +159,7 @@ class GlobalMarketStateService {
 
     // Only fetch chains for core ETFs that the data-service poller caches.
     // Individual stock chains are too credit-expensive (~500 credits each on TD).
-    const CHAIN_SYMBOLS = (process.env.GMS_CHAIN_SYMBOLS || 'SPY,QQQ,IWM').split(',').map(s => s.trim().toUpperCase());
+    const CHAIN_SYMBOLS = (process.env.GMS_CHAIN_SYMBOLS || 'SPY,QQQ,IWM,IWN').split(',').map(s => s.trim().toUpperCase());
     if (!CHAIN_SYMBOLS.includes(sym)) {
       return { skipped: true, reason: 'not_in_chain_symbols' };
     }
@@ -249,6 +249,27 @@ class GlobalMarketStateService {
       await this._recordFailure(sym, 'chain', err.message);
       logger.error(`[GMS] ${sym}: chain refresh failed: ${err.message}`, 'global-market-state');
       return null;
+    }
+  }
+
+  /**
+   * Clear chain cache for a symbol (staleness auto-purge).
+   * When trades are blocked for data_staleness or chain_data_unavailable,
+   * clearing ensures the next signal triggers a fresh fetch instead of reusing stale data.
+   */
+  async clearChainCache(symbol) {
+    const sym = symbol.toUpperCase();
+    try {
+      await db.query(
+        `UPDATE global_market_state
+         SET chain_ok = FALSE, chain_contracts_count = 0, chain_updated_at = NULL,
+             chain_fetch_failures = 0, last_chain_error = NULL, updated_at = NOW()
+         WHERE symbol = $1`,
+        [sym]
+      );
+      logger.info(`[GMS] ${sym}: chain cache purged (staleness auto-purge)`, 'global-market-state');
+    } catch (err) {
+      logger.warn(`[GMS] ${sym}: failed to clear chain cache: ${err.message}`, 'global-market-state');
     }
   }
 
@@ -355,7 +376,7 @@ class GlobalMarketStateService {
       SELECT symbol, price_updated_at, chain_updated_at,
              price_fetch_failures, chain_fetch_failures
       FROM global_market_state
-      WHERE symbol IN ('SPY', 'QQQ', 'IWM')
+      WHERE symbol IN ('SPY', 'QQQ', 'IWM', 'IWN')
       ORDER BY symbol
     `);
 

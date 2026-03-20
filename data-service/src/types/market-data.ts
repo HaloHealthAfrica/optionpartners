@@ -143,7 +143,12 @@ export type Timeframe = '1min' | '5min' | '15min' | '30min' | '1h' | '4h' | '1da
 export type DataType =
   | 'quote' | 'candles' | 'options_chain' | 'gex' | 'flow' | 'iv' | 'vix' | 'macro'
   | 'underlying' | 'expirations' | 'chain' | 'quotes' | 'greeks'
-  | 'hist_candles' | 'hist_metrics' | 'hist_regime';
+  | 'hist_candles' | 'hist_metrics' | 'hist_regime' | 'circuit' | 'ratelimit';
+
+export interface Cached<T> {
+  data: T;
+  provider?: string;
+}
 
 export interface DerivedMetrics {
   symbol: string;

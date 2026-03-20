@@ -205,20 +205,32 @@
       </div>
 
       <div v-else>
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 px-4 py-3 flex items-center justify-between">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow mb-4 px-4 py-3 flex items-center justify-between flex-wrap gap-2">
           <div>
             <span class="text-sm font-medium text-gray-700 dark:text-gray-300">Calibration based on</span>
             <span class="ml-2 text-sm font-bold text-gray-900 dark:text-white">{{ store.calibrationData.totalTrades }} trades</span>
             <span class="ml-2 text-sm text-gray-500">(last {{ store.calibrationData.lookbackDays }} days)</span>
           </div>
-          <span
-            class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold"
-            :class="store.calibrationData.calibrationHealth === 'ALIGNED'
-              ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
-              : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'"
-          >
-            {{ store.calibrationData.calibrationHealth === 'ALIGNED' ? 'Weights Aligned' : `${store.calibrationData.driftCount} Drift(s) Detected` }}
-          </span>
+          <div class="flex items-center gap-2">
+            <span
+              v-if="store.calibrationData.calibrationCoverageScore != null"
+              class="inline-flex items-center px-2 py-1 rounded text-xs font-medium"
+              :class="store.calibrationData.calibrationCoverageWarning === 'LOW_COVERAGE'
+                ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'
+                : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'"
+              :title="`${store.calibrationData.coveredComponents || 0}/${store.calibrationData.totalComponents || 0} components have n≥5`"
+            >
+              Coverage {{ Math.round((store.calibrationData.calibrationCoverageScore || 0) * 100) }}%
+            </span>
+            <span
+              class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold"
+              :class="store.calibrationData.calibrationHealth === 'ALIGNED'
+                ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                : 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400'"
+            >
+              {{ store.calibrationData.calibrationHealth === 'ALIGNED' ? 'Weights Aligned' : `${store.calibrationData.driftCount} Drift(s) Detected` }}
+            </span>
+          </div>
         </div>
 
         <div class="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
@@ -264,11 +276,11 @@
                   </span>
                   <span v-else class="text-gray-400">—</span>
                 </td>
-                <td class="px-4 py-3 text-sm text-center" :class="comp.winRateLift > 0 ? 'text-green-600' : comp.winRateLift < 0 ? 'text-red-500' : 'text-gray-500'">
-                  {{ comp.winRateLift > 0 ? '+' : '' }}{{ comp.winRateLift }}%
+                <td class="px-4 py-3 text-sm text-center" :class="comp.winRateLift != null ? (comp.winRateLift > 0 ? 'text-green-600' : comp.winRateLift < 0 ? 'text-red-500' : 'text-gray-500') : 'text-gray-400'">
+                  {{ comp.winRateLift != null ? (comp.winRateLift > 0 ? '+' : '') + comp.winRateLift + '%' : 'N/A' }}
                 </td>
-                <td class="px-4 py-3 text-sm text-center font-mono" :class="comp.avgRLift > 0 ? 'text-green-600' : comp.avgRLift < 0 ? 'text-red-500' : 'text-gray-500'">
-                  {{ comp.avgRLift > 0 ? '+' : '' }}{{ comp.avgRLift }}R
+                <td class="px-4 py-3 text-sm text-center font-mono" :class="comp.avgRLift != null ? (comp.avgRLift > 0 ? 'text-green-600' : comp.avgRLift < 0 ? 'text-red-500' : 'text-gray-500') : 'text-gray-400'">
+                  {{ comp.avgRLift != null ? (comp.avgRLift > 0 ? '+' : '') + comp.avgRLift + 'R' : 'N/A' }}
                 </td>
                 <td class="px-4 py-3 text-sm text-center text-gray-600 dark:text-gray-400">{{ comp.present.sampleSize }}</td>
                 <td class="px-4 py-3 text-sm text-center text-gray-600 dark:text-gray-400">{{ formatPct(comp.present.winRate) }}</td>
@@ -350,7 +362,9 @@
                 <td class="px-4 py-3 text-sm text-center font-mono" :class="cell.avgR >= 0 ? 'text-green-600' : 'text-red-500'">
                   {{ cell.avgR > 0 ? '+' : '' }}{{ cell.avgR }}R
                 </td>
-                <td class="px-4 py-3 text-sm text-center text-gray-600 dark:text-gray-400">{{ cell.profitFactor }}</td>
+                <td class="px-4 py-3 text-sm text-center text-gray-600 dark:text-gray-400">
+                  {{ (cell.profitFactorIsSentinel || cell.profitFactor == null) ? `∞ (no losses, n=${cell.totalTrades})` : cell.profitFactor }}
+                </td>
                 <td class="px-4 py-3 text-sm text-right font-mono" :class="cell.totalPnl >= 0 ? 'text-green-600' : 'text-red-500'">
                   ${{ cell.totalPnl.toLocaleString() }}
                 </td>
@@ -648,7 +662,7 @@
                 <td class="px-4 py-2 text-sm font-medium text-gray-900 dark:text-white">{{ s.source }}</td>
                 <td class="px-4 py-2 text-sm text-center text-gray-500">{{ s.sampleSize }}</td>
                 <td class="px-4 py-2 text-sm text-center font-semibold" :class="s.winRate >= 0.5 ? 'text-green-600' : 'text-red-500'">{{ formatPct(s.winRate) }}</td>
-                <td class="px-4 py-2 text-sm text-center" :class="s.profitFactor >= 1.5 ? 'text-green-600' : s.profitFactor >= 1 ? 'text-gray-700 dark:text-gray-300' : 'text-red-500'">{{ s.profitFactor }}</td>
+                <td class="px-4 py-2 text-sm text-center" :class="(s.profitFactor == null || s.profitFactor >= 999) ? 'text-green-600' : s.profitFactor >= 1.5 ? 'text-green-600' : s.profitFactor >= 1 ? 'text-gray-700 dark:text-gray-300' : 'text-red-500'">{{ (s.profitFactor == null || s.profitFactor >= 999) ? '∞' : s.profitFactor }}</td>
                 <td class="px-4 py-2 text-sm text-center" :class="s.avgPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ s.avgPnl }}</td>
                 <td class="px-4 py-2 text-sm text-center font-semibold" :class="s.totalPnl >= 0 ? 'text-green-600' : 'text-red-500'">${{ s.totalPnl }}</td>
                 <td class="px-4 py-2 text-sm text-center text-gray-500">{{ s.avgR || '-' }}</td>
@@ -1120,12 +1134,198 @@
       </div>
     </div>
 
-    <!-- ═══ Tab: Backtest (placeholder) ═══ -->
+    <!-- ═══ Tab: Backtest Lab ═══ -->
     <div v-else-if="activeTab === 'backtest'">
-      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center text-gray-500 dark:text-gray-400">
-        <BeakerIcon class="h-12 w-12 mx-auto mb-3 opacity-50" />
-        <p class="font-medium">Backtest Lab — Coming Soon</p>
-        <p class="mt-2 text-xs max-w-md mx-auto">Replay historical webhooks through modified engine rules to validate changes before deployment.</p>
+      <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+        <div class="flex items-center gap-3 mb-6">
+          <BeakerIcon class="h-10 w-10 text-indigo-500" />
+          <div>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Backtest Lab</h3>
+            <p class="text-sm text-gray-500 dark:text-gray-400">Replay historical webhooks through the decision pipeline to validate strategy changes before deployment.</p>
+          </div>
+        </div>
+
+        <form @submit.prevent="runBacktest" class="space-y-4 mb-8">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Start Date</label>
+              <input
+                v-model="backtestForm.startDate"
+                type="date"
+                required
+                class="w-full rounded-lg border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">End Date</label>
+              <input
+                v-model="backtestForm.endDate"
+                type="date"
+                required
+                class="w-full rounded-lg border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Indicator Sources (optional)</label>
+            <select
+              v-model="backtestForm.indicatorSources"
+              multiple
+              class="w-full rounded-lg border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 min-h-[80px]"
+            >
+              <option value="STRAT">STRAT</option>
+              <option value="SIGNALS">SIGNALS</option>
+              <option value="REVERSAL">REVERSAL</option>
+              <option value="ORB">ORB</option>
+              <option value="CRT">CRT</option>
+              <option value="SQUEEZE_PRO">SQUEEZE_PRO</option>
+              <option value="PIVOT_MB">PIVOT_MB</option>
+            </select>
+            <p class="mt-1 text-xs text-gray-500">Hold Ctrl/Cmd to select multiple. Leave empty for all.</p>
+          </div>
+
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Strategies (optional)</label>
+            <select
+              v-model="backtestForm.strategies"
+              multiple
+              class="w-full rounded-lg border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white px-3 py-2 min-h-[80px]"
+            >
+              <option v-for="s in store.backtestStrategies" :key="s" :value="s">{{ s }}</option>
+            </select>
+            <p class="mt-1 text-xs text-gray-500">Hold Ctrl/Cmd to select multiple. Leave empty for all.</p>
+          </div>
+
+          <div v-if="store.backtestError" class="p-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm flex items-start justify-between gap-3">
+            <span>{{ store.backtestError }}</span>
+            <button
+              type="button"
+              @click="retryBacktestLoad"
+              class="flex-shrink-0 text-sm font-medium text-red-800 dark:text-red-300 hover:underline"
+            >
+              Retry
+            </button>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button
+              type="button"
+              @click="checkBacktestWebhooks"
+              :disabled="store.backtestLoading || !backtestForm.startDate || !backtestForm.endDate"
+              class="inline-flex items-center px-3 py-2 rounded-lg font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+            >
+              {{ backtestWebhookCount != null ? `${backtestWebhookCount} webhooks` : 'Check webhooks' }}
+            </button>
+            <button
+              type="submit"
+              :disabled="store.backtestLoading"
+              class="inline-flex items-center px-4 py-2.5 rounded-lg font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <ArrowPathIcon v-if="store.backtestLoading" class="h-5 w-5 mr-2 animate-spin" />
+              <BeakerIcon v-else class="h-5 w-5 mr-2" />
+              {{ store.backtestLoading ? 'Starting...' : 'Run Backtest' }}
+            </button>
+          </div>
+        </form>
+
+        <div v-if="store.backtestRuns.length > 0" class="border-t border-gray-200 dark:border-gray-700 pt-6">
+          <h4 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">Recent Runs</h4>
+          <div class="space-y-3">
+            <div
+              v-for="run in store.backtestRuns"
+              :key="run.id"
+              class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-gray-700/50 hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="font-medium text-gray-900 dark:text-white">{{ run.start_date }} → {{ run.end_date }}</span>
+                  <span
+                    class="text-xs px-2 py-0.5 rounded-full"
+                    :class="{
+                      'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400': run.status === 'COMPLETED',
+                      'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400': run.status === 'FAILED',
+                      'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400': run.status === 'RUNNING',
+                    }"
+                  >
+                    {{ run.status }}
+                  </span>
+                </div>
+                <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  {{ run.webhooks_processed }} webhooks · {{ run.total_trades }} trades · PnL ${{ Number(run.total_pnl || 0).toFixed(2) }} · WR {{ (Number(run.win_rate || 0) * 100).toFixed(1) }}%
+                  <span v-if="run.status === 'FAILED' && run.error_message" class="block mt-1 text-red-600 dark:text-red-400 truncate" :title="run.error_message">{{ run.error_message }}</span>
+                </div>
+              </div>
+              <button
+                @click="viewBacktestRun(run.id)"
+                class="ml-2 text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+              >
+                View
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="selectedBacktestRun" class="mt-6 border-t border-gray-200 dark:border-gray-700 pt-6">
+          <h4 class="text-sm font-semibold text-gray-900 dark:text-white mb-3">Run Details</h4>
+          <div v-if="selectedBacktestRun.status === 'FAILED' && selectedBacktestRun.error_message" class="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 text-sm">
+            <span class="font-medium">Failure reason:</span> {{ selectedBacktestRun.error_message }}
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+            <div class="p-3 rounded-lg bg-gray-50 dark:bg-gray-700/50">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Trades</div>
+              <div class="text-lg font-semibold text-gray-900 dark:text-white">{{ selectedBacktestRun.total_trades }}</div>
+            </div>
+            <div class="p-3 rounded-lg bg-gray-50 dark:bg-gray-700/50">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Win Rate</div>
+              <div class="text-lg font-semibold" :class="Number(selectedBacktestRun.win_rate) >= 0.5 ? 'text-green-600' : 'text-red-600'">
+                {{ (Number(selectedBacktestRun.win_rate || 0) * 100).toFixed(1) }}%
+              </div>
+            </div>
+            <div class="p-3 rounded-lg bg-gray-50 dark:bg-gray-700/50">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Total PnL</div>
+              <div class="text-lg font-semibold" :class="Number(selectedBacktestRun.total_pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                ${{ Number(selectedBacktestRun.total_pnl || 0).toFixed(2) }}
+              </div>
+            </div>
+            <div class="p-3 rounded-lg bg-gray-50 dark:bg-gray-700/50">
+              <div class="text-xs text-gray-500 dark:text-gray-400">Profit Factor</div>
+              <div class="text-lg font-semibold text-gray-900 dark:text-white">{{ Number(selectedBacktestRun.profit_factor || 0).toFixed(2) }}</div>
+            </div>
+          </div>
+          <div v-if="selectedBacktestRun.by_strategy?.length" class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-200 dark:border-gray-600">
+                  <th class="text-left py-2 px-3 text-gray-700 dark:text-gray-300">Strategy</th>
+                  <th class="text-right py-2 px-3 text-gray-700 dark:text-gray-300">Trades</th>
+                  <th class="text-right py-2 px-3 text-gray-700 dark:text-gray-300">Wins</th>
+                  <th class="text-right py-2 px-3 text-gray-700 dark:text-gray-300">Win Rate</th>
+                  <th class="text-right py-2 px-3 text-gray-700 dark:text-gray-300">PnL</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(s, i) in selectedBacktestRun.by_strategy" :key="i" class="border-b border-gray-100 dark:border-gray-700/50">
+                  <td class="py-2 px-3 font-medium text-gray-900 dark:text-white">{{ s.strategy }}</td>
+                  <td class="py-2 px-3 text-right text-gray-700 dark:text-gray-300">{{ s.trades }}</td>
+                  <td class="py-2 px-3 text-right text-gray-700 dark:text-gray-300">{{ s.wins }}</td>
+                  <td class="py-2 px-3 text-right" :class="Number(s.win_rate) >= 0.5 ? 'text-green-600' : 'text-red-600'">
+                    {{ (Number(s.win_rate || 0) * 100).toFixed(1) }}%
+                  </td>
+                  <td class="py-2 px-3 text-right" :class="Number(s.pnl) >= 0 ? 'text-green-600' : 'text-red-600'">
+                    ${{ Number(s.pnl || 0).toFixed(2) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <button
+            @click="selectedBacktestRun = null"
+            class="mt-4 text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-400"
+          >
+            ← Back to list
+          </button>
+        </div>
       </div>
     </div>
 
@@ -1229,6 +1429,24 @@ const autoInsightDismissed = ref(false)
 const showLiveFeed = ref(false)
 const feedFilter = ref('all')
 const insightFollowup = ref('')
+const selectedBacktestRun = ref(null)
+
+function getDefaultBacktestDates() {
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - 7)
+  return {
+    startDate: start.toISOString().slice(0, 10),
+    endDate: end.toISOString().slice(0, 10),
+  }
+}
+
+const backtestForm = ref({
+  ...getDefaultBacktestDates(),
+  indicatorSources: [],
+  strategies: [],
+})
+const backtestWebhookCount = ref(null)
 
 const tabs = [
   { id: 'calibration',  label: 'Calibration' },
@@ -1237,7 +1455,7 @@ const tabs = [
   { id: 'regime',       label: 'Regime Edge' },
   { id: 'temporal',     label: 'Temporal Edge' },
   { id: 'aiInsights',   label: 'AI Insights', badge: 'New' },
-  { id: 'backtest',     label: 'Backtest', badge: 'Soon' },
+  { id: 'backtest',     label: 'Backtest Lab' },
 ]
 
 const filteredFeedEvents = computed(() => {
@@ -1284,6 +1502,74 @@ function viewAutoInsight() {
     store.aiInsightsStreamText = store.autoInsight.analysis
   }
 }
+
+async function checkBacktestWebhooks() {
+  try {
+    const params = {
+      startDate: backtestForm.value.startDate,
+      endDate: backtestForm.value.endDate,
+    }
+    if (backtestForm.value.indicatorSources?.length) {
+      params.indicatorSources = backtestForm.value.indicatorSources
+    }
+    if (backtestForm.value.strategies?.length) {
+      params.strategies = backtestForm.value.strategies
+    }
+    const count = await store.preflightBacktest(params)
+    backtestWebhookCount.value = count
+  } catch (err) {
+    console.error('[BACKTEST] Preflight failed:', err)
+    backtestWebhookCount.value = null
+    store.backtestError = err.response?.data?.error || err.message
+  }
+}
+
+async function runBacktest() {
+  try {
+    store.backtestError = null
+    backtestWebhookCount.value = null
+    const params = {
+      startDate: backtestForm.value.startDate,
+      endDate: backtestForm.value.endDate,
+    }
+    if (backtestForm.value.indicatorSources?.length) {
+      params.indicatorSources = backtestForm.value.indicatorSources
+    }
+    if (backtestForm.value.strategies?.length) {
+      params.strategies = backtestForm.value.strategies
+    }
+    await store.startBacktest(params)
+    await store.fetchBacktestRuns()
+    store.startBacktestPolling()
+    activeTab.value = 'backtest'
+  } catch (err) {
+    console.error('[BACKTEST] Run failed:', err)
+  }
+}
+
+async function viewBacktestRun(id) {
+  try {
+    const run = await store.fetchBacktestRun(id)
+    selectedBacktestRun.value = run
+  } catch (err) {
+    console.error('[BACKTEST] Fetch run failed:', err)
+  }
+}
+
+async function retryBacktestLoad() {
+  store.backtestError = null
+  await store.fetchBacktestStrategies()
+  await store.fetchBacktestRuns()
+}
+
+watch(activeTab, (tab) => {
+  if (tab === 'backtest') {
+    store.fetchBacktestStrategies()
+    store.fetchBacktestRuns()
+    const hasRunning = (store.backtestRuns || []).some((r) => r.status === 'RUNNING')
+    if (hasRunning) store.startBacktestPolling()
+  }
+})
 
 function dismissAutoInsight() {
   autoInsightDismissed.value = true
@@ -1483,6 +1769,7 @@ let _contextInterval = null
 
 onUnmounted(() => {
   store.disconnectLiveFeed()
+  store.stopBacktestPolling()
   if (_contextInterval) clearInterval(_contextInterval)
 })
 </script>

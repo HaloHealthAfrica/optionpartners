@@ -121,7 +121,7 @@ import TwoFactorAuth from '@/components/TwoFactorAuth.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()
-const { showError, showSuccess } = useNotification()
+const { showError, showSuccess, showApiError } = useNotification()
 const { allowRegistration, fetchRegistrationConfig } = useRegistrationMode()
 
 const verificationMessage = ref('')
@@ -197,7 +197,7 @@ async function handleResendVerification() {
     }, 1000)
     
   } catch (error) {
-    showError('Error', error.response?.data?.error || 'Failed to resend verification email')
+    showApiError('Error', error, 'Failed to resend verification email')
   } finally {
     resendLoading.value = false
   }

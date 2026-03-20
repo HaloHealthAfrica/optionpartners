@@ -217,7 +217,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'mappingCreated', 'resolutionStarted'])
 
 const authStore = useAuthStore()
-const { showImportantWarning, showCriticalError } = useNotification()
+const { showImportantWarning, showApiCriticalError } = useNotification()
 
 // Component state
 const mappingCusip = ref(null)
@@ -270,11 +270,11 @@ const autoRemapAll = async () => {
     } else {
       const error = await response.json()
       console.error('Failed to auto remap:', error)
-      showCriticalError('Auto Remap Failed', 'Failed to auto remap CUSIPs. Please try again.')
+      showApiCriticalError('Auto Remap Failed', error, 'Failed to auto remap CUSIPs. Please try again.')
     }
   } catch (error) {
     console.error('Error auto remapping:', error)
-    showCriticalError('Auto Remap Failed', 'Failed to auto remap CUSIPs. Please try again.')
+    showApiCriticalError('Auto Remap Failed', error, 'Failed to auto remap CUSIPs. Please try again.')
   } finally {
     remapping.value = false
   }

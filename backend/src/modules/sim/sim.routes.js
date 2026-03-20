@@ -6,6 +6,7 @@ const { authenticate } = require('../../middleware/auth');
 const simController = require('./sim.controller');
 const intelligenceController = require('./intelligence.controller');
 const adaptiveIntelligence = require('./adaptive-intelligence/adaptive-intelligence.controller');
+const revenueTargetController = require('./revenue-target/revenue-target.controller');
 
 // All sim routes require authentication
 router.use(authenticate);
@@ -20,6 +21,9 @@ router.get('/orders', simController.getOrders);
 
 // Sim trades
 router.get('/trades', simController.getTrades);
+
+// Reconciliation endpoint (webhook vs trades)
+router.get('/reconcile', simController.reconcileWebhookTrades);
 
 // Equity curve
 router.get('/equity-curve', simController.getEquityCurve);
@@ -38,10 +42,35 @@ router.post('/kill-switch', simController.toggleKillSwitch);
 router.post('/replay', simController.startReplay);
 router.get('/runs', simController.getSimRuns);
 
+// Webhook backtest (Backtest Lab)
+const backtestController = require('./backtest.controller');
+router.post('/backtest/preflight', backtestController.preflightBacktest);
+router.post('/backtest', backtestController.startBacktest);
+router.get('/backtest', backtestController.listBacktests);
+router.get('/backtest/:id', backtestController.getBacktest);
+router.get('/strategies', backtestController.getStrategies);
+
+// Revenue target (daily target, gate, progress)
+router.get('/revenue-target/config', revenueTargetController.getConfig);
+router.put('/revenue-target/config', revenueTargetController.updateConfig);
+router.get('/revenue-target/progress', revenueTargetController.getProgress);
+router.get('/revenue-target/history', revenueTargetController.getHistory);
+router.get('/revenue-target/stats', revenueTargetController.getStats);
+router.get('/revenue-target/decisions', revenueTargetController.getDecisions);
+router.post('/revenue-target/override', revenueTargetController.setOverride);
+router.delete('/revenue-target/override', revenueTargetController.clearOverride);
+
 // Status & health
 router.get('/status', simController.getStatus);
+router.get('/webhook-stats', simController.getWebhookStats);
+router.get('/pipeline-observatory', simController.getPipelineObservatory);
+router.post('/requeue-rejected', simController.bulkRequeueRejected);
 router.get('/health/state', simController.getStateHealth);
 router.get('/health/global', simController.getGlobalHealth);
+
+// Connectivity gate (replaces circuit breaker — reset when data-service unreachable)
+router.post('/data-service/circuit-breaker/reset', simController.resetDataServiceCircuitBreaker);
+router.post('/connectivity/reset', simController.resetDataServiceCircuitBreaker);
 
 // Warmup: seed symbol state with price + chain data from data service
 router.post('/warmup/:symbol', simController.warmupSymbol);

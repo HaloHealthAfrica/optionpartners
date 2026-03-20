@@ -541,7 +541,7 @@ export default {
     },
     setup() {
         const route = useRoute();
-        const { showSuccess, showError, showCriticalError, showConfirmation } =
+        const { showSuccess, showError, showApiError, showCriticalError, showApiCriticalError, showConfirmation } =
             useNotification();
         const authStore = useAuthStore();
         const { isConnected, notifications, requestNotificationPermission } =
@@ -623,7 +623,7 @@ export default {
                 alerts.value = response.data.data;
             } catch (error) {
                 console.error("Error loading alerts:", error);
-                showCriticalError("Error", "Failed to load price alerts");
+                showApiCriticalError("Error", error, "Failed to load price alerts");
             } finally {
                 loading.value = false;
             }
@@ -653,7 +653,7 @@ export default {
                         showSuccess("Success", "Price alert deleted");
                     } catch (error) {
                         console.error("Error deleting alert:", error);
-                        showCriticalError("Error", "Failed to delete alert");
+                        showApiCriticalError("Error", error, "Failed to delete alert");
                     }
                 },
             );
@@ -665,7 +665,7 @@ export default {
                 showSuccess("Success", "Test alert sent");
             } catch (error) {
                 console.error("Error testing alert:", error);
-                showCriticalError("Error", "Failed to send test alert");
+                showApiCriticalError("Error", error, "Failed to send test alert");
             }
         };
 
@@ -690,12 +690,7 @@ export default {
                 console.error("Error saving alert:", error);
                 console.error("Error response:", error.response);
                 console.error("Error response data:", error.response?.data);
-                const message =
-                    error.response?.data?.error ||
-                    error.response?.data?.message ||
-                    error.message ||
-                    "Failed to save alert";
-                showCriticalError("Error", message);
+                showApiCriticalError("Error", error, "Failed to save alert");
             } finally {
                 saving.value = false;
             }

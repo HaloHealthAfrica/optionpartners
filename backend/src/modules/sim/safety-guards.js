@@ -11,8 +11,10 @@ const { isWithinTradingHours, getETDate } = require('../../utils/timezone');
  * @property {number} maxOpenPositions      - Max concurrent open positions (default: 5)
  * @property {number} maxDteBucketExposure  - Max positions per DTE bucket (default: 3)
  * @property {boolean} killSwitchActive     - Emergency stop flag
- * @property {string} tradingStartTime      - Earliest trade time HH:MM (default: "09:30")
+ * @property {string} tradingStartTime      - Earliest trade time HH:MM (default: "09:00")
  * @property {string} tradingEndTime        - Latest trade time HH:MM (default: "16:00")
+ * @property {string} [entrySessionStart]   - Entry window start HH:MM (default: "09:30" = market open)
+ * @property {string} [entrySessionEnd]     - Entry window end HH:MM (default: "16:00" = market close)
  * @property {number} maxSignalAgeMs        - Max age for signal staleness (default: 300000 = 5min)
  */
 
@@ -20,10 +22,15 @@ const DEFAULT_CONFIG = {
   maxDailyLoss: parseFloat(process.env.SIM_MAX_DAILY_LOSS || '2000'),
   maxRiskPerTrade: parseFloat(process.env.SIM_MAX_RISK_PER_TRADE || '1000'),
   maxOpenPositions: parseInt(process.env.SIM_MAX_OPEN_POSITIONS || '5', 10),
+  maxTradesPerMinute: parseInt(process.env.SIM_MAX_TRADES_PER_MINUTE || '20', 10),
+  maxMarginPercent: parseFloat(process.env.SIM_MAX_MARGIN_PERCENT || '0.5'),
   maxDteBucketExposure: parseInt(process.env.SIM_MAX_DTE_BUCKET || '3', 10),
   killSwitchActive: process.env.SIM_KILL_SWITCH === 'true',
   tradingStartTime: process.env.SIM_TRADING_START || '09:00',
   tradingEndTime: process.env.SIM_TRADING_END || '16:00',
+  // Full market hours (9:30–16:00 ET) by default. Set ENTRY_SESSION_END=10:00 to restrict to opening drive only.
+  entrySessionStart: process.env.ENTRY_SESSION_START || process.env.SIM_TRADING_START || '09:30',
+  entrySessionEnd: process.env.ENTRY_SESSION_END || process.env.SIM_TRADING_END || '16:00',
   maxSignalAgeMs: parseInt(process.env.SIM_MAX_SIGNAL_AGE_MS || '300000', 10),
 };
 
@@ -33,10 +40,13 @@ class SafetyGuards {
   }
 
   /**
-   * Run all safety checks. Returns { safe: boolean, violations: string[] }
+   * Run all safety checks. Returns { safe: boolean, violations: string[], primaryRule: string }
+   * primaryRule identifies which rule fired first — used for rejection_reason logging (Fix Block 5).
    */
   async evaluate(signal, accountState, userId) {
     const violations = [];
+    /** @type {string|null} Rule ID for signal_rejections.rejection_reason — enables rule-level analysis */
+    let primaryRule = null;
 
     // Kill switch — auto-reset at start of new trading day
     const isStaleDay = accountState?.daily_pnl_reset_at
@@ -46,6 +56,7 @@ class SafetyGuards {
     if (this.config.killSwitchActive || effectiveKillSwitch) {
       const source = this.config.killSwitchActive ? 'ENV_CONFIG' : 'DB_ACCOUNT_STATE';
       violations.push('Kill switch is active');
+      primaryRule = 'safety_kill_switch';
       logger.warn(
         `[KILL_SWITCH] Triggered for user ${userId} — source=${source}, ` +
         `symbol=${signal?.symbol || 'N/A'}, strategy=${signal?.strategy || 'N/A'}, ` +
@@ -53,7 +64,7 @@ class SafetyGuards {
         `isStaleDay=${isStaleDay}`,
         'sim-safety'
       );
-      return { safe: false, violations };
+      return { safe: false, violations, primaryRule };
     }
 
     // Max daily loss — treat stale daily_pnl as 0 for a new trading day
@@ -62,6 +73,13 @@ class SafetyGuards {
       const dailyLoss = Math.abs(Math.min(0, effectiveDailyPnl));
       if (dailyLoss >= this.config.maxDailyLoss) {
         violations.push(`Daily loss limit reached: $${dailyLoss.toFixed(2)} >= $${this.config.maxDailyLoss}`);
+        primaryRule = 'safety_daily_loss_limit';
+        // activate kill switch if not already
+        if (!effectiveKillSwitch) {
+          try {
+            await this.activateKillSwitch(userId, 'daily_loss_limit');
+          } catch (_) {}
+        }
       }
     }
 
@@ -70,6 +88,16 @@ class SafetyGuards {
       const estimatedRisk = this._estimateRisk(signal);
       if (estimatedRisk > this.config.maxRiskPerTrade) {
         violations.push(`Trade risk $${estimatedRisk.toFixed(2)} exceeds max $${this.config.maxRiskPerTrade}`);
+        if (!primaryRule) primaryRule = 'safety_max_risk_per_trade';
+      }
+
+      // enforce margin percent limit
+      if (accountState && this.config.maxMarginPercent) {
+        const maxAllowed = (accountState.buying_power || 0) * this.config.maxMarginPercent;
+        if (estimatedRisk > maxAllowed) {
+          violations.push(`Trade risk $${estimatedRisk.toFixed(2)} exceeds ${Math.round(this.config.maxMarginPercent*100)}% of buying power ($${maxAllowed.toFixed(2)})`);
+          if (!primaryRule) primaryRule = 'safety_margin_percent_limit';
+        }
       }
     }
 
@@ -78,6 +106,23 @@ class SafetyGuards {
       const openCount = await this._getOpenPositionCount(userId);
       if (openCount >= this.config.maxOpenPositions) {
         violations.push(`Max open positions reached: ${openCount} >= ${this.config.maxOpenPositions}`);
+        if (!primaryRule) primaryRule = 'safety_max_open_positions';
+      }
+
+      // max trades per minute guard
+      if (this.config.maxTradesPerMinute) {
+        const recent = await db.query(
+          `SELECT COUNT(*)::int AS cnt
+           FROM sim_trades
+           WHERE user_id = $1
+             AND entry_time > NOW() - INTERVAL '1 minute'`,
+          [userId]
+        );
+        const cnt = recent.rows[0]?.cnt || 0;
+        if (cnt >= this.config.maxTradesPerMinute) {
+          violations.push(`Trade frequency limit reached: ${cnt} trades in last minute >= ${this.config.maxTradesPerMinute}`);
+          if (!primaryRule) primaryRule = 'safety_max_trades_per_minute';
+        }
       }
     }
 
@@ -87,13 +132,17 @@ class SafetyGuards {
       const bucketCount = await this._getDteBucketCount(userId, dteBucket);
       if (bucketCount >= this.config.maxDteBucketExposure) {
         violations.push(`DTE bucket "${dteBucket}" exposure at max: ${bucketCount} >= ${this.config.maxDteBucketExposure}`);
+        if (!primaryRule) primaryRule = 'safety_dte_bucket_exposure';
       }
     }
 
-    // Time-of-day filter
-    const timeCheck = this._checkTradingHours();
-    if (!timeCheck.allowed) {
-      violations.push(timeCheck.reason);
+    // Time-of-day filter (Fix 5: exits allowed at any time; entries use ENTRY_SESSION window)
+    if (signal.action === 'BUY') {
+      const timeCheck = this._checkEntrySession();
+      if (!timeCheck.allowed) {
+        violations.push(timeCheck.reason);
+        if (!primaryRule) primaryRule = 'safety_session_window_block';
+      }
     }
 
     // Signal staleness
@@ -110,6 +159,7 @@ class SafetyGuards {
         const age = Date.now() - payloadTimeMs;
         if (!isNaN(age) && age > this.config.maxSignalAgeMs) {
           violations.push(`Signal is stale: ${Math.round(age / 1000)}s old (max ${this.config.maxSignalAgeMs / 1000}s)`);
+          if (!primaryRule) primaryRule = 'safety_signal_staleness';
         }
       }
     }
@@ -117,6 +167,7 @@ class SafetyGuards {
     return {
       safe: violations.length === 0,
       violations,
+      primaryRule: primaryRule || (violations.length > 0 ? 'safety_other' : null),
     };
   }
 
@@ -192,6 +243,14 @@ class SafetyGuards {
   }
 
   /**
+   * Entry session window — only allow BUY actions within configured hours (default 9:30–16:00 ET).
+   * Override via ENTRY_SESSION_START / ENTRY_SESSION_END. Exits are not checked here.
+   */
+  _checkEntrySession() {
+    return isWithinTradingHours(this.config.entrySessionStart, this.config.entrySessionEnd);
+  }
+
+  /**
    * Activate kill switch for user. Logs reason for audit trail.
    */
   async activateKillSwitch(userId, reason = 'manual') {
@@ -199,6 +258,17 @@ class SafetyGuards {
       `UPDATE sim_account_state SET kill_switch_active = TRUE, updated_at = NOW() WHERE user_id = $1`,
       [userId]
     );
+
+    // Operator alert (Slack/PagerDuty/etc.)
+    try {
+      const operatorAlert = require('../../services/operator-alert.service');
+      operatorAlert.sendAlert(
+        `Kill switch activated for user ${userId}`,
+        `Reason: ${reason}`
+      );
+    } catch (err) {
+      logger.warn(`Operator alert failure: ${err.message}`, 'operator-alert');
+    }
 
     // Log to signal_rejections for audit trail
     try {

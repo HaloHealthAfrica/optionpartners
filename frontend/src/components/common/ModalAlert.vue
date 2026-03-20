@@ -45,10 +45,22 @@
                             {{ modalAlert.title }}
                         </h3>
                         <p
-                            class="text-sm text-gray-600 dark:text-gray-300 mb-6"
+                            class="text-sm text-gray-600 dark:text-gray-300"
+                            :class="modalAlert.errorCode ? 'mb-3' : 'mb-6'"
                         >
                             {{ modalAlert.message }}
                         </p>
+                        <div v-if="modalAlert.errorCode" class="mb-6 flex items-center justify-center gap-2">
+                            <code class="text-xs font-mono px-1.5 py-0.5 rounded bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800">{{ modalAlert.errorCode }}</code>
+                            <router-link
+                                v-if="isAdmin"
+                                :to="{ path: '/admin/errors', query: { search: modalAlert.errorCode } }"
+                                class="text-xs text-primary-600 dark:text-primary-400 hover:underline"
+                                @click="clearModalAlert"
+                            >
+                                View in Error Reference
+                            </router-link>
+                        </div>
                     </div>
 
                     <!-- Buttons -->
@@ -91,6 +103,7 @@
 <script setup>
 import { computed, watch, onBeforeUnmount } from "vue";
 import { useNotification } from "@/composables/useNotification";
+import { useAuthStore } from "@/stores/auth";
 import {
     ExclamationTriangleIcon,
     XCircleIcon,
@@ -99,6 +112,8 @@ import {
 } from "@heroicons/vue/24/outline";
 
 const { modalAlert, clearModalAlert } = useNotification();
+const authStore = useAuthStore();
+const isAdmin = computed(() => authStore.user?.role === "admin");
 
 const iconBgClass = computed(() => {
     switch (modalAlert.value?.type) {

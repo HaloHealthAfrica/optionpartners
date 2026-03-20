@@ -57,8 +57,11 @@ const aiRoutes = require('./routes/ai.routes');
 const symbolsRoutes = require('./routes/symbols.routes');
 const unsubscribeRoutes = require('./routes/unsubscribe.routes');
 const marketDataRoutes = require('./routes/marketData.routes');
+const errorCatalogRoutes = require('./routes/errorCatalog.routes');
 const webhookRoutes = require('./modules/webhooks/webhook.routes');
 const simRoutes = require('./modules/sim/sim.routes');
+const dataValidationRoutes = require('./modules/data-validation/data-validation.routes');
+const dataValidationScheduler = require('./modules/data-validation/data-validation-scheduler');
 const webhookProcessor = require('./modules/sim/webhook-processor');
 const exitMonitor = require('./modules/sim/exit-monitor');
 const trendDataScheduler = require('./modules/sim/trend-data-scheduler');
@@ -210,8 +213,8 @@ app.use(cookieParser());
 app.use((req, res, next) => {
   if (req.originalUrl === '/api/billing/webhooks/stripe') {
     next();
-  } else if (req.path.startsWith('/api/webhooks/')) {
-    // Capture raw body for HMAC signature verification on all webhook endpoints
+  } else if (req.path.startsWith('/api/webhooks/') && req.method === 'POST') {
+    // Capture raw body for HMAC signature verification on POST webhook endpoints only
     let data = '';
     req.setEncoding('utf8');
     req.on('data', (chunk) => { data += chunk; });
@@ -220,8 +223,6 @@ app.use((req, res, next) => {
       try {
         req.body = JSON.parse(data);
       } catch (e) {
-        // Reject unparseable payloads immediately instead of silently continuing
-        // with an empty object (which would create a universal dedupe key collision)
         return res.status(400).json({
           error: 'Invalid JSON payload',
           detail: e.message,
@@ -236,6 +237,56 @@ app.use((req, res, next) => {
 app.use(express.urlencoded({ extended: true }));
 app.use('/api', skipRateLimit);
 
+// Root route: Dual-Engine Options Trading Platform branding (when backend is hit directly)
+// In production behind nginx, / serves the frontend; this handles API-only or direct access
+app.get('/', (req, res) => {
+  if (req.headers.accept && req.headers.accept.includes('application/json')) {
+    return res.json({
+      name: 'Dual-Engine Options Trading Platform',
+      version: '1.0.0',
+      engines: {
+        engine1: 'Traditional Signal Processing (Production)',
+        engine2: 'Multi-Agent Swarm Decision System (Shadow)',
+      },
+      app: 'TradeTally / OptionPartners',
+      docs: '/api-docs',
+      health: '/api/health',
+    });
+  }
+  res.type('html').send(`
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dual-Engine Options Trading Platform</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2rem}
+    h1{font-size:1.75rem;font-weight:700;margin:0 0 0.5rem}
+    .sub{color:#94a3b8;font-size:1rem;margin-bottom:2rem}
+    .engines{display:grid;gap:1rem;max-width:28rem;width:100%}
+    .engine{background:#1e293b;border:1px solid #334155;border-radius:0.5rem;padding:1rem 1.25rem}
+    .engine strong{color:#38bdf8}
+    .cta{margin-top:2rem}
+    .cta a{display:inline-block;background:#3b82f6;color:#fff;padding:0.75rem 1.5rem;border-radius:0.5rem;text-decoration:none;font-weight:600}
+    .cta a:hover{background:#2563eb}
+  </style>
+</head>
+<body>
+  <h1>Dual-Engine Options Trading Platform</h1>
+  <p class="sub">TradeTally / OptionPartners — v1.0.0</p>
+  <div class="engines">
+    <div class="engine"><strong>Engine 1</strong> — Traditional Signal Processing (Production)</div>
+    <div class="engine"><strong>Engine 2</strong> — Multi-Agent Swarm Decision System (Shadow)</div>
+  </div>
+  <div class="cta">
+    <a href="/">Open Application</a>
+  </div>
+</body>
+</html>
+  `);
+});
+
 // V1 API routes (mobile-optimized)
 app.use('/api/v1', v1Routes);
 
@@ -249,8 +300,11 @@ app.use('/api/equity', equityRoutes);
 app.use('/api/2fa', twoFactorRoutes);
 app.use('/api/api-keys', apiKeyRoutes);
 app.use('/api/v2', apiRoutes);
-app.use('/api/admin', adminRoutes);
+// More specific admin routes must come before /api/admin
+app.use('/api/admin/error-catalog', errorCatalogRoutes);
 app.use('/api/admin/analytics', adminAnalyticsRoutes);
+app.use('/api/admin/backup', backupRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/features', featuresRoutes);
 app.use('/api/behavioral-analytics', behavioralAnalyticsRoutes);
 app.use('/api/billing', billingRoutes);
@@ -267,7 +321,6 @@ app.use('/api/diary', diaryRoutes);
 app.use('/api/diary-templates', diaryTemplateRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/api/tags', tagsRoutes);
-app.use('/api/admin/backup', backupRoutes);
 app.use('/api/broker-sync', brokerSyncRoutes);
 app.use('/api/year-wrapped', yearWrappedRoutes);
 app.use('/api/investments', investmentsRoutes);
@@ -285,6 +338,7 @@ app.use('/api/market-data', marketDataRoutes);
 // Simulation engine routes
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/sim', simRoutes);
+app.use('/api/data-validation', dataValidationRoutes);
 
 // OAuth2 Provider endpoints
 app.use('/oauth', oauth2Routes);
@@ -396,6 +450,60 @@ app.post('/api/admin/trigger-recovery', requireAdmin, async (req, res) => {
   }
 });
 
+// Admin endpoint: daily trading reset (kill switch off + purge stale data)
+app.post('/api/admin/sim/daily-reset', requireAdmin, async (req, res) => {
+  try {
+    const db = require('./config/database');
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const killSwitch = await client.query(`
+        UPDATE sim_account_state SET kill_switch_active = FALSE, updated_at = NOW()
+        WHERE kill_switch_active = TRUE RETURNING user_id
+      `);
+
+      await client.query(`
+        UPDATE sim_account_state
+        SET daily_pnl_reset_at = CURRENT_DATE AT TIME ZONE 'UTC', daily_pnl = 0, updated_at = NOW()
+        WHERE daily_pnl_reset_at IS NULL OR daily_pnl_reset_at::date < CURRENT_DATE
+      `);
+
+      const symbolState = await client.query('DELETE FROM symbol_state');
+      const gms = await client.query(`
+        UPDATE global_market_state
+        SET last_price = NULL, price_high = NULL, price_low = NULL, price_open = NULL,
+            price_volume = NULL, price_updated_at = NULL,
+            chain_ok = FALSE, chain_contracts_count = 0, chain_open_interest = 0,
+            chain_volume = 0, chain_updated_at = NULL,
+            price_fetch_failures = 0, chain_fetch_failures = 0,
+            last_price_error = NULL, last_chain_error = NULL, updated_at = NOW()
+      `);
+      await client.query('TRUNCATE price_cache');
+      const healthLog = await client.query(`
+        DELETE FROM data_service_health_log WHERE created_at < NOW() - INTERVAL '24 hours'
+      `);
+
+      await client.query('COMMIT');
+
+      res.json({
+        success: true,
+        message: 'Daily trading reset complete',
+        killSwitchDeactivated: killSwitch.rowCount,
+        symbolStatePurged: symbolState.rowCount,
+        globalMarketStateCleared: gms.rowCount,
+        healthLogPruned: healthLog.rowCount,
+        timestamp: new Date().toISOString(),
+      });
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    logger.error(`Daily trading reset failed: ${error.message}`, 'admin');
+    res.status(500).json({ error: error.message });
+  }
+});
+
 Sentry.setupExpressErrorHandler(app);
 
 app.use(errorHandler);
@@ -483,6 +591,11 @@ async function startServer() {
       console.log('[SUCCESS] Dividend scheduler started');
     } else {
       console.log('Dividend scheduler disabled (ENABLE_DIVIDEND_SCHEDULER=false)');
+    }
+
+    // Start data provider validation scheduler (6AM, 8AM, 9AM ET, hourly 9AM-4:30PM)
+    if (process.env.ENABLE_DATA_VALIDATION_SCHEDULER !== 'false') {
+      dataValidationScheduler.start();
     }
 
     // Initialize push notification service
@@ -583,6 +696,13 @@ async function startServer() {
       console.log(`Starting webhook processor (TRADING_MODE=${TRADING_MODE})...`);
       webhookProcessor.start(parseInt(process.env.WEBHOOK_PROCESSOR_INTERVAL || '5000', 10));
       console.log('✓ Webhook processor started for simulation engine');
+
+      // Start daily trading reset scheduler (9:30 AM ET, weekdays)
+      if (process.env.ENABLE_DAILY_TRADING_RESET !== 'false') {
+        const dailyTradingResetScheduler = require('./modules/sim/daily-trading-reset-scheduler');
+        dailyTradingResetScheduler.start();
+        console.log('✓ Daily trading reset scheduler started (9:30 AM ET, weekdays)');
+      }
 
       // Start exit monitor for automated position exits
       if (process.env.ENABLE_EXIT_MONITOR !== 'false') {

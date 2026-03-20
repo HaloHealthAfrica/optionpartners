@@ -3,7 +3,11 @@
 const db = require('../../../config/database');
 const logger = require('../../../utils/logger');
 
-// Conviction components as they appear in rationale strings
+// Conviction components as they appear in rationale strings (Fix Block 3).
+// Patterns must match trade-decision-engine.js rationale format exactly.
+// - alignment_score can be decimal (75.5) — use [\d.]+
+// - macro produces "macro_strength=X" not "Strong macro"
+// - rationale may be string (JSON) or array — normalize in calibrate()
 const COMPONENT_PATTERNS = [
   { key: 'strat_align',       pattern: /CONVICTION \+\d+: STRAT direction aligns/,     staticWeight: 10 },
   { key: 'strat_conflict',    pattern: /CONVICTION -\d+: STRAT direction conflicts/,   staticWeight: -10 },
@@ -11,17 +15,16 @@ const COMPONENT_PATTERNS = [
   { key: 'strat_no_cont',     pattern: /CONVICTION -\d+: STRAT no continuity/,         staticWeight: -15 },
   { key: 'continuation',      pattern: /CONVICTION \+\d+: CONTINUATION pattern/,       staticWeight: 10 },
   { key: 'revstrat',          pattern: /CONVICTION -\d+: REVSTRAT pattern/,            staticWeight: -5 },
-  { key: 'trend_high',        pattern: /CONVICTION \+\d+: TREND alignment=\d+ ≥ 75/,   staticWeight: 15 },
-  { key: 'trend_mid',         pattern: /CONVICTION \+\d+: TREND alignment=\d+ ≥ 65/,   staticWeight: 10 },
+  { key: 'trend_high',        pattern: /CONVICTION \+\d+: TREND alignment=[\d.]+ ≥ 75/, staticWeight: 15 },
+  { key: 'trend_mid',         pattern: /CONVICTION \+\d+: TREND alignment=[\d.]+ ≥ 65/, staticWeight: 10 },
   { key: 'flow_unusual',      pattern: /CONVICTION \+\d+: Unusual options flow/,       staticWeight: 15 },
   { key: 'flow_aligns',       pattern: /CONVICTION \+\d+: Options flow aligns/,        staticWeight: 8 },
   { key: 'flow_conflict',     pattern: /CONVICTION -\d+: Large opposing flow/,         staticWeight: -5 },
-  { key: 'saty_aligns',       pattern: /CONVICTION \+\d+: SATY/,                       staticWeight: 8 },
-  { key: 'saty_conflict',     pattern: /CONVICTION -\d+: SATY/,                        staticWeight: -5 },
-  { key: 'macro_strong',      pattern: /CONVICTION \+\d+: Strong macro/,               staticWeight: 5 },
-  // Market context components (IV/GEX/flow from historical snapshots)
-  { key: 'iv_high',           pattern: /CONVICTION -\d+: IV_RANK=\d+/,                staticWeight: -5 },
-  { key: 'iv_low',            pattern: /CONVICTION \+\d+: IV_RANK=\d+/,               staticWeight: 5 },
+  { key: 'saty_aligns',       pattern: /CONVICTION \+\d+: SATY_PHASE direction aligns/, staticWeight: 8 },
+  { key: 'saty_conflict',     pattern: /CONVICTION -\d+: SATY_PHASE direction conflicts/, staticWeight: -5 },
+  { key: 'macro_strong',      pattern: /CONVICTION \+\d+: macro_strength=/,             staticWeight: 5 },
+  { key: 'iv_high',           pattern: /CONVICTION -\d+: IV_RANK=[\d.]+/,             staticWeight: -5 },
+  { key: 'iv_low',            pattern: /CONVICTION \+\d+: IV_RANK=[\d.]+/,            staticWeight: 5 },
   { key: 'gex_negative',      pattern: /CONVICTION \+\d+: GEX strongly negative/,     staticWeight: 8 },
   { key: 'gex_positive',      pattern: /CONVICTION -\d+: GEX strongly positive/,      staticWeight: -8 },
   { key: 'hist_flow_aligns',  pattern: /CONVICTION \+\d+: Historical flow aligns/,    staticWeight: 5 },
@@ -74,8 +77,14 @@ class ConvictionCalibratorService {
       const absent = [];
 
       for (const row of rows) {
-        const rationale = row.checks_detail?.rationale || [];
-        const fired = rationale.some(r => pattern.test(r));
+        let rationale = row.checks_detail?.rationale;
+        try {
+          if (typeof rationale === 'string') rationale = JSON.parse(rationale || '[]');
+        } catch (_) {
+          rationale = [];
+        }
+        if (!Array.isArray(rationale)) rationale = [];
+        const fired = rationale.some(r => pattern.test(String(r)));
 
         if (fired) {
           present.push(row);
@@ -87,8 +96,16 @@ class ConvictionCalibratorService {
       const presentMetrics = this._computeMetrics(present);
       const absentMetrics = this._computeMetrics(absent);
 
-      const winRateLift = presentMetrics.winRate - absentMetrics.winRate;
-      const avgRLift = presentMetrics.avgR - absentMetrics.avgR;
+      // Fix 7: When n<5, WR_lift is a mathematical artifact (present_WR=0 vs absent_WR=60% → -60%).
+      // Return null so UI shows N/A instead of misleading values.
+      const MIN_DISPLAY_SAMPLE = 5;
+      const hasValidSample = presentMetrics.sampleSize >= MIN_DISPLAY_SAMPLE;
+      const winRateLift = hasValidSample
+        ? Math.round((presentMetrics.winRate - absentMetrics.winRate) * 10000) / 100
+        : null;
+      const avgRLift = hasValidSample
+        ? Math.round((presentMetrics.avgR - absentMetrics.avgR) * 1000) / 1000
+        : null;
 
       // Empirical weight: scale static weight by effectiveness ratio
       let recommendedWeight = staticWeight;
@@ -112,14 +129,19 @@ class ConvictionCalibratorService {
         weightDrift: recommendedWeight - staticWeight,
         present: presentMetrics,
         absent: absentMetrics,
-        winRateLift: Math.round(winRateLift * 10000) / 100,
-        avgRLift: Math.round(avgRLift * 1000) / 1000,
+        winRateLift,
+        avgRLift,
         significant: presentMetrics.sampleSize >= minSampleSize,
       };
     });
 
     // Overall calibration health
     const significantDrifts = results.filter(r => r.significant && Math.abs(r.weightDrift) >= 3);
+    // Fix 4 (Warning 4): Calibration Coverage Score — components with n≥5 / total
+    const MIN_COVERAGE_SAMPLE = 5;
+    const coveredCount = results.filter(r => r.present.sampleSize >= MIN_COVERAGE_SAMPLE).length;
+    const calibrationCoverageScore = results.length > 0 ? coveredCount / results.length : 0;
+    const calibrationCoverageWarning = calibrationCoverageScore < 0.5 ? 'LOW_COVERAGE' : null;
 
     return {
       components: results,
@@ -127,6 +149,10 @@ class ConvictionCalibratorService {
       lookbackDays,
       calibrationHealth: significantDrifts.length === 0 ? 'ALIGNED' : 'DRIFT_DETECTED',
       driftCount: significantDrifts.length,
+      calibrationCoverageScore: Math.round(calibrationCoverageScore * 100) / 100,
+      calibrationCoverageWarning,
+      coveredComponents: coveredCount,
+      totalComponents: results.length,
       computedAt: Date.now(),
     };
   }

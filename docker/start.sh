@@ -65,7 +65,7 @@ fi
 # Set environment variables for mobile support
 export RUN_MIGRATIONS="${RUN_MIGRATIONS:-true}"
 
-# Start nginx first so port 80 is reachable immediately
+# Start nginx first so port 80 is reachable immediately (Fly requires something on 80)
 echo "[START] Starting Nginx on port 80..."
 nginx
 

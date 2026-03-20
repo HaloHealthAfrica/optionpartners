@@ -683,6 +683,25 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Error Reference (all users) -->
+                <div class="card">
+                    <div class="card-body">
+                        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">
+                            Error Reference
+                        </h3>
+                        <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                            Look up error codes, descriptions, and suggested fixes when something goes wrong.
+                        </p>
+                        <router-link
+                            to="/admin/errors"
+                            class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300 hover:bg-primary-100 dark:hover:bg-primary-900/30 transition-colors"
+                        >
+                            <ArrowTopRightOnSquareIcon class="h-5 w-5" />
+                            Open Error Reference
+                        </router-link>
+                    </div>
+                </div>
             </template>
 
             <!-- AI & Integrations Tab -->
@@ -2512,6 +2531,37 @@
             <template
                 v-if="activeTab === 'admin' && authStore.user?.role === 'admin'"
             >
+                <!-- Admin Quick Links -->
+                <div class="card mb-8">
+                    <div class="card-body">
+                        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">
+                            Admin Tools
+                        </h3>
+                        <div class="flex flex-wrap gap-4">
+                            <router-link
+                                to="/admin/errors"
+                                class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300 hover:bg-primary-100 dark:hover:bg-primary-900/30 transition-colors"
+                            >
+                                <ArrowTopRightOnSquareIcon class="h-5 w-5" />
+                                Error Reference
+                            </router-link>
+                            <router-link
+                                to="/admin/users"
+                                class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                            >
+                                <ArrowTopRightOnSquareIcon class="h-5 w-5" />
+                                User Management
+                            </router-link>
+                            <router-link
+                                to="/admin/backups"
+                                class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                            >
+                                <ArrowTopRightOnSquareIcon class="h-5 w-5" />
+                                Backup Management
+                            </router-link>
+                        </div>
+                    </div>
+                </div>
                 <LogsViewer />
             </template>
         </div>
@@ -2534,7 +2584,7 @@ import LogsViewer from "@/components/admin/LogsViewer.vue";
 
 const authStore = useAuthStore();
 const versionStore = useVersionStore();
-const { showSuccess, showError, showDangerConfirmation } = useNotification();
+const { showSuccess, showError, showApiError, showDangerConfirmation } = useNotification();
 
 // Icons
 const apiIcon = mdiApi;
@@ -2551,9 +2601,9 @@ const tabs = computed(() => {
         { id: "data", label: "Data Management" },
     ];
 
-    // Add System Logs tab for admin users
+    // Add Admin tab for admin users
     if (authStore.user?.role === "admin") {
-        baseTabs.push({ id: "admin", label: "System Logs" });
+        baseTabs.push({ id: "admin", label: "Admin" });
     }
 
     return baseTabs;
@@ -2768,7 +2818,7 @@ async function loadAISettings() {
         };
     } catch (error) {
         console.error("Failed to load AI settings:", error);
-        showError("Error", "Failed to load AI settings");
+        showApiError("Error", error, "Failed to load AI settings");
     }
 }
 
@@ -2784,10 +2834,7 @@ async function updateAISettings() {
         showSuccess("Success", "AI provider settings updated successfully");
     } catch (error) {
         console.error("Failed to update AI settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update AI settings",
-        );
+        showApiError("Error", error, "Failed to update AI settings");
     } finally {
         aiLoading.value = false;
     }
@@ -2874,10 +2921,7 @@ async function updateCusipAISettings() {
         );
     } catch (error) {
         console.error("Failed to update CUSIP AI settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update CUSIP AI settings",
-        );
+        showApiError("Error", error, "Failed to update CUSIP AI settings");
     } finally {
         cusipAiLoading.value = false;
     }
@@ -2934,11 +2978,7 @@ async function updateAnalyticsSettings() {
         showSuccess("Success", "Analytics preferences updated successfully");
     } catch (error) {
         console.error("Failed to update analytics settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error ||
-                "Failed to update analytics settings",
-        );
+        showApiError("Error", error, "Failed to update analytics settings");
     } finally {
         analyticsLoading.value = false;
     }
@@ -2973,10 +3013,7 @@ async function updatePrivacySettings() {
         showSuccess("Success", "Privacy settings updated successfully");
     } catch (error) {
         console.error("Failed to update privacy settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update privacy settings",
-        );
+        showApiError("Error", error, "Failed to update privacy settings");
     } finally {
         privacyLoading.value = false;
     }
@@ -3012,11 +3049,7 @@ async function updateTradeImportSettings() {
         showSuccess("Success", "Trade import settings updated successfully");
     } catch (error) {
         console.error("Failed to update trade import settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error ||
-                "Failed to update trade import settings",
-        );
+        showApiError("Error", error, "Failed to update trade import settings");
     } finally {
         tradeImportLoading.value = false;
     }
@@ -3098,10 +3131,7 @@ async function saveBrokerFee() {
         cancelEditBrokerFee();
     } catch (error) {
         console.error("Failed to save broker fee settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to save broker fee settings",
-        );
+        showApiError("Error", error, "Failed to save broker fee settings");
     } finally {
         brokerFeeLoading.value = false;
     }
@@ -3118,11 +3148,7 @@ function deleteBrokerFee(id) {
                 await loadBrokerFeeSettings();
             } catch (error) {
                 console.error("Failed to delete broker fee settings:", error);
-                showError(
-                    "Error",
-                    error.response?.data?.error ||
-                        "Failed to delete broker fee settings",
-                );
+                showApiError("Error", error, "Failed to delete broker fee settings");
             }
         },
     );
@@ -3160,10 +3186,7 @@ async function updateQualityWeights() {
         showSuccess("Success", "Quality grading weights updated successfully");
     } catch (error) {
         console.error("Failed to update quality weights:", error);
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update quality weights",
-        );
+        showApiError("Error", error, "Failed to update quality weights");
     } finally {
         qualityWeightsLoading.value = false;
     }
@@ -3191,7 +3214,7 @@ async function fetchAdminAISettings() {
         };
     } catch (error) {
         console.error("Failed to fetch admin AI settings:", error);
-        showError("Error", "Failed to load admin AI settings");
+        showApiError("Error", error, "Failed to load admin AI settings");
     }
 }
 
@@ -3210,10 +3233,7 @@ async function updateAdminAISettings() {
         );
     } catch (error) {
         console.error("Failed to update admin AI settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error || "Failed to update admin AI settings",
-        );
+        showApiError("Error", error, "Failed to update admin AI settings");
     } finally {
         adminAiLoading.value = false;
     }
@@ -3309,11 +3329,7 @@ async function updateAdminCusipAISettings() {
         );
     } catch (error) {
         console.error("Failed to update admin CUSIP AI settings:", error);
-        showError(
-            "Error",
-            error.response?.data?.error ||
-                "Failed to update admin CUSIP AI settings",
-        );
+        showApiError("Error", error, "Failed to update admin CUSIP AI settings");
     } finally {
         adminCusipAiLoading.value = false;
     }
@@ -3400,10 +3416,7 @@ async function exportUserData() {
         );
     } catch (error) {
         console.error("Export failed:", error);
-        showError(
-            "Export Failed",
-            error.response?.data?.error || "Failed to export user data",
-        );
+        showApiError("Export Failed", error, "Failed to export user data");
     } finally {
         exportLoading.value = false;
     }
@@ -3442,10 +3455,7 @@ async function exportTradesToCSV() {
         );
     } catch (error) {
         console.error("CSV export failed:", error);
-        showError(
-            "Export Failed",
-            error.response?.data?.error || "Failed to export trades to CSV",
-        );
+        showApiError("Export Failed", error, "Failed to export trades to CSV");
     } finally {
         csvExportLoading.value = false;
     }
@@ -3488,10 +3498,7 @@ async function importUserData() {
         if (fileInput) fileInput.value = "";
     } catch (error) {
         console.error("Import failed:", error);
-        showError(
-            "Import Failed",
-            error.response?.data?.error || "Failed to import user data",
-        );
+        showApiError("Import Failed", error, "Failed to import user data");
     } finally {
         importLoading.value = false;
     }
@@ -3524,7 +3531,7 @@ async function enrichTrades() {
         enrichmentSuccess.value = false;
         enrichmentMessage.value =
             error.response?.data?.error || "Failed to start enrichment process";
-        showError("Enrichment Failed", enrichmentMessage.value);
+        showApiError("Enrichment Failed", error, "Failed to start enrichment process");
     } finally {
         enrichmentLoading.value = false;
     }

@@ -223,6 +223,17 @@ export class PolygonClient extends BaseProvider implements MarketDataProvider {
       }
     }
 
+    // Fallback: if underlying price still unknown, fetch from quote
+    if (underlyingPrice === 0) {
+      try {
+        const quote = await this.getQuote(symbol);
+        underlyingPrice = quote.price;
+        this.log.info({ symbol, underlyingPrice }, 'Underlying price fallback from quote');
+      } catch (error) {
+        this.log.warn({ symbol, error: error instanceof Error ? error.message : String(error) }, 'Failed to get underlying price from quote fallback');
+      }
+    }
+
     const contracts: OptionsContract[] = [];
     for (const r of allResults) {
       if (!r.details) continue;

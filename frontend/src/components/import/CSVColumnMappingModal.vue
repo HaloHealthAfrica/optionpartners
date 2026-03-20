@@ -367,7 +367,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'mappingSaved'])
 
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showApiError } = useNotification()
 
 const loading = ref(false)
 const error = ref(null)
@@ -562,7 +562,7 @@ async function saveMapping() {
       error.value = errorMsg
     }
 
-    showError('Save Failed', error.value)
+    showApiError('Save Failed', err, 'Failed to save CSV column mapping')
   } finally {
     loading.value = false
   }

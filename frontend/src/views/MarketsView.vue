@@ -819,7 +819,7 @@ import SymbolAutocomplete from "@/components/common/SymbolAutocomplete.vue";
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const { showSuccess, showError, showCriticalError, showConfirmation } =
+const { showSuccess, showError, showApiError, showCriticalError, showApiCriticalError, showConfirmation } =
     useNotification();
 const { isConnected, notifications, requestNotificationPermission } =
     usePriceAlertNotifications();
@@ -914,7 +914,7 @@ const loadWatchlists = async () => {
         watchlists.value = response.data.data;
     } catch (error) {
         console.error("Error loading watchlists:", error);
-        showCriticalError("Error", "Failed to load watchlists");
+        showApiCriticalError("Error", error, "Failed to load watchlists");
     } finally {
         loadingWatchlists.value = false;
     }
@@ -944,7 +944,7 @@ const deleteWatchlist = async (watchlist) => {
                 showSuccess("Success", "Watchlist deleted successfully");
             } catch (error) {
                 console.error("Error deleting watchlist:", error);
-                showCriticalError("Error", "Failed to delete watchlist");
+                showApiCriticalError("Error", error, "Failed to delete watchlist");
             }
         },
     );
@@ -969,7 +969,7 @@ const saveWatchlist = async () => {
         await loadWatchlists();
     } catch (error) {
         console.error("Error saving watchlist:", error);
-        showCriticalError("Error", "Failed to save watchlist");
+        showApiCriticalError("Error", error, "Failed to save watchlist");
     } finally {
         savingWatchlist.value = false;
     }
@@ -1005,7 +1005,7 @@ const loadAlerts = async () => {
         alerts.value = response.data.data;
     } catch (error) {
         console.error("Error loading alerts:", error);
-        showCriticalError("Error", "Failed to load price alerts");
+        showApiCriticalError("Error", error, "Failed to load price alerts");
     } finally {
         loadingAlerts.value = false;
     }
@@ -1035,7 +1035,7 @@ const deleteAlert = async (alert) => {
                 showSuccess("Success", "Price alert deleted");
             } catch (error) {
                 console.error("Error deleting alert:", error);
-                showCriticalError("Error", "Failed to delete alert");
+                showApiCriticalError("Error", error, "Failed to delete alert");
             }
         },
     );
@@ -1047,7 +1047,7 @@ const testAlert = async (alert) => {
         showSuccess("Success", "Test alert sent");
     } catch (error) {
         console.error("Error testing alert:", error);
-        showCriticalError("Error", "Failed to send test alert");
+        showApiCriticalError("Error", error, "Failed to send test alert");
     }
 };
 
@@ -1070,12 +1070,7 @@ const saveAlert = async () => {
         await loadAlerts();
     } catch (error) {
         console.error("Error saving alert:", error);
-        const message =
-            error.response?.data?.error ||
-            error.response?.data?.message ||
-            error.message ||
-            "Failed to save alert";
-        showCriticalError("Error", message);
+        showApiCriticalError("Error", error, "Failed to save alert");
     } finally {
         savingAlert.value = false;
     }

@@ -4,7 +4,9 @@ import { validateCandles } from '../analytics/candle-validation';
 import { snapshotStore } from '../persistence/snapshot-store';
 import type { DataOrchestrator } from '../services/data-orchestrator';
 
-const POST_CLOSE_INTERVAL = 4 * 60 * 60 * 1000;
+// Poll every 15 min to catch pre-market (9:15 ET), midday (12:00 ET), post-close (16:15 ET).
+// Actual computation only runs when shouldRun() is true — at most 3x per day.
+const POLL_INTERVAL_MS = 15 * 60 * 1000;
 const CANDLE_LOOKBACK = 252;
 
 export class VolatilityPoller extends BasePoller {
@@ -16,7 +18,7 @@ export class VolatilityPoller extends BasePoller {
     private orchestrator: DataOrchestrator,
     symbols: string[] = ['SPY', 'QQQ', 'IWM'],
   ) {
-    super({ name: 'volatility', intervalMs: POST_CLOSE_INTERVAL });
+    super({ name: 'volatility', intervalMs: POLL_INTERVAL_MS });
     this.symbols = new Set(symbols.map((s) => s.toUpperCase()));
   }
 
@@ -90,16 +92,21 @@ export class VolatilityPoller extends BasePoller {
     this.log.info({ succeeded, failed, total: symbols.length }, 'Volatility poll cycle complete');
 
     const today = new Date().toISOString().slice(0, 10);
+    const totalUtcMin = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
+    const isMidDay = totalUtcMin >= 960 && totalUtcMin < 1020;
     if (this.isPostClose()) {
       this.lastComputeDate = today;
       this.midDayDone = false;
-    } else {
+    } else if (isMidDay) {
       this.midDayDone = true;
     }
+    // Pre-market run: don't set lastComputeDate (allow midday/post-close) or midDayDone
   }
 
   /**
-   * Run once after market close (primary), optional midday refresh at ~12:00 ET.
+   * Run after market close (primary), midday refresh at ~12:00 ET, and pre-market at 9:15 ET.
+   * Pre-market run ensures volatility_snapshots has fresh data before 9:30 open — critical for
+   * regime-dependent logic and regime_at_entry tagging (83% UNKNOWN rate fix).
    * If market is closed (weekend/holiday), skip repeated fetches.
    */
   private shouldRun(): boolean {
@@ -113,6 +120,12 @@ export class VolatilityPoller extends BasePoller {
     const isWeekday = day >= 1 && day <= 5;
     if (!isWeekday) return false;
 
+    // Pre-market window: 9:15–9:25 ET
+    // EST: 14:15–14:25 UTC (855–865). EDT: 13:15–13:25 UTC (795–805).
+    // Ensures volatility_snapshots populated before 9:30 open — fixes regime UNKNOWN cascade
+    const isPreMarket = (totalUtcMin >= 795 && totalUtcMin < 805) || (totalUtcMin >= 855 && totalUtcMin < 865);
+    if (isPreMarket && this.lastComputeDate !== today) return true;
+
     // Post-close window: 16:15–17:00 ET ≈ 21:15–22:00 UTC (EST) / 20:15–21:00 UTC (EDT)
     const isPostClose = totalUtcMin >= 1275 && totalUtcMin < 1320;
     if (isPostClose && this.lastComputeDate !== today) return true;
@@ -121,8 +134,8 @@ export class VolatilityPoller extends BasePoller {
     const isMidDay = totalUtcMin >= 960 && totalUtcMin < 1020;
     if (isMidDay && !this.midDayDone && this.lastComputeDate !== today) return true;
 
-    // First run ever — allow it
-    if (this.lastComputeDate === null) return true;
+    // First run ever — only allow when in a valid window to avoid runaway runs at startup
+    if (this.lastComputeDate === null && (isPreMarket || isPostClose || isMidDay)) return true;
 
     return false;
   }

@@ -9,6 +9,8 @@ const signals = require('./signals.normalizer');
 const mtfBias = require('./mtf-bias.normalizer');
 const pivotMb = require('./pivot-mb.normalizer');
 const squeezePro = require('./squeeze-pro.normalizer');
+const reversal = require('./reversal.normalizer');
+const crt = require('./crt.normalizer');
 const generic = require('./generic.normalizer');
 
 /**
@@ -37,6 +39,8 @@ const NORMALIZERS = {
   SIGNALS: signals,
   PIVOT_MB: pivotMb,
   SQUEEZE_PRO: squeezePro,
+  REVERSAL: reversal,
+  CRT: crt,
   UNKNOWN: generic,
 };
 

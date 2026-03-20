@@ -63,6 +63,26 @@ function detectIndicatorSource(payload) {
 
   if (payload.source === 'PIVOT_MB' || payload.signal_type === 'PIVOT_MOTHERBAR') return 'PIVOT_MB';
 
+  // CRT (Candle Range Theory + Fib + Strat Confluence Engine V3) — TradingView webhook
+  // Fingerprint: signal_id, direction (LONG/SHORT), option_type (call/put), entry, stop_loss, take_profit1/2/3
+  if (payload.signal_id && (payload.direction === 'LONG' || payload.direction === 'SHORT')
+    && (payload.option_type === 'call' || payload.option_type === 'put')
+    && typeof payload.entry === 'number' && typeof payload.stop_loss === 'number') {
+    return 'CRT';
+  }
+  if (payload.signal_id && payload.risk_r != null && payload.atr != null
+    && (payload.take_profit1 != null || payload.take_profit2 != null)) {
+    return 'CRT';
+  }
+
+  // Reversal Indicator — EME (Expected Move Engine), SPE (Strike Probability), Strat Setup/Trigger
+  // signalVal must handle payload.signal as object (SIGNALS format) — only string signals go to REVERSAL
+  const signalType = (payload.signal_type || '').toUpperCase();
+  const signalVal = (typeof payload.signal === 'string' ? payload.signal : '').toUpperCase();
+  if (['EM_CALL_ZONE', 'EM_PUT_ZONE', 'EM_BREAKOUT'].includes(signalType)) return 'REVERSAL';
+  if (['PUT_SPREAD_FAVORABLE', 'CALL_SPREAD_FAVORABLE'].includes(signalVal)) return 'REVERSAL';
+  if (['STRAT_SETUP', 'STRAT_TRIGGER'].includes(signalVal)) return 'REVERSAL';
+
   // SIGNALS check runs BEFORE component/level STRAT detection because SIGNALS
   // payloads often include STRAT_SETUP in their components array as a contributing
   // factor, not as a webhook-type identifier.

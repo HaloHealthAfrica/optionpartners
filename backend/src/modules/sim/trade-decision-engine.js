@@ -85,6 +85,16 @@ class TradeDecisionEngine {
       return this._evaluateSqueezePro(signal, symbolState, rationale);
     }
 
+    // ── REVERSAL: EME, SPE, Strat — validated in normalizer, use confidence as conviction ──
+    if (signal.indicatorSource === 'REVERSAL' || /^reversal/.test(signal.strategy || '')) {
+      return this._evaluateReversal(signal, symbolState, rationale);
+    }
+
+    // ── CRT: Candle Range Theory + Fib + Strat Confluence — use payload strike, dte, stop, targets ──
+    if (signal.indicatorSource === 'CRT' || /^crt/.test(signal.strategy || '')) {
+      return this._evaluateCRT(signal, symbolState, rationale);
+    }
+
     // ── Part 2: Signal preconditions ──
     const entrySignal = symbolState.latest_entry_signal;
     const isOrbTrigger = signal.indicatorSource === 'ORB';
@@ -232,6 +242,8 @@ class TradeDecisionEngine {
   _checkFailClosed(state, accountState, rationale, globalState) {
     const ticker = state.symbol;
     const STATE_TTL_MS = parseInt(process.env.SIM_STATE_TTL_MS || '1800000', 10); // 30 min default
+    // Fix 4: Configurable chain TTL — extend if provider refresh is slower (30-90s was too tight)
+    const CHAIN_TTL_MS = parseInt(process.env.SIM_CHAIN_TTL_MS || process.env.SIM_STATE_TTL_MS || '1800000', 10);
 
     // Chain data validation: check both user state and global market state.
     // Global state is authoritative for market data.
@@ -239,11 +251,12 @@ class TradeDecisionEngine {
     const chainUpdatedAt = globalState?.chain_updated_at || state.chain_updated_at;
     const chainOk = globalState?.chain_ok ?? state.chain_ok;
 
+    // Chain present but empty/invalid (e.g. IWN, IWM — providers may not support all symbols).
+    // Allow synthetic construction instead of hard-blocking so these symbols can still trade.
     if (chainUpdatedAt && !chainOk) {
-      rationale.push('FAIL_CLOSED: Chain data present but no valid contracts');
-      return this._blocked(ticker, 0, rationale);
-    }
-    if (!chainUpdatedAt) {
+      rationale.push('WARN: Chain data present but no valid contracts — proceeding with synthetic construction');
+      // Fall through; constructor will use _constructSynthetic when chain fetch returns empty
+    } else if (!chainUpdatedAt) {
       if (requireChain) {
         rationale.push('FAIL_CLOSED: No chain data received — cannot validate options liquidity');
         return this._blocked(ticker, 0, rationale);
@@ -253,19 +266,27 @@ class TradeDecisionEngine {
 
     // Chain staleness check — use longer TTL outside RTH since options
     // markets are closed and previous-session chain data is still valid.
+    // Fix Block 4: During first 15 min of RTH (9:30-9:45 ET), allow 1.5x grace period
+    // — data feeds often lag at open; 83% of TRADE_ENGINE rejections were data_staleness.
     if (chainUpdatedAt) {
       const chainAgeMs = Date.now() - new Date(chainUpdatedAt).getTime();
+      const chainAgeSeconds = Math.round(chainAgeMs / 1000);
       const etMins = getETMinutes();
       const isRTH = etMins >= 570 && etMins <= 960; // 9:30-16:00 ET
-      const chainTtlMs = isRTH
-        ? STATE_TTL_MS
+      const isEarlySession = etMins >= 570 && etMins < 585; // 9:30-9:45 ET
+      let chainTtlMs = isRTH
+        ? CHAIN_TTL_MS
         : parseInt(process.env.SIM_CHAIN_TTL_OFF_HOURS_MS || '64800000', 10); // 18h default
+      if (isRTH && isEarlySession) {
+        const graceMultiplier = parseFloat(process.env.SIM_CHAIN_EARLY_SESSION_GRACE || '1.5');
+        chainTtlMs = Math.round(chainTtlMs * graceMultiplier);
+      }
       if (chainAgeMs > chainTtlMs) {
         if (requireChain) {
-          rationale.push(`FAIL_CLOSED: Chain data stale (${Math.round(chainAgeMs / 1000)}s old, max ${chainTtlMs / 1000}s)`);
+          rationale.push(`FAIL_CLOSED: Chain data stale (chain_data_age_seconds=${chainAgeSeconds}, max ${chainTtlMs / 1000}s)`);
           return this._blocked(ticker, 0, rationale);
         }
-        rationale.push(`WARN: Chain data stale (${Math.round(chainAgeMs / 1000)}s) — proceeding anyway`);
+        rationale.push(`WARN: Chain data stale (${chainAgeSeconds}s) — proceeding anyway`);
       }
     }
 
@@ -1496,6 +1517,111 @@ class TradeDecisionEngine {
         stop_source: 'SQUEEZE_PRO_SIGNAL',
         max_loss: risk * 100,
       },
+      contractType,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  REVERSAL — EME, SPE, Strat (validated in normalizer)
+  // ═══════════════════════════════════════════════════════════════════
+
+  _evaluateCRT(signal, symbolState, rationale) {
+    const ticker = signal.symbol || symbolState.symbol;
+    const meta = signal.meta?.indicatorMeta;
+
+    if (!signal.direction) {
+      rationale.push('CRT_BLOCK: No valid direction');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const strike = parseFloat(signal.strike) || meta?.strike;
+    if (!strike || strike <= 0) {
+      rationale.push('CRT_BLOCK: Missing or invalid strike');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const stopLevel = parseFloat(signal.stopLoss) || null;
+    if (!stopLevel) {
+      rationale.push('CRT_BLOCK: Missing stop_loss');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const conviction = signal.confidence ?? signal.score ?? 0;
+    if (conviction < 40) {
+      rationale.push(`CRT_BLOCK: Confluence score ${conviction} < 40`);
+      return this._blocked(ticker, conviction, rationale);
+    }
+
+    const contractType = (meta?.option_type || '').toLowerCase() === 'put' ? 'PUT' : 'CALL';
+    const action = contractType === 'CALL' ? 'BUY_CALL' : 'BUY_PUT';
+    const dteSuggestion = parseInt(meta?.dte_suggestion, 10) || 7;
+    const dteTarget = Math.max(3, Math.min(60, dteSuggestion));
+    const sizeMultiplier = this._convictionToSize(conviction);
+
+    rationale.push(`CRT_APPROVED: ${contractType} strike=$${strike} dte=${dteTarget} conviction=${conviction}`);
+    rationale.push(`SIZE: ${sizeMultiplier}x (conviction=${conviction})`);
+
+    return {
+      action,
+      ticker,
+      strike,
+      expiry: null,
+      delta_target: 0.50,
+      delta_min: 0.35,
+      delta_max: 0.65,
+      dte_target: dteTarget,
+      dte_min: Math.max(3, dteTarget - 7),
+      dte_max: Math.min(60, dteTarget + 14),
+      size_multiplier: sizeMultiplier,
+      conviction_score: conviction,
+      rationale,
+      risk_parameters: {
+        stop_level: stopLevel,
+        stop_source: 'CRT_PAYLOAD',
+        max_loss: null,
+      },
+      contractType,
+    };
+  }
+
+  _evaluateReversal(signal, symbolState, rationale) {
+    const ticker = signal.symbol || symbolState.symbol;
+
+    if (!signal.direction) {
+      rationale.push('REVERSAL_BLOCK: No valid direction');
+      return this._blocked(ticker, 0, rationale);
+    }
+
+    const conviction = signal.confidence ?? signal.score ?? 0;
+    if (conviction < 40) {
+      rationale.push(`REVERSAL_BLOCK: Conviction ${conviction} < 40`);
+      return this._blocked(ticker, conviction, rationale);
+    }
+
+    // Per guide: bullish → sell put spread, bearish → sell call spread
+    const action = 'SELL_SPREAD';
+    const contractType = 'CREDIT_SPREAD';
+    const deltaTargets = this._selectDeltaTargets(conviction, contractType, rationale);
+    const sizeMultiplier = this._convictionToSize(conviction);
+
+    rationale.push(`REVERSAL_APPROVED: strategy=${signal.strategy} conviction=${conviction}`);
+    rationale.push(`SIZE: ${sizeMultiplier}x (conviction=${conviction})`);
+
+    return {
+      action,
+      ticker,
+      strike: null,
+      expiry: null,
+      delta_target: deltaTargets.target,
+      delta_min: deltaTargets.min,
+      delta_max: deltaTargets.max,
+      dte_target: 7,
+      dte_min: 3,
+      dte_max: 14,
+      size_multiplier: sizeMultiplier,
+      conviction_score: conviction,
+      rationale,
+      risk_parameters: { stop_level: null, stop_source: null, max_loss: null },
       contractType,
     };
   }

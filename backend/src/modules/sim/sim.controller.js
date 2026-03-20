@@ -6,7 +6,11 @@ const safetyGuards = require('./safety-guards');
 const replayService = require('./replay.service');
 const symbolStateService = require('./symbol-state.service');
 const globalMarketState = require('./global-market-state.service');
+const macroRegimeBackfill = require('./macro-regime-backfill.service');
 const dataServiceProxy = require('../../services/dataServiceProxy');
+const webhookService = require('../webhooks/webhook.service');
+const webhookMetricsService = require('../webhooks/webhook-metrics.service');
+const rateLimitService = require('../webhooks/webhook-rate-limit.service');
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
 const Sentry = require('@sentry/node');
@@ -116,6 +120,22 @@ async function getTrades(req, res) {
     res.status(500).json({ error: 'Failed to get trades' });
   }
 }
+
+/**
+ * GET /api/sim/equity-curve
+ */
+async function reconcileWebhookTrades(req, res) {
+  try {
+    const reconciliationService = require('./reconciliation.service');
+    const summary = await reconciliationService.reconcileWebhooksToTrades();
+    res.json(summary);
+  } catch (error) {
+    logger.error(`Reconciliation endpoint failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to run reconciliation' });
+  }
+}
+
 
 /**
  * GET /api/sim/equity-curve
@@ -392,22 +412,27 @@ async function warmupSymbol(req, res) {
     results.errors.push(`Chain fetch failed: ${err.message}`);
   }
 
-  // 3. Seed macro data (VIX / regime) with neutral defaults
+  // 3. Seed macro data — try data-service (VIX/regime) first, fall back to neutral
   try {
     const state = await symbolStateService.getState(userId, symbol);
     if (!state.macro_updated_at) {
-      await symbolStateService.update('MTF_BIAS', {
-        ticker: symbol,
-        mtf: {
-          consensus: { bias: 'neutral', weighted_score: 50 },
-          regime: { type: 'TREND', chop_score: 20 },
-        },
-        macro: { state: {} },
-        space: {},
-        bar: {},
-        risk_context: {},
-      }, userId, symbol);
-      results.seeded.push('macro: NEUTRAL default');
+      const backfill = await macroRegimeBackfill.refreshFromDataService(userId, symbol);
+      if (backfill.refreshed) {
+        results.seeded.push(`macro: ${backfill.bias} (data-service)`);
+      } else {
+        await symbolStateService.update('MTF_BIAS', {
+          ticker: symbol,
+          mtf: {
+            consensus: { bias: 'neutral', weighted_score: 50 },
+            regime: { type: 'TREND', chop_score: 20 },
+          },
+          macro: { state: {} },
+          space: {},
+          bar: {},
+          risk_context: {},
+        }, userId, symbol);
+        results.seeded.push('macro: NEUTRAL default');
+      }
     } else {
       results.seeded.push('macro: already set');
     }
@@ -463,8 +488,22 @@ async function getStateHealth(req, res) {
       return { age_seconds: ageSec, fresh, status: fresh ? 'ok' : 'stale' };
     }
 
+    // include kill switch and recent trade frequency
+    const account = await ledgerService.getAccountState(req.user.id);
+    let recentTrades = null;
+    try {
+      const r = await db.query(
+        `SELECT COUNT(*)::int as cnt FROM sim_trades
+         WHERE user_id = $1 AND entry_time > NOW() - INTERVAL '1 minute'`,
+        [req.user.id]
+      );
+      recentTrades = r.rows[0].cnt;
+    } catch (_){ recentTrades = null; }
+
     res.json({
       symbol,
+      killSwitch: account?.kill_switch_active || false,
+      recentTradesPerMinute: recentTrades,
       macro: {
         bias: state.macro_bias,
         strength: state.macro_strength,
@@ -520,6 +559,33 @@ async function getStateHealth(req, res) {
 }
 
 /**
+ * POST /api/sim/data-service/circuit-breaker/reset
+ * POST /api/sim/connectivity/reset
+ * Reset connectivity gate (allows requests to data-service) and optionally
+ * data-service's per-provider circuit breakers.
+ */
+async function resetDataServiceCircuitBreaker(req, res) {
+  try {
+    const { resetDataService = true } = req.body || {};
+    dataServiceProxy.resetConnectivityGate();
+    let dataServiceReset = null;
+    if (resetDataService) {
+      dataServiceReset = await dataServiceProxy.resetDataServiceCircuitBreakers();
+    }
+    const state = dataServiceProxy.getConnectivityState();
+    res.json({
+      message: 'Connectivity gate reset',
+      connectivity: state,
+      dataServiceReset: dataServiceReset?.ok ?? null,
+    });
+  } catch (error) {
+    logger.error(`Reset connectivity gate failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to reset connectivity gate' });
+  }
+}
+
+/**
  * GET /api/sim/health/global
  * Shows global market state health for all symbols — dead feed detection,
  * staleness, and provider status.
@@ -538,10 +604,13 @@ async function getGlobalHealth(_req, res) {
       dataServiceHealth = { error: err.message, reachable: false };
     }
 
+    const connectivityState = dataServiceProxy.getConnectivityState();
+
     res.json({
       globalMarketState: summary,
       deadFeedAlerts: alerts,
       dataService: dataServiceHealth,
+      connectivity: connectivityState,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -551,12 +620,209 @@ async function getGlobalHealth(_req, res) {
   }
 }
 
+/**
+ * GET /api/sim/webhook-stats
+ * Webhook counts for past N days (default 3). For authenticated user.
+ * Admin: ?all=true returns global totals across all users.
+ * Query: ?days=3
+ */
+async function getWebhookStats(req, res) {
+  try {
+    const days = Math.min(parseInt(req.query.days) || 3, 30);
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
+    const allUsers = isAdmin && req.query.all === 'true';
+    const userId = req.user.id;
+
+    const result = await db.query(
+      allUsers
+        ? `SELECT
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status = 'RECEIVED')::int AS received,
+            COUNT(*) FILTER (WHERE status = 'PROCESSED')::int AS processed,
+            COUNT(*) FILTER (WHERE status = 'REJECTED')::int AS rejected,
+            COUNT(*) FILTER (WHERE status = 'TEST_PING')::int AS test_ping,
+            MIN(received_at) AS earliest,
+            MAX(received_at) AS latest
+           FROM webhook_events
+           WHERE received_at >= NOW() - (INTERVAL '1 day' * $1)`
+        : `SELECT
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status = 'RECEIVED')::int AS received,
+            COUNT(*) FILTER (WHERE status = 'PROCESSED')::int AS processed,
+            COUNT(*) FILTER (WHERE status = 'REJECTED')::int AS rejected,
+            COUNT(*) FILTER (WHERE status = 'TEST_PING')::int AS test_ping,
+            MIN(received_at) AS earliest,
+            MAX(received_at) AS latest
+           FROM webhook_events
+           WHERE user_id = $1 AND received_at >= NOW() - (INTERVAL '1 day' * $2)`,
+      allUsers ? [days] : [userId, days]
+    );
+
+    const row = result.rows[0];
+    const stats = {
+      days,
+      total: row.total,
+      received: row.received,
+      processed: row.processed,
+      rejected: row.rejected,
+      testPing: row.test_ping,
+      earliest: row.earliest,
+      latest: row.latest,
+    };
+
+    // Last 10 webhooks for context
+    const recent = await db.query(
+      allUsers
+        ? `SELECT id, received_at, status, indicator_source, error_message, user_id,
+                raw_payload->>'symbol' AS symbol, raw_payload->>'ticker' AS ticker
+         FROM webhook_events
+         WHERE received_at >= NOW() - (INTERVAL '1 day' * $1)
+         ORDER BY received_at DESC LIMIT 10`
+        : `SELECT id, received_at, status, indicator_source, error_message,
+                raw_payload->>'symbol' AS symbol, raw_payload->>'ticker' AS ticker
+         FROM webhook_events
+         WHERE user_id = $1 AND received_at >= NOW() - (INTERVAL '1 day' * $2)
+         ORDER BY received_at DESC LIMIT 10`,
+      allUsers ? [days] : [userId, days]
+    );
+    stats.recent = recent.rows;
+
+    res.json(stats);
+  } catch (error) {
+    logger.error(`Webhook stats failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to get webhook stats' });
+  }
+}
+
+/**
+ * POST /api/sim/requeue-rejected
+ * Admin only. Bulk requeue REJECTED webhooks (processing errors) for retry.
+ * Query: ?days=3 (default)
+ */
+async function bulkRequeueRejected(req, res) {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'owner') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    const days = Math.min(parseInt(req.query.days) || 3, 30);
+    const { requeued, ids } = await webhookService.bulkRequeueForRetry(days);
+    res.json({ message: `${requeued} webhook(s) requeued for retry`, requeued, ids });
+  } catch (error) {
+    logger.error(`Bulk requeue failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to requeue webhooks' });
+  }
+}
+
+/**
+ * GET /api/sim/pipeline-observatory
+ * Aggregated pipeline observatory data: processor status, gates, rate limit,
+ * connectivity, retry/dead-letter, symbol state freshness, processing metrics.
+ */
+async function getPipelineObservatory(req, res) {
+  try {
+    const userId = req.user.id;
+    const timeRangeHours = parseInt(req.query.timeRangeHours) || 24;
+
+    const [
+      processorStatus,
+      account,
+      positionsResult,
+      webhookStats,
+      retryStats,
+      symbolFreshness,
+      processingMetrics,
+      queueHealth,
+      connectivityState,
+      rateLimitData,
+    ] = await Promise.all([
+      Promise.resolve(webhookProcessor.getStatus()),
+      ledgerService.getAccountState(userId).catch(() => null),
+      db.query(
+        `SELECT COUNT(*)::int AS open_count FROM sim_positions WHERE user_id = $1 AND status = 'OPEN'`,
+        [userId]
+      ),
+      db.query(
+        `SELECT
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE status = 'RECEIVED')::int AS received,
+           COUNT(*) FILTER (WHERE status = 'PROCESSED')::int AS processed,
+           COUNT(*) FILTER (WHERE status = 'REJECTED')::int AS rejected,
+           COUNT(*) FILTER (WHERE status = 'TEST_PING')::int AS test_ping
+         FROM webhook_events
+         WHERE user_id = $1 AND received_at > NOW() - INTERVAL '1 hour' * $2`,
+        [userId, timeRangeHours]
+      ),
+      db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status = 'REJECTED' AND error_message LIKE 'Processing error:%' AND COALESCE(retry_count, 0) < 3)::int AS retryable,
+           COUNT(*) FILTER (WHERE status = 'REJECTED' AND error_message LIKE 'Processing error:%' AND COALESCE(retry_count, 0) >= 3)::int AS exhausted
+         FROM webhook_events
+         WHERE user_id = $1 AND received_at > NOW() - INTERVAL '1 hour' * $2`,
+        [userId, timeRangeHours]
+      ),
+      db.query(
+        `SELECT symbol, macro_updated_at,
+                EXTRACT(EPOCH FROM (NOW() - macro_updated_at)) / 60 AS stale_minutes
+         FROM symbol_state
+         WHERE user_id = $1 AND macro_updated_at IS NOT NULL
+         ORDER BY macro_updated_at ASC
+         LIMIT 20`,
+        [userId]
+      ),
+      webhookMetricsService.getProcessingMetrics(timeRangeHours).catch(() => null),
+      webhookMetricsService.getQueueHealth().catch(() => null),
+      Promise.resolve(dataServiceProxy.getConnectivityState()),
+      (async () => {
+        const recentIP = await db.query(
+          `SELECT client_ip FROM webhook_events WHERE user_id = $1 AND client_ip IS NOT NULL ORDER BY received_at DESC LIMIT 1`,
+          [userId]
+        );
+        const ip = recentIP.rows[0]?.client_ip;
+        const rateLimitStatus = ip ? await rateLimitService.getRateLimitStatus('ip', ip) : null;
+        return {
+          currentRateLimit: rateLimitStatus,
+          limits: rateLimitService.RATE_LIMITS,
+        };
+      })(),
+    ]);
+
+    const maxPositions = parseInt(process.env.SIM_MAX_OPEN_POSITIONS || '5', 10);
+    const openPositions = positionsResult.rows[0]?.open_count ?? 0;
+
+    res.json({
+      processor: processorStatus,
+      gates: {
+        killSwitchActive: account?.kill_switch_active ?? false,
+        openPositions,
+        maxPositions,
+        atPositionLimit: openPositions >= maxPositions,
+      },
+      connectivity: connectivityState,
+      rateLimit: rateLimitData,
+      webhookStats: webhookStats.rows[0] || { total: 0, received: 0, processed: 0, rejected: 0, test_ping: 0 },
+      retry: retryStats.rows[0] || { retryable: 0, exhausted: 0 },
+      symbolFreshness: symbolFreshness.rows,
+      processing: processingMetrics,
+      queueHealth: queueHealth || {},
+      timeRangeHours,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error(`Pipeline observatory failed: ${error.message}`, 'sim');
+    Sentry.captureException(error, { tags: { module: 'sim-controller' } });
+    res.status(500).json({ error: 'Failed to get pipeline observatory' });
+  }
+}
+
 module.exports = {
   getAccountState,
   resetAccount,
   getPositions,
   getOrders,
   getTrades,
+  reconcileWebhookTrades,
   getEquityCurve,
   getStrategyBreakdown,
   getDteBreakdown,
@@ -565,7 +831,11 @@ module.exports = {
   startReplay,
   getSimRuns,
   getStatus,
+  getWebhookStats,
+  bulkRequeueRejected,
   warmupSymbol,
   getStateHealth,
   getGlobalHealth,
+  resetDataServiceCircuitBreaker,
+  getPipelineObservatory,
 };

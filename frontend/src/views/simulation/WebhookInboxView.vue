@@ -17,6 +17,12 @@
           <SparklesIcon class="h-4 w-4" />
           AI Analysis
         </button>
+        <router-link
+          to="/sim/pipeline-observatory"
+          class="btn-secondary text-sm flex items-center gap-1.5"
+        >
+          Pipeline Observatory
+        </router-link>
         <button
           @click="refresh"
           :disabled="refreshing"
@@ -91,6 +97,122 @@
         </button>
       </div>
 
+      <!-- Summary analytics cards -->
+      <div v-if="summary" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3 mb-5">
+        <div class="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+          <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ summary.total }}</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Total Signals</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 rounded-lg p-4 border border-green-200 dark:border-green-800">
+          <div class="text-2xl font-bold text-green-600 dark:text-green-400">{{ summary.traded?.count || 0 }}</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Traded</div>
+          <div v-if="summary.traded?.open_trades > 0" class="text-xs text-amber-500 mt-0.5">{{ summary.traded.open_trades }} open</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 rounded-lg p-4 border border-red-200 dark:border-red-800">
+          <div class="text-2xl font-bold text-red-600 dark:text-red-400">{{ summary.blocked?.count || 0 }}</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Blocked</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+          <div class="text-2xl font-bold" :class="summary.traded?.win_rate != null ? (summary.traded.win_rate >= 50 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400') : 'text-gray-400'">
+            {{ summary.traded?.win_rate != null ? summary.traded.win_rate + '%' : '-' }}
+          </div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Win Rate</div>
+          <div v-if="summary.traded?.wins != null" class="text-xs text-gray-400 mt-0.5">{{ summary.traded.wins }}W / {{ summary.traded.losses }}L</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+          <div class="text-2xl font-bold" :class="(summary.traded?.total_pnl || 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+            {{ (summary.traded?.total_pnl || 0) >= 0 ? '+' : '' }}${{ Number(summary.traded?.total_pnl || 0).toFixed(0) }}
+          </div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Total P&L</div>
+          <div v-if="summary.traded?.avg_pnl" class="text-xs text-gray-400 mt-0.5">Avg ${{ Number(summary.traded.avg_pnl).toFixed(2) }}</div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+          <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ formatNum(summary.traded?.avg_conviction) }}</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">Avg Conviction</div>
+          <div class="text-xs text-gray-400 mt-0.5">Blocked: {{ formatNum(summary.blocked?.avg_conviction) }}</div>
+        </div>
+      </div>
+
+      <!-- Analytics panels: Strategy Performance + Blocker Breakdown -->
+      <div v-if="summary && (summary.by_strategy?.length || summary.blocked?.by_gate?.length)" class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+        <!-- Strategy performance -->
+        <div v-if="summary.by_strategy?.length" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Performance by Strategy</h3>
+          <div class="space-y-2.5">
+            <div v-for="s in summary.by_strategy" :key="s.strategy" class="flex items-center justify-between text-sm">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="font-medium text-gray-900 dark:text-gray-200 truncate">{{ s.strategy }}</span>
+                <span class="text-xs text-gray-400 whitespace-nowrap">{{ s.traded }}T / {{ s.blocked }}B</span>
+              </div>
+              <div class="flex items-center gap-3 flex-shrink-0">
+                <span v-if="s.win_rate != null" class="text-xs font-medium" :class="s.win_rate >= 50 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+                  {{ s.win_rate }}%
+                </span>
+                <span class="text-xs font-mono font-medium whitespace-nowrap" :class="Number(s.pnl) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+                  {{ Number(s.pnl) >= 0 ? '+' : '' }}${{ Number(s.pnl).toFixed(0) }}
+                </span>
+                <div class="w-16 h-1.5 rounded-full bg-gray-200 dark:bg-gray-600 overflow-hidden">
+                  <div class="h-full rounded-full bg-blue-500" :style="{ width: Math.min(100, Number(s.avg_conviction) || 0) + '%' }"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Blocker breakdown -->
+        <div v-if="summary.blocked?.by_gate?.length" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+          <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Blocker Breakdown</h3>
+          <div class="space-y-2.5">
+            <div v-for="g in summary.blocked.by_gate" :key="g.gate" class="flex items-center justify-between">
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="inline-flex items-center justify-center w-6 h-6 rounded bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-xs font-bold flex-shrink-0">
+                  {{ g.count }}
+                </span>
+                <span class="text-sm font-medium text-gray-900 dark:text-gray-200 truncate">{{ formatGateName(g.gate) }}</span>
+              </div>
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <span class="text-xs text-gray-400">avg {{ formatNum(g.avg_conviction) }}</span>
+                <div class="w-20 h-1.5 rounded-full bg-gray-200 dark:bg-gray-600 overflow-hidden">
+                  <div class="h-full rounded-full bg-red-500" :style="{ width: (summary.blocked.count > 0 ? (g.count / summary.blocked.count * 100) : 0) + '%' }"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- Strategy blockers -->
+          <div v-if="summary.blocked.by_strategy?.length" class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
+            <h4 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wide">Most Blocked Strategies</h4>
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                v-for="bs in summary.blocked.by_strategy"
+                :key="bs.strategy"
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 text-xs font-medium"
+              >
+                {{ bs.strategy }}
+                <span class="text-red-400 dark:text-red-500">{{ bs.blocked_count }}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Symbol performance (compact row) -->
+      <div v-if="summary?.by_symbol?.length" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-5">
+        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">Performance by Symbol</h3>
+        <div class="flex flex-wrap gap-3">
+          <div v-for="sym in summary.by_symbol" :key="sym.symbol" class="flex items-center gap-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg px-3 py-2">
+            <span class="text-sm font-bold text-gray-900 dark:text-gray-200">{{ sym.symbol }}</span>
+            <span class="text-xs text-gray-400">{{ sym.traded }}T/{{ sym.blocked }}B</span>
+            <span v-if="sym.win_rate != null" class="text-xs font-medium" :class="sym.win_rate >= 50 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+              {{ sym.win_rate }}%
+            </span>
+            <span class="text-xs font-mono font-medium" :class="Number(sym.pnl) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'">
+              {{ Number(sym.pnl) >= 0 ? '+' : '' }}${{ Number(sym.pnl).toFixed(0) }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Signals table -->
       <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
         <div v-if="store.loading && !refreshing" class="p-8 text-center text-gray-500">
           <ArrowPathIcon class="h-8 w-8 animate-spin mx-auto mb-2" />
@@ -108,6 +230,7 @@
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Symbol</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Direction</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Strategy</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Contract</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Verdict</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Conviction</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Confidence</th>
@@ -137,14 +260,28 @@
               <td class="px-4 py-3 text-xs text-gray-600 dark:text-gray-300 font-medium">
                 {{ sig.strategy || '-' }}
               </td>
+              <td class="px-4 py-3 text-xs font-mono text-gray-600 dark:text-gray-400">
+                <template v-if="isSpread(sig)">
+                  <span v-if="hasSpreadLegs(sig)" class="text-green-600 dark:text-green-400" :title="`Short: $${sig.strike_short} / Long: $${sig.strike_long}`">
+                    Sell ${{ formatStrike(sig.strike_short) }} / Buy ${{ formatStrike(sig.strike_long) }}
+                    <span class="text-gray-400 ml-0.5">{{ spreadTypeChar(sig) }}</span>
+                  </span>
+                  <span v-else class="text-amber-600 dark:text-amber-400" title="Spread legs not found — position may not have been created">
+                    —
+                  </span>
+                </template>
+                <span v-else-if="sig.contract_type && sig.strike">
+                  {{ sig.contract_type }} ${{ formatStrike(sig.strike) }}
+                </span>
+                <span v-else class="text-gray-400">-</span>
+              </td>
               <td class="px-4 py-3">
                 <span
-                  class="inline-flex px-2 py-0.5 rounded-full text-xs font-medium"
-                  :class="sig.traded
-                    ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
-                    : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'"
+                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium"
+                  :class="verdictClass(sig)"
                 >
                   {{ sig.traded ? 'TRADED' : 'BLOCKED' }}
+                  <span v-if="sig.traded && sig.position_verified === false" class="opacity-75" title="Position not found in ledger">⚠</span>
                 </span>
               </td>
               <td class="px-4 py-3">
@@ -268,8 +405,21 @@
                 </template>
                 <span v-else class="text-gray-400">-</span>
               </td>
-              <td class="px-4 py-3 text-sm max-w-xs truncate" :class="event.error_message ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'">
-                {{ getDetailSummary(event) }}
+              <td class="px-4 py-3">
+                <div class="flex items-center gap-2 max-w-xs">
+                  <span class="truncate flex-1" :class="event.error_message ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'">
+                    {{ getDetailSummary(event) }}
+                  </span>
+                  <button
+                    v-if="event.status === 'REJECTED' && isRetryable(event)"
+                    @click.stop="retryEvent(event)"
+                    :disabled="retrying"
+                    class="flex-shrink-0 p-1 rounded text-amber-600 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30 disabled:opacity-50"
+                    title="Retry processing"
+                  >
+                    <ArrowPathIcon class="h-4 w-4" :class="{ 'animate-spin': retrying }" />
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -358,6 +508,15 @@
           <div v-if="selectedEvent.error_message" class="mb-4">
             <span class="text-xs text-gray-500 dark:text-gray-400 block mb-1">Error / Rejection Reason</span>
             <div class="p-2.5 bg-red-50 dark:bg-red-900/20 rounded-lg text-red-700 dark:text-red-300 text-sm">{{ selectedEvent.error_message }}</div>
+            <button
+              v-if="isRetryable(selectedEvent)"
+              @click="retrySelectedEvent"
+              :disabled="retrying"
+              class="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200 hover:bg-amber-200 dark:hover:bg-amber-900/50 disabled:opacity-50"
+            >
+              <ArrowPathIcon class="h-4 w-4" :class="{ 'animate-spin': retrying }" />
+              {{ retrying ? 'Retrying...' : 'Retry' }}
+            </button>
           </div>
 
           <div>
@@ -442,9 +601,36 @@
             </div>
           </div>
 
+          <!-- Position not verified warning -->
+          <div v-if="selectedTradedSignal.traded && selectedTradedSignal.position_verified === false" class="mb-5 p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800">
+            <div class="flex items-start gap-2">
+              <span class="text-amber-600 dark:text-amber-400 text-lg">⚠</span>
+              <div>
+                <div class="text-sm font-medium text-amber-800 dark:text-amber-200">Position not found in ledger</div>
+                <div class="text-xs text-amber-700 dark:text-amber-300 mt-1">The signal was approved but no sim_position or sim_trade exists. The spread may not have been created (e.g. executor failure after verdict).</div>
+              </div>
+            </div>
+          </div>
+
           <!-- Trade details (if traded) -->
-          <div v-if="selectedTradedSignal.trade_id" class="mb-5">
+          <div v-if="selectedTradedSignal.trade_id || (selectedTradedSignal.traded && selectedTradedSignal.position_verified)" class="mb-5">
             <h4 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Trade Execution</h4>
+            <div v-if="isSpread(selectedTradedSignal) && hasSpreadLegs(selectedTradedSignal)" class="mb-3 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+              <div class="text-xs font-medium text-purple-700 dark:text-purple-300 mb-2">Spread Legs</div>
+              <div class="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <div class="text-xs text-gray-500 dark:text-gray-400">Short leg (sold)</div>
+                  <div class="font-mono font-medium text-gray-900 dark:text-gray-200">${{ formatStrike(selectedTradedSignal.strike_short) }} {{ spreadTypeChar(selectedTradedSignal) }}</div>
+                </div>
+                <div>
+                  <div class="text-xs text-gray-500 dark:text-gray-400">Long leg (bought)</div>
+                  <div class="font-mono font-medium text-gray-900 dark:text-gray-200">${{ formatStrike(selectedTradedSignal.strike_long) }} {{ spreadTypeChar(selectedTradedSignal) }}</div>
+                </div>
+              </div>
+              <div class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                Width: ${{ Math.abs(Number(selectedTradedSignal.strike_short) - Number(selectedTradedSignal.strike_long)).toFixed(0) }}
+              </div>
+            </div>
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
                 <div class="text-xs text-gray-500 dark:text-gray-400">Contract</div>
@@ -452,7 +638,7 @@
               </div>
               <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
                 <div class="text-xs text-gray-500 dark:text-gray-400">Strike / DTE</div>
-                <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.strike || '-' }} / {{ selectedTradedSignal.dte_at_entry ?? '-' }}d</div>
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-200 mt-1">{{ selectedTradedSignal.strike || (hasSpreadLegs(selectedTradedSignal) ? `${formatStrike(selectedTradedSignal.strike_short)}/${formatStrike(selectedTradedSignal.strike_long)}` : '-') }} / {{ selectedTradedSignal.dte_at_entry ?? '-' }}d</div>
               </div>
               <div class="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3">
                 <div class="text-xs text-gray-500 dark:text-gray-400">Entry / Exit</div>
@@ -711,6 +897,7 @@ const selectedEvent = ref(null)
 const selectedTradedSignal = ref(null)
 const processing = ref(false)
 const refreshing = ref(false)
+const retrying = ref(false)
 const activeStatus = ref('')
 const tradedOutcome = ref('')
 const autoRefresh = ref(true)
@@ -787,6 +974,8 @@ const tradedSubFilters = computed(() => [
   { label: 'Traded', value: 'traded', count: store.tradedSignalsCounts.traded_count },
   { label: 'Blocked', value: 'blocked', count: store.tradedSignalsCounts.blocked_count },
 ])
+
+const summary = computed(() => store.tradedSignalsSummary)
 
 function detectSource(payload) {
   if (!payload) return 'UNKNOWN'
@@ -884,6 +1073,32 @@ function processingDelay(event) {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+function isRetryable(event) {
+  if (!event || event.status !== 'REJECTED') return false
+  const msg = event.error_message || ''
+  const retryCount = event.retry_count ?? 0
+  return msg.startsWith('Processing error:') && retryCount < 3
+}
+
+async function retrySelectedEvent() {
+  if (!selectedEvent.value || !isRetryable(selectedEvent.value)) return
+  await retryEvent(selectedEvent.value)
+  selectedEvent.value = null
+}
+
+async function retryEvent(event) {
+  if (!event || !isRetryable(event)) return
+  retrying.value = true
+  try {
+    await store.retryWebhook(event.id)
+    await Promise.all([store.fetchWebhookEvents(), fetchStats()])
+  } catch (err) {
+    console.error('[WEBHOOK] Retry failed:', err)
+  } finally {
+    retrying.value = false
+  }
+}
+
 function getDetailSummary(event) {
   if (event.error_message) return event.error_message
   if (event.status === 'PROCESSED') {
@@ -922,6 +1137,35 @@ function formatNum(v) {
   return Number(v).toFixed(1)
 }
 
+function verdictClass(sig) {
+  if (!sig.traded) return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300'
+  if (sig.position_verified === false) return 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+  return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+}
+
+function isSpread(sig) {
+  const ct = (sig.contract_type || '').toUpperCase()
+  return ct === 'CREDIT_SPREAD' || ct === 'DEBIT_SPREAD'
+}
+
+function hasSpreadLegs(sig) {
+  return sig.strike_short != null && sig.strike_long != null
+}
+
+function formatStrike(v) {
+  if (v == null) return '-'
+  const n = Number(v)
+  return isNaN(n) ? String(v) : (n % 1 === 0 ? n.toFixed(0) : n.toFixed(2))
+}
+
+function spreadTypeChar(sig) {
+  const ct = (sig.contract_type || '').toUpperCase()
+  const dir = (sig.direction || '').toLowerCase()
+  if (ct === 'CREDIT_SPREAD') return dir === 'short' ? 'C' : 'P'  // bear call vs bull put
+  if (ct === 'DEBIT_SPREAD') return dir === 'short' ? 'P' : 'C'   // bear put vs bull call
+  return ''
+}
+
 function getTradedSignalSummary(sig) {
   if (!sig.traded) {
     return sig.rejection_reason || sig.rejection_detail || 'Blocked by engine'
@@ -946,6 +1190,15 @@ function parsedRationale(checksDetail) {
   return detail.rationale || []
 }
 
+function formatGateName(gate) {
+  if (!gate) return 'Unknown'
+  return gate
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bPnl\b/i, 'P&L')
+    .replace(/\bDte\b/i, 'DTE')
+}
+
 function setTradedOutcome(outcome) {
   tradedOutcome.value = outcome
   store.tradedSignalsPagination.page = 1
@@ -963,6 +1216,7 @@ function filterByStatus(status) {
     store.tradedSignalsPagination.page = 1
     tradedOutcome.value = ''
     store.fetchTradedSignals()
+    store.fetchTradedSignalsSummary()
     return
   }
   store.filters.webhookStatus = status
@@ -980,7 +1234,10 @@ async function refresh() {
   try {
     const fetches = [fetchStats()]
     if (activeStatus.value === 'TRADED_SIGNALS') {
-      fetches.push(store.fetchTradedSignals({ outcome: tradedOutcome.value || undefined }))
+      fetches.push(
+        store.fetchTradedSignals({ outcome: tradedOutcome.value || undefined }),
+        store.fetchTradedSignalsSummary()
+      )
     } else {
       fetches.push(store.fetchWebhookEvents())
     }
@@ -1026,6 +1283,7 @@ onMounted(async () => {
     store.fetchWebhookEvents(),
     fetchStats(),
     store.fetchTradedSignals(),
+    store.fetchTradedSignalsSummary(),
   ])
   if (autoRefresh.value) startAutoRefresh()
 })

@@ -1010,7 +1010,7 @@ import { usePriceAlertNotifications } from '@/composables/usePriceAlertNotificat
 
 const tradesStore = useTradesStore()
 const authStore = useAuthStore()
-const { showSuccess, showError, showImportantWarning, showSuccessModal, clearModalAlert } = useNotification()
+const { showSuccess, showError, showApiError, showImportantWarning, showSuccessModal, clearModalAlert } = useNotification()
 const { celebrationQueue } = usePriceAlertNotifications()
 
 const loading = ref(false)
@@ -1611,7 +1611,7 @@ async function handleImport() {
     }
     else {
       error.value = errorMessage
-      showError('Import Failed', error.value)
+      showApiError('Import Failed', err, 'Import failed')
     }
   } finally {
     loading.value = false
@@ -1689,9 +1689,8 @@ async function handleKeepBrokerSelected(selectedBrokerValue) {
     pollImportStatus(result.importId)
   } catch (err) {
     console.error('Import error:', err)
-    const errorMessage = err.response?.data?.error || err.message || 'Import failed'
-    error.value = errorMessage
-    showError('Import Failed', error.value)
+    error.value = err.response?.data?.error || err.message || 'Import failed'
+    showApiError('Import Failed', err, 'Import failed')
   } finally {
     loading.value = false
     importStage.value = ''
@@ -1767,7 +1766,7 @@ async function confirmDelete() {
       await tradesStore.fetchAnalytics()
       showDeleteModal.value = false
     } catch (error) {
-      showError('Delete Failed', error.response?.data?.error || 'Failed to delete imports')
+      showApiError('Delete Failed', error, 'Failed to delete imports')
     } finally {
       bulkDeleting.value = false
       bulkDeleteIds.value = null
@@ -1791,7 +1790,7 @@ async function confirmDelete() {
     await tradesStore.fetchAnalytics()
     showDeleteModal.value = false
   } catch (error) {
-    showError('Delete Failed', error.response?.data?.error || 'Failed to delete import')
+    showApiError('Delete Failed', error, 'Failed to delete import')
   } finally {
     deleting.value = false
     deleteImportId.value = null
@@ -1871,7 +1870,7 @@ async function fetchLogs(showAll = null, page = 1) {
       showLogs.value = true
     }
   } catch (error) {
-    showError('Load Failed', 'Failed to load log files')
+    showApiError('Load Failed', error, 'Failed to load log files')
   }
 }
 
@@ -1984,7 +1983,7 @@ async function loadLogFile(filename, page = 1, showAll = null, search = null) {
       searchResults.value = null
     }
   } catch (error) {
-    showError('Load Failed', 'Failed to load log file content')
+    showApiError('Load Failed', error, 'Failed to load log file content')
     logContent.value = 'Failed to load content'
   }
 }
@@ -2037,7 +2036,7 @@ async function addCusipMapping() {
       showError('Add Failed', error.error || 'Failed to add CUSIP mapping')
     }
   } catch (error) {
-    showError('Add Failed', 'Failed to add CUSIP mapping')
+    showApiError('Add Failed', error, 'Failed to add CUSIP mapping')
   } finally {
     cusipLoading.value = false
   }
@@ -2080,7 +2079,7 @@ async function lookupCusip() {
       throw new Error('Failed to lookup CUSIP')
     }
   } catch (error) {
-    showError('Lookup Failed', 'Failed to lookup CUSIP')
+    showApiError('Lookup Failed', error, 'Failed to lookup CUSIP')
     lookupResult.value = {
       found: false,
       cusip: lookupForm.value.cusip.toUpperCase()
@@ -2116,7 +2115,7 @@ async function deleteCusipMapping(cusip) {
       showError('Delete Failed', error.error || 'Failed to delete CUSIP mapping')
     }
   } catch (error) {
-    showError('Delete Failed', 'Failed to delete CUSIP mapping')
+    showApiError('Delete Failed', error, 'Failed to delete CUSIP mapping')
   } finally {
     cusipLoading.value = false
   }
@@ -2377,7 +2376,7 @@ async function deleteMapping() {
   } catch (err) {
     console.error('[DELETE MAPPING] Error deleting mapping:', err)
     console.error('[DELETE MAPPING] Error response:', err.response)
-    showError('Delete Failed', err.response?.data?.error || 'Failed to delete importer')
+    showApiError('Delete Failed', err, 'Failed to delete importer')
   } finally {
     deletingMappingId.value = null
     cancelDeleteMapping()
@@ -2430,9 +2429,8 @@ async function handleMappingSaved(mapping) {
     pollImportStatus(result.importId)
   } catch (err) {
     console.error('Import error after mapping:', err)
-    const errorMessage = err.response?.data?.error || err.message || 'Import failed'
-    error.value = errorMessage
-    showError('Import Failed', error.value)
+    error.value = err.response?.data?.error || err.message || 'Import failed'
+    showApiError('Import Failed', err, 'Import failed')
   } finally {
     loading.value = false
     importStage.value = ''
@@ -2503,8 +2501,7 @@ async function startTrial() {
     }
   } catch (err) {
     console.error('[IMPORT] Error starting trial:', err)
-    const errorMessage = err.response?.data?.message || err.response?.data?.error || 'Failed to start trial. Please try again.'
-    showError('Trial Failed', errorMessage)
+    showApiError('Trial Failed', err, 'Failed to start trial. Please try again.')
   } finally {
     startingTrial.value = false
   }

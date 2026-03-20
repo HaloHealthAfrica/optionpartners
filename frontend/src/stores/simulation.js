@@ -164,6 +164,7 @@ export const useSimulationStore = defineStore('simulation', () => {
   const tradedSignals = ref([])
   const tradedSignalsPagination = ref({ page: 1, limit: 25, total: 0 })
   const tradedSignalsCounts = ref({ traded_count: 0, blocked_count: 0, total: 0 })
+  const tradedSignalsSummary = ref(null)
 
   async function fetchWebhookEvents(params = {}) {
     loading.value = true
@@ -211,6 +212,17 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  async function fetchTradedSignalsSummary() {
+    try {
+      const { data } = await api.get('/webhooks/traded-signals/summary')
+      tradedSignalsSummary.value = data
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    }
+  }
+
   async function fetchSimRuns() {
     try {
       const { data } = await api.get('/sim/runs')
@@ -247,6 +259,16 @@ export const useSimulationStore = defineStore('simulation', () => {
   async function processPending() {
     try {
       const { data } = await api.post('/sim/process')
+      return data
+    } catch (err) {
+      error.value = err.response?.data?.error || err.message
+      throw err
+    }
+  }
+
+  async function retryWebhook(eventId) {
+    try {
+      const { data } = await api.post(`/webhooks/${eventId}/retry`)
       return data
     } catch (err) {
       error.value = err.response?.data?.error || err.message
@@ -724,16 +746,210 @@ export const useSimulationStore = defineStore('simulation', () => {
     }
   }
 
+  // Revenue Target
+  const revenueTargetConfig = ref(null)
+  const revenueTargetProgress = ref(null)
+  const revenueTargetHistory = ref([])
+  const revenueTargetStats = ref(null)
+  const revenueTargetDecisions = ref([])
+
+  async function fetchRevenueTargetConfig() {
+    try {
+      const { data } = await api.get('/sim/revenue-target/config')
+      revenueTargetConfig.value = data
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target config fetch failed:', err)
+      return null
+    }
+  }
+
+  async function updateRevenueTargetConfig(updates) {
+    try {
+      const { data } = await api.put('/sim/revenue-target/config', updates)
+      revenueTargetConfig.value = data
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target config update failed:', err)
+      throw err
+    }
+  }
+
+  async function fetchRevenueTargetProgress() {
+    try {
+      const { data } = await api.get('/sim/revenue-target/progress')
+      revenueTargetProgress.value = data
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target progress fetch failed:', err)
+      return null
+    }
+  }
+
+  async function fetchRevenueTargetHistory(days = 14) {
+    try {
+      const { data } = await api.get('/sim/revenue-target/history', { params: { days } })
+      revenueTargetHistory.value = data.history || []
+      return data.history
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target history fetch failed:', err)
+      return []
+    }
+  }
+
+  async function fetchRevenueTargetStats(days = 14) {
+    try {
+      const { data } = await api.get('/sim/revenue-target/stats', { params: { days } })
+      revenueTargetStats.value = data
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target stats fetch failed:', err)
+      return null
+    }
+  }
+
+  async function fetchRevenueTargetDecisions(limit = 50) {
+    try {
+      const { data } = await api.get('/sim/revenue-target/decisions', { params: { limit } })
+      revenueTargetDecisions.value = data.decisions || []
+      return data.decisions
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target decisions fetch failed:', err)
+      return []
+    }
+  }
+
+  async function setRevenueTargetOverride(hours = 4) {
+    try {
+      const { data } = await api.post('/sim/revenue-target/override', { hours })
+      await fetchRevenueTargetProgress()
+      return data
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target override failed:', err)
+      throw err
+    }
+  }
+
+  async function clearRevenueTargetOverride() {
+    try {
+      await api.delete('/sim/revenue-target/override')
+      await fetchRevenueTargetProgress()
+    } catch (err) {
+      console.error('[SIM_STORE] Revenue target clear override failed:', err)
+      throw err
+    }
+  }
+
+  // Backtest Lab
+  const backtestRuns = ref([])
+  const backtestRunsTotal = ref(0)
+  const backtestStrategies = ref([])
+  const backtestLoading = ref(false)
+  const backtestError = ref(null)
+
+  async function startBacktest(params) {
+    backtestLoading.value = true
+    backtestError.value = null
+    try {
+      const { data } = await api.post('/sim/backtest', params, { timeout: 120000 })
+      return data
+    } catch (err) {
+      backtestError.value = _backtestErrMsg(err)
+      throw err
+    } finally {
+      backtestLoading.value = false
+    }
+  }
+
+  async function fetchBacktestRun(id) {
+    try {
+      const { data } = await api.get(`/sim/backtest/${id}`, { timeout: 60000 })
+      return data
+    } catch (err) {
+      backtestError.value = _backtestErrMsg(err)
+      throw err
+    }
+  }
+
+  let backtestPollingTimer = null
+
+  async function fetchBacktestRuns(page = 1, limit = 20, opts = {}) {
+    if (!opts.silent) backtestLoading.value = true
+    try {
+      const { data } = await api.get('/sim/backtest', { params: { page, limit }, timeout: 60000 })
+      backtestRuns.value = data.runs || []
+      backtestRunsTotal.value = data.total || 0
+      backtestError.value = null
+      return data
+    } catch (err) {
+      backtestRuns.value = []
+      backtestRunsTotal.value = 0
+      backtestError.value = _backtestErrMsg(err)
+      return { runs: [], total: 0 }
+    } finally {
+      if (!opts.silent) backtestLoading.value = false
+    }
+  }
+
+  function startBacktestPolling() {
+    if (backtestPollingTimer) return
+    backtestPollingTimer = setInterval(async () => {
+      const data = await fetchBacktestRuns(1, 20, { silent: true })
+      const hasRunning = (data.runs || []).some((r) => r.status === 'RUNNING')
+      if (!hasRunning) stopBacktestPolling()
+    }, 5000)
+  }
+
+  function stopBacktestPolling() {
+    if (backtestPollingTimer) {
+      clearInterval(backtestPollingTimer)
+      backtestPollingTimer = null
+    }
+  }
+
+  function _backtestErrMsg(err) {
+    const msg = err.response?.data?.error || err.response?.data?.message || err.message
+    if (msg === 'Network Error' || err.code === 'ERR_NETWORK') {
+      return 'Connection failed. The server may be waking up (cold start). Try again in a few seconds, or ensure you\'re logged in.'
+    }
+    if (err.code === 'ECONNABORTED' || (msg && msg.includes('timeout'))) {
+      return 'Request timed out. The server may be busy or waking up. Try again.'
+    }
+    return msg
+  }
+
+  async function preflightBacktest(params) {
+    try {
+      const { data } = await api.post('/sim/backtest/preflight', params, { timeout: 30000 })
+      return data.count
+    } catch (err) {
+      throw err
+    }
+  }
+
+  async function fetchBacktestStrategies() {
+    try {
+      const { data } = await api.get('/sim/strategies', { timeout: 60000 })
+      backtestStrategies.value = data.strategies || []
+      backtestError.value = null
+      return data.strategies
+    } catch (err) {
+      backtestStrategies.value = []
+      backtestError.value = _backtestErrMsg(err)
+      return []
+    }
+  }
+
   return {
     accountState, positions, orders, trades, equityCurve,
     strategyBreakdown, dteBreakdown, webhookEvents, simRuns,
     status, loading, error, pagination, webhookPagination, filters,
     totalPnL, equity, killSwitchActive,
-    tradedSignals, tradedSignalsPagination, tradedSignalsCounts,
+    tradedSignals, tradedSignalsPagination, tradedSignalsCounts, tradedSignalsSummary,
     fetchAccountState, resetAccount, fetchPositions, fetchOrders,
     fetchTrades, fetchEquityCurve, fetchStrategyBreakdown,
-    fetchDteBreakdown, fetchWebhookEvents, fetchTradedSignals, fetchSimRuns,
-    fetchStatus, toggleKillSwitch, processPending, startReplay,
+    fetchDteBreakdown, fetchWebhookEvents, fetchTradedSignals, fetchTradedSignalsSummary, fetchSimRuns,
+    fetchStatus, toggleKillSwitch, processPending, retryWebhook, startReplay,
     // Intelligence layer
     scorecard, cooldowns, rejections, livePositions,
     intelligenceConfig, intelligenceStatus, equityByStrategy,
@@ -756,5 +972,32 @@ export const useSimulationStore = defineStore('simulation', () => {
     fetchAIInsights, streamAIInsights, fetchLiveContext,
     fetchAutoInsight, markAutoInsightRead,
     connectLiveFeed, disconnectLiveFeed,
+    // Revenue Target
+    revenueTargetConfig,
+    revenueTargetProgress,
+    revenueTargetHistory,
+    revenueTargetStats,
+    fetchRevenueTargetConfig,
+    updateRevenueTargetConfig,
+    fetchRevenueTargetProgress,
+    fetchRevenueTargetHistory,
+    fetchRevenueTargetStats,
+    revenueTargetDecisions,
+    fetchRevenueTargetDecisions,
+    setRevenueTargetOverride,
+    clearRevenueTargetOverride,
+    // Backtest Lab
+    backtestRuns,
+    backtestRunsTotal,
+    backtestStrategies,
+    backtestLoading,
+    backtestError,
+    startBacktest,
+    preflightBacktest,
+    fetchBacktestRun,
+    fetchBacktestRuns,
+    fetchBacktestStrategies,
+    startBacktestPolling,
+    stopBacktestPolling,
   }
 })

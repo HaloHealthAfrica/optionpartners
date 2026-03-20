@@ -283,7 +283,7 @@ import HealthCorrelationChart from '@/components/health/HealthCorrelationChart.v
 
 const authStore = useAuthStore()
 const { selectedAccount } = useGlobalAccountFilter()
-const { showSuccessModal, showCriticalError } = useNotification()
+const { showSuccessModal, showApiCriticalError } = useNotification()
 
 const healthSummary = ref({
   avgHeartRate: null,
@@ -531,8 +531,9 @@ async function correlateHealthWithTrades() {
     await loadHealthSummary()
   } catch (error) {
     console.error('Error correlating health with trades:', error)
-    showCriticalError(
+    showApiCriticalError(
       'Sync Failed',
+      error,
       'Failed to correlate health data with trades. Please try again.'
     )
   } finally {

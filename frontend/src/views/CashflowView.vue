@@ -349,7 +349,7 @@ import { useNotification } from '@/composables/useNotification'
 import AccountModal from '@/components/accounts/AccountModal.vue'
 
 const store = useAccountsStore()
-const { showSuccess, showError, showDangerConfirmation } = useNotification()
+const { showSuccess, showError, showApiError, showDangerConfirmation } = useNotification()
 
 // State
 const selectedAccountId = ref('')
@@ -490,7 +490,7 @@ async function loadCashflow() {
     // Update transaction form to use selected account
     transactionForm.value.accountId = selectedAccountId.value
   } catch (error) {
-    showError('Error', 'Failed to load cashflow data')
+    showApiError('Error', error, 'Failed to load cashflow data')
   }
 }
 
@@ -526,7 +526,7 @@ async function saveAccount(accountData) {
       await loadCashflow()
     }
   } catch (error) {
-    showError('Error', error.message || 'Failed to save account')
+    showApiError('Error', error, 'Failed to save account')
   }
 }
 
@@ -543,7 +543,7 @@ function confirmDeleteAccount(account) {
           store.clearCashflow()
         }
       } catch (error) {
-        showError('Error', 'Failed to delete account')
+        showApiError('Error', error, 'Failed to delete account')
       }
     }
   )
@@ -578,7 +578,7 @@ async function submitTransaction() {
       await loadCashflow()
     }
   } catch (error) {
-    showError('Error', 'Failed to add transaction')
+    showApiError('Error', error, 'Failed to add transaction')
   } finally {
     submitting.value = false
   }
@@ -590,7 +590,7 @@ async function removeTransaction(transactionId) {
     showSuccess('Success', 'Transaction deleted')
     await loadCashflow()
   } catch (error) {
-    showError('Error', 'Failed to delete transaction')
+    showApiError('Error', error, 'Failed to delete transaction')
   }
 }
 

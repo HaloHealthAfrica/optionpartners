@@ -5,7 +5,7 @@ const logger = require('../../utils/logger');
 const { getETDate } = require('../../utils/timezone');
 
 const CORRELATION_GROUPS = {
-  BROAD_INDEX: ['SPY', 'QQQ', 'IWM', 'DIA', 'VOO', 'SPX', 'ES', 'NQ', 'RTY', 'YM'],
+  BROAD_INDEX: ['SPY', 'QQQ', 'IWM', 'IWN', 'DIA', 'VOO', 'SPX', 'ES', 'NQ', 'RTY', 'YM'],
   MEGA_TECH: ['AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'META', 'NVDA', 'TSLA'],
   SEMIS: ['NVDA', 'AMD', 'INTC', 'SMH', 'AVGO', 'MU', 'QCOM', 'SOXX'],
   FINANCIALS: ['JPM', 'BAC', 'GS', 'MS', 'WFC', 'C', 'XLF'],

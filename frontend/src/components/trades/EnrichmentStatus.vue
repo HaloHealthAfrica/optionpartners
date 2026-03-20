@@ -109,7 +109,7 @@ import { useEnrichmentStatus } from '@/composables/usePriceAlertNotifications'
 import { useNotification } from '@/composables/useNotification'
 import { ExclamationTriangleIcon, ArrowPathIcon } from '@heroicons/vue/24/outline'
 
-const { showSuccess, showError, showWarning, showConfirmation } = useNotification()
+const { showSuccess, showError, showApiError, showWarning, showConfirmation } = useNotification()
 
 const enrichmentStatus = ref(null)
 const dismissed = ref(JSON.parse(localStorage.getItem('enrichmentBannerDismissed') || 'false'))
@@ -252,7 +252,7 @@ async function syncEnrichmentStatus() {
     )
   } catch (error) {
     console.error('Failed to sync enrichment status:', error)
-    showError('Sync Failed', 'Failed to sync enrichment status. Please try again.')
+    showApiError('Sync Failed', error, 'Failed to sync enrichment status. Please try again.')
   }
 }
 
@@ -281,7 +281,7 @@ async function performForceComplete() {
     )
   } catch (error) {
     console.error('Failed to force complete enrichment:', error)
-    showError('Force Complete Failed', 'Failed to force complete enrichment. Please check the logs and try again.')
+    showApiError('Force Complete Failed', error, 'Failed to force complete enrichment. Please check the logs and try again.')
   }
 }
 

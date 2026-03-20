@@ -237,7 +237,7 @@ const props = defineProps({
 
 const emit = defineEmits(["close", "comment-added", "comment-deleted"]);
 
-const { showError, showSuccess, showDangerConfirmation } = useNotification();
+const { showError, showApiError, showSuccess, showDangerConfirmation } = useNotification();
 const authStore = useAuthStore();
 
 const comments = ref([]);
@@ -261,7 +261,7 @@ async function loadComments() {
         const response = await api.get(`/trades/${props.tradeId}/comments`);
         comments.value = response.data.comments || [];
     } catch (error) {
-        showError("Error", "Failed to load comments");
+        showApiError("Error", error, "Failed to load comments");
     } finally {
         loading.value = false;
     }
@@ -281,7 +281,7 @@ async function submitComment() {
         showSuccess("Success", "Comment added successfully");
         emit("comment-added");
     } catch (error) {
-        showError("Error", "Failed to add comment");
+        showApiError("Error", error, "Failed to add comment");
     } finally {
         submitting.value = false;
     }
@@ -319,7 +319,7 @@ async function saveEditComment(commentId) {
         editCommentText.value = "";
         showSuccess("Success", "Comment updated successfully");
     } catch (error) {
-        showError("Error", "Failed to update comment");
+        showApiError("Error", error, "Failed to update comment");
     } finally {
         submitting.value = false;
     }
@@ -343,7 +343,7 @@ function deleteComment(commentId) {
                 showSuccess("Success", "Comment deleted successfully");
                 emit("comment-deleted"); // To update the comment count
             } catch (error) {
-                showError("Error", "Failed to delete comment");
+                showApiError("Error", error, "Failed to delete comment");
             }
         },
     );

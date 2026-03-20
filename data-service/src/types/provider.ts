@@ -51,7 +51,8 @@ export interface ProviderConfig {
   rateLimit: number;
   rateLimitWindow: number;
   capabilities: ProviderCapabilities;
-  circuitBreaker: {
+  /** @deprecated Circuit breaker removed; kept for config compatibility */
+  circuitBreaker?: {
     failureThreshold: number;
     resetTimeoutMs: number;
     halfOpenMaxAttempts: number;
@@ -61,6 +62,7 @@ export interface ProviderConfig {
 export interface MarketDataProvider {
   readonly name: ProviderName;
   readonly capabilities: ProviderCapabilities;
+  readonly priority?: ProviderPriority;
 
   getQuote(symbol: string): Promise<Quote>;
   getCandles(symbol: string, timeframe: Timeframe, limit?: number): Promise<Candle[]>;

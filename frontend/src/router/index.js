@@ -162,6 +162,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/sim/pipeline-observatory',
+      name: 'sim-pipeline-observatory',
+      component: () => import('@/views/simulation/PipelineObservatoryView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/sim/trades',
       name: 'sim-trades',
       component: () => import('@/views/simulation/SimTradesView.vue'),
@@ -189,6 +195,18 @@ const router = createRouter({
       path: '/sim/adaptive',
       name: 'sim-adaptive',
       component: () => import('@/views/simulation/AdaptiveIntelligenceView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/sim/revenue-target',
+      name: 'sim-revenue-target',
+      component: () => import('@/views/simulation/RevenueTargetView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/sim/data-validation',
+      name: 'sim-data-validation',
+      component: () => import('@/views/simulation/DataProviderValidationView.vue'),
       meta: { requiresAuth: true }
     },
     {
@@ -250,6 +268,12 @@ const router = createRouter({
       name: 'admin-backups',
       component: () => import('@/views/admin/BackupManagementView.vue'),
       meta: { requiresAuth: true, requiresAdmin: true }
+    },
+    {
+      path: '/admin/errors',
+      name: 'admin-errors',
+      component: () => import('@/views/admin/ErrorCatalogView.vue'),
+      meta: { requiresAuth: true }
     },
     {
       path: '/oauth/authorize',

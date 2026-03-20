@@ -1174,7 +1174,7 @@ const route = useRoute()
 const router = useRouter()
 const tradesStore = useTradesStore()
 const authStore = useAuthStore()
-const { showSuccess, showError, showConfirmation } = useNotification()
+const { showSuccess, showError, showApiError, showConfirmation } = useNotification()
 const { formatDateTime: formatDateTimeTz, formatTime: formatTimeTz, timezoneLabel } = useUserTimezone()
 
 const loading = ref(true)
@@ -1668,7 +1668,7 @@ async function loadComments() {
     comments.value = response.data.comments
   } catch (error) {
     console.error('Failed to load comments:', error)
-    showError('Error', 'Failed to load comments')
+    showApiError('Error', error, 'Failed to load comments')
   } finally {
     loadingComments.value = false
   }
@@ -1694,7 +1694,7 @@ async function submitComment() {
     showSuccess('Success', 'Comment posted successfully')
   } catch (error) {
     console.error('Failed to post comment:', error)
-    showError('Error', 'Failed to post comment')
+    showApiError('Error', error, 'Failed to post comment')
   } finally {
     submittingComment.value = false
   }
@@ -1730,7 +1730,7 @@ async function saveEditComment(commentId) {
     showSuccess('Success', 'Comment updated successfully')
   } catch (error) {
     console.error('Failed to update comment:', error)
-    showError('Error', 'Failed to update comment')
+    showApiError('Error', error, 'Failed to update comment')
   } finally {
     submittingComment.value = false
   }
@@ -1750,7 +1750,7 @@ async function deleteTradeComment(commentId) {
         showSuccess('Success', 'Comment deleted successfully')
       } catch (error) {
         console.error('Failed to delete comment:', error)
-        showError('Error', 'Failed to delete comment')
+        showApiError('Error', error, 'Failed to delete comment')
       }
     }
   )
@@ -1783,7 +1783,7 @@ async function deleteTrade() {
         showSuccess('Success', 'Trade deleted successfully')
         router.push('/trades')
       } catch (error) {
-        showError('Error', 'Failed to delete trade')
+        showApiError('Error', error, 'Failed to delete trade')
       }
     }
   )
@@ -1838,7 +1838,7 @@ async function splitSelectedTrades() {
         router.push('/trades')
       } catch (error) {
         console.error('Failed to split trade:', error)
-        showError('Error', error.response?.data?.error || 'Failed to split trade')
+        showApiError('Error', error, 'Failed to split trade')
       } finally {
         splittingTrade.value = false
         splitMode.value = false
@@ -1867,7 +1867,7 @@ async function calculateQuality() {
     }
   } catch (error) {
     console.error('Error calculating quality:', error)
-    showError('Error', error.response?.data?.error || 'Failed to calculate quality grade')
+    showApiError('Error', error, 'Failed to calculate quality grade')
   } finally {
     calculatingQuality.value = false
   }
@@ -1884,7 +1884,7 @@ async function loadTrade() {
       loadComments()
     }
   } catch (error) {
-    showError('Error', 'Failed to load trade')
+    showApiError('Error', error, 'Failed to load trade')
     router.push('/trades')
   } finally {
     loading.value = false

@@ -154,17 +154,45 @@ async function migrate() {
     const skipBaseSchema = process.env.SKIP_BASE_SCHEMA === 'true';
 
     if (!skipBaseSchema) {
-      // Run base schema FIRST (before migrations table to avoid conflicts)
-      const schemaPath = path.join(__dirname, 'schema.sql');
-      try {
-        const schemaContent = await fs.readFile(schemaPath, 'utf8');
-        console.log(`${colors.blue}Running base schema initialization...${colors.reset}`);
-        await db.query(schemaContent);
-        console.log(`${colors.green}[SUCCESS] Base schema initialized${colors.reset}`);
-      } catch (error) {
-        if (error.code !== 'ENOENT') {
-          console.error(`${colors.red}[ERROR] Base schema failed:${colors.reset}`, error.message);
-          throw error;
+      // Check if schema is already initialized (e.g. shared DB, or previous run)
+      const schemaCheck = await db.query(`
+        SELECT EXISTS (
+          SELECT 1 FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_name = 'users'
+        ) AS users_exists,
+        EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'id'
+        ) AS users_has_id
+      `);
+      const { users_exists, users_has_id } = schemaCheck.rows[0];
+
+      if (users_exists && users_has_id) {
+        console.log(`${colors.yellow}Skipping base schema (database already initialized)${colors.reset}`);
+      } else if (users_exists && !users_has_id) {
+        console.error(`${colors.red}[ERROR] Base schema failed:${colors.reset} column "id" referenced in foreign key constraint does not exist`);
+        console.error(`${colors.red}The 'users' table exists but has a different structure (missing 'id' column).${colors.reset}`);
+        console.error(`${colors.yellow}If this database was initialized by another app, set SKIP_BASE_SCHEMA=true${colors.reset}`);
+        process.exit(1);
+      } else {
+        // Run base schema FIRST (before migrations table to avoid conflicts)
+        const schemaPath = path.join(__dirname, 'schema.sql');
+        try {
+          const schemaContent = await fs.readFile(schemaPath, 'utf8');
+          console.log(`${colors.blue}Running base schema initialization...${colors.reset}`);
+          await db.query(schemaContent);
+          console.log(`${colors.green}[SUCCESS] Base schema initialized${colors.reset}`);
+        } catch (error) {
+          if (error.code !== 'ENOENT') {
+            // If FK error suggests pre-existing conflicting schema, hint at SKIP_BASE_SCHEMA
+            if (error.message && /column.*referenced in foreign key.*does not exist/i.test(error.message)) {
+              console.error(`${colors.red}[ERROR] Base schema failed:${colors.reset}`, error.message);
+              console.error(`${colors.yellow}Try setting SKIP_BASE_SCHEMA=true if this database shares schema with another app.${colors.reset}`);
+            } else {
+              console.error(`${colors.red}[ERROR] Base schema failed:${colors.reset}`, error.message);
+            }
+            throw error;
+          }
         }
       }
     } else {

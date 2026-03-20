@@ -78,7 +78,7 @@ const props = defineProps({
 })
 
 const store = useInvestmentsStore()
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showError, showApiError } = useNotification()
 
 const expanded = ref(false)
 const calculatorRef = ref(null)
@@ -122,7 +122,7 @@ async function handleCalculate(inputs) {
   try {
     await store.calculateDCF(props.symbol, inputs)
   } catch (err) {
-    showError('Calculation Failed', err.message || 'Failed to calculate DCF')
+    showApiError('Calculation Failed', err, 'Failed to calculate DCF')
   }
 }
 
@@ -131,7 +131,7 @@ async function handleSave(data) {
     await store.saveValuation(data)
     showSuccess('Valuation Saved', 'Your valuation has been saved successfully')
   } catch (err) {
-    showError('Save Failed', err.message || 'Failed to save valuation')
+    showApiError('Save Failed', err, 'Failed to save valuation')
   }
 }
 
@@ -146,7 +146,7 @@ async function handleDeleteValuation(id) {
     await store.deleteValuation(id)
     showSuccess('Valuation Deleted', 'The valuation has been deleted')
   } catch (err) {
-    showError('Delete Failed', err.message || 'Failed to delete valuation')
+    showApiError('Delete Failed', err, 'Failed to delete valuation')
   }
 }
 

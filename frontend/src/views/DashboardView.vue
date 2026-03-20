@@ -1293,10 +1293,12 @@ import OnboardingCard from '@/components/onboarding/OnboardingCard.vue'
 import { useYearWrappedStore } from '@/stores/yearWrapped'
 import { useSimulationStore } from '@/stores/simulation'
 import { useGlobalAccountFilter } from '@/composables/useGlobalAccountFilter'
+import { useNotification } from '@/composables/useNotification'
 import { useUserTimezone } from '@/composables/useUserTimezone'
 import draggable from 'vuedraggable'
 
 const authStore = useAuthStore()
+const { showSuccessModal, showApiCriticalError } = useNotification()
 const { formatTime: formatTimeTz } = useUserTimezone()
 const { selectedAccount } = useGlobalAccountFilter()
 const yearWrappedStore = useYearWrappedStore()
@@ -2431,9 +2433,10 @@ async function fetchExpiredOptionsCount() {
         ])
       } catch (closeError) {
         console.error('[Dashboard] Error auto-closing expired options:', closeError)
-        showCriticalError(
+        showApiCriticalError(
           'Auto-Close Failed',
-          closeError.response?.data?.error || 'Failed to auto-close expired options'
+          closeError,
+          'Failed to auto-close expired options'
         )
       }
     }

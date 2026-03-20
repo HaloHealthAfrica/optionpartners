@@ -87,7 +87,7 @@ import VersionDisplay from '@/components/common/VersionDisplay.vue'
 import api from '@/services/api'
 
 // Rate limit notification handling
-const { showError } = useNotification()
+const { showError, showApiError } = useNotification()
 const lastRateLimitNotification = ref(0)
 
 const route = useRoute()
@@ -132,9 +132,10 @@ const handleRateLimitExceeded = (event) => {
   // Only show notification once every 30 seconds to avoid spamming
   if (now - lastRateLimitNotification.value > 30000) {
     lastRateLimitNotification.value = now
-    showError(
+    showApiError(
       'Rate Limit Exceeded',
-      `${message} Please wait ${retryAfter} seconds before trying again. If you're self-hosting, you can disable rate limiting by setting RATE_LIMIT_ENABLED=false in your environment.`
+      { response: { status: 429, data: { error: `${message} Please wait ${retryAfter} seconds before trying again. If you're self-hosting, you can disable rate limiting by setting RATE_LIMIT_ENABLED=false in your environment.` } } },
+      'Too many requests. Please try again later.'
     )
   }
 }

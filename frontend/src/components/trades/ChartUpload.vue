@@ -102,7 +102,7 @@ const props = defineProps({
 
 const emit = defineEmits(['added'])
 
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showError, showApiError } = useNotification()
 
 const newChart = ref({
   url: '',
@@ -163,7 +163,7 @@ async function addChart() {
 
   } catch (error) {
     console.error('Chart add error:', error)
-    showError('Error', error.response?.data?.error || 'Failed to add chart')
+    showApiError('Error', error, 'Failed to add chart')
   } finally {
     adding.value = false
   }

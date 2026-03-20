@@ -19,7 +19,7 @@ import { MarketDataClient } from './providers/marketdata/client';
 import { MarketDataAdapter } from './providers/marketdata/adapter';
 import { MarketDataAppProvider } from './providers/marketdata/provider';
 import { computedGexProvider } from './providers/computed-gex-provider';
-import { circuitBreaker } from './services/circuit-breaker';
+import { circuitBreaker, rateLimiter, monitoringService } from './services';
 
 async function main() {
   const app = express();
@@ -40,6 +40,23 @@ async function main() {
 
   // --- Initialize cache (Redis + memory fallback) ---
   await cacheManager.initialize();
+
+  // --- Initialize rate limiter (load persisted state, validate configuration) ---
+  await rateLimiter.initialize();
+  try {
+    // Validate rate limit configurations
+    rateLimiter.validateConfiguration([
+      { provider: 'twelvedata', maxPerMinute: config.twelveData.rateLimit },
+      { provider: 'unusual_whales', maxPerMinute: config.unusualWhales.rateLimit },
+      { provider: 'polygon', maxPerMinute: config.polygon.rateLimit },
+      { provider: 'cboe', maxPerMinute: config.cboe.rateLimit },
+      { provider: 'marketdata', maxPerMinute: config.marketData.rateLimit },
+    ]);
+    logger.info('Rate limiter configuration validated successfully');
+  } catch (err) {
+    logger.error({ error: err instanceof Error ? err.message : err }, 'Rate limiter configuration validation failed');
+    throw err;
+  }
 
   // --- Initialize database (Postgres — graceful if unavailable) ---
   const dbAvailable = await initDatabase();
@@ -75,10 +92,6 @@ async function main() {
     logger.warn('Unusual Whales provider failed to register - API key missing or empty');
   }
 
-  // Computed GEX provider (fallback GEX — derived from chain data, zero API calls)
-  orchestrator.registerProvider(computedGexProvider);
-  logger.info('Computed GEX provider registered (fallback GEX from chain data — zero extra API calls)');
-
   // MarketData.app provider registration (fallback options chain — real-time, 100K daily credits)
   if (config.marketData.apiToken) {
     orchestrator.registerProvider(new MarketDataAppProvider());
@@ -99,11 +112,43 @@ async function main() {
     logger.warn('Polygon provider failed to register - API key missing or empty');
   }
 
+  // Computed GEX provider (fallback GEX — derived from chain data, zero API calls)
+  orchestrator.registerProvider(computedGexProvider);
+  logger.info('Computed GEX provider registered (fallback GEX from chain data — zero extra API calls)');
+
   // Provider registration validation summary
   if (registeredProviderCount === 0) {
     logger.error('CRITICAL: Zero data providers registered - service will not be able to fetch real market data. Please configure at least one provider API key (TWELVE_DATA_API_KEY, UNUSUAL_WHALES_API_KEY, or POLYGON_API_KEY)');
   } else {
     logger.info(`Provider registration complete: ${registeredProviderCount} provider(s) registered successfully`);
+  }
+
+  // --- Validate rate limiters are configured for all registered providers ---
+  const registeredProviders: Array<'twelvedata' | 'unusual_whales' | 'polygon' | 'cboe' | 'marketdata'> = [];
+  if (config.twelveData.apiKey) registeredProviders.push('twelvedata');
+  if (config.unusualWhales.apiKey) registeredProviders.push('unusual_whales');
+  if (config.polygon.apiKey) registeredProviders.push('polygon');
+  if (config.cboe.rateLimit) {
+    registeredProviders.push('cboe');
+    rateLimiter.configure('cboe', config.cboe.rateLimit);
+  }
+  if (config.marketData.apiToken) registeredProviders.push('marketdata');
+
+  try {
+    if (registeredProviders.length > 0) {
+      rateLimiter.validateAllProvidersConfigured(registeredProviders);
+      const rateLimitStatus = rateLimiter.getAllStatus();
+      logger.info({ 
+        providers: rateLimitStatus.map(s => ({ 
+          provider: s.provider, 
+          maxTokens: s.maxTokens, 
+          remaining: s.remaining 
+        })) 
+      }, 'Rate limiter status for all configured providers');
+    }
+  } catch (err) {
+    logger.error({ error: err instanceof Error ? err.message : err }, 'Rate limiter provider validation failed');
+    throw err;
   }
 
   // --- Initialize MarketData.app adapter (IP-whitelisted, options authority) ---
@@ -128,12 +173,20 @@ async function main() {
   workerManager.start();
   logger.info('Polling workers started');
 
+  // --- Minimal liveness (no auth — for circuit breaker recovery probe) ---
+  // Always returns 200 if process is running. Backend uses this to detect service reachability.
+  app.get('/api/ping', (_req, res) => {
+    res.json({ ok: true, timestamp: Date.now() });
+  });
+
   // --- Public health endpoint (no auth — used by Fly.io health checks) ---
   app.get('/api/health', async (_req, res) => {
     try {
       const providers = orchestrator.getProviderHealths();
       const workerStatus = workerManager.getStatus();
       const chainPriceMetrics = workerManager.chainPricePoller.getMetrics();
+      const monitoringMetrics = monitoringService.getMetrics();
+      const healthStatus = monitoringService.getHealthStatus();
       const isReady = registeredProviderCount > 0;
 
       // Determine if any critical feeds are dead
@@ -143,20 +196,46 @@ async function main() {
       const healthyFeeds = hasFreshPrice && hasFreshChain;
 
       res.json({
-        status: isReady ? (healthyFeeds ? 'ok' : 'degraded') : 'unhealthy',
+        status: isReady
+          ? healthyFeeds && healthStatus.status === 'healthy'
+            ? 'ok'
+            : 'degraded'
+          : 'unhealthy',
         ready: isReady,
         uptime: process.uptime(),
         providers,
         workers: workerStatus,
         feeds: {
-          price: { lastAt: spyMetrics?.lastPriceAt ? new Date(spyMetrics.lastPriceAt).toISOString() : null, fresh: hasFreshPrice, failures: spyMetrics?.priceFails ?? 0 },
-          chain: { lastAt: spyMetrics?.lastChainAt ? new Date(spyMetrics.lastChainAt).toISOString() : null, fresh: hasFreshChain, failures: spyMetrics?.chainFails ?? 0 },
+          price: {
+            lastAt: spyMetrics?.lastPriceAt ? new Date(spyMetrics.lastPriceAt).toISOString() : null,
+            fresh: hasFreshPrice,
+            failures: spyMetrics?.priceFails ?? 0,
+          },
+          chain: {
+            lastAt: spyMetrics?.lastChainAt ? new Date(spyMetrics.lastChainAt).toISOString() : null,
+            fresh: hasFreshChain,
+            failures: spyMetrics?.chainFails ?? 0,
+          },
           allSymbols: chainPriceMetrics,
         },
         configuration: {
           apiKeysConfigured: configValidation.configuredCount,
           providersRegistered: registeredProviderCount,
           apiKeys: configValidation.summary,
+        },
+        monitoring: {
+          timestamp: monitoringMetrics.timestamp,
+          circuitBreakers: {
+            total: monitoringMetrics.summary.totalProviders,
+            closed: monitoringMetrics.summary.circuitBreakersClosed,
+            open: monitoringMetrics.summary.circuitBreakersOpen,
+            halfOpen: monitoringMetrics.summary.circuitBreakersHalfOpen,
+          },
+          rateLimiters: {
+            healthy: monitoringMetrics.summary.rateLimitersHealthy,
+            degraded: monitoringMetrics.summary.rateLimitersDegraded,
+          },
+          healthStatus: healthStatus.status,
         },
       });
     } catch {
@@ -181,6 +260,204 @@ async function main() {
       res.status(503).json({ ready: false });
     }
   });
+
+  // --- Admin monitoring endpoints (detailed metrics) ---
+  
+  // Circuit breaker detailed metrics endpoint
+  app.get('/api/admin/circuit-breaker/status', apiKeyAuth, async (_req, res) => {
+    try {
+      const metrics = monitoringService.getCircuitBreakerMetrics();
+      const healthStatus = monitoringService.getHealthStatus();
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        healthy: healthStatus.status === 'healthy',
+        status: healthStatus.status,
+        details: healthStatus.details,
+        circuitBreakers: metrics,
+        summary: {
+          total: metrics.length,
+          closed: metrics.filter(m => m.state === 'closed').length,
+          open: metrics.filter(m => m.state === 'open').length,
+          halfOpen: metrics.filter(m => m.state === 'half-open').length,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get circuit breaker metrics',
+      });
+    }
+  });
+
+  // Rate limiter detailed metrics endpoint
+  app.get('/api/admin/rate-limiter/status', apiKeyAuth, async (_req, res) => {
+    try {
+      const metrics = monitoringService.getRateLimiterMetrics();
+      const healthStatus = monitoringService.getHealthStatus();
+      
+      res.json({
+        timestamp: new Date().toISOString(),
+        healthy: healthStatus.status === 'healthy',
+        status: healthStatus.status,
+        details: healthStatus.details,
+        rateLimiters: metrics,
+        summary: {
+          total: metrics.length,
+          healthy: metrics.filter(m => m.healthy).length,
+          degraded: metrics.filter(m => !m.healthy).length,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get rate limiter metrics',
+      });
+    }
+  });
+
+  // Comprehensive monitoring metrics endpoint
+  app.get('/api/admin/monitoring/metrics', apiKeyAuth, async (_req, res) => {
+    try {
+      const metrics = monitoringService.getMetrics();
+      const healthy = monitoringService.areAllProvidersHealthy();
+      
+      res.json({
+        ...metrics,
+        healthy,
+        allProvidersHealthy: healthy,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get monitoring metrics',
+      });
+    }
+  });
+
+  // Provider-specific health endpoint
+  app.get('/api/admin/monitoring/provider/:provider', apiKeyAuth, async (req, res) => {
+    try {
+      const provider = req.params.provider as any;
+      const health = monitoringService.getProviderHealth(provider);
+      
+      if (!health.rateLimiter) {
+        return res.status(404).json({
+          error: `Provider not found: ${provider}`,
+        });
+      }
+      
+      res.json({
+        provider: health.provider,
+        healthy: health.healthy,
+        circuitBreaker: health.circuitBreaker,
+        rateLimiter: health.rateLimiter,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get provider health',
+      });
+    }
+  });
+
+  // Provider performance metrics endpoint
+  app.get('/api/admin/monitoring/performance', apiKeyAuth, async (_req, res) => {
+    try {
+      const metrics = monitoringService.getProviderPerformanceMetrics();
+      res.json({
+        timestamp: new Date().toISOString(),
+        metrics,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get performance metrics',
+      });
+    }
+  });
+
+  // Provider performance metrics for specific provider
+  app.get('/api/admin/monitoring/performance/:provider', apiKeyAuth, async (req, res) => {
+    try {
+      const provider = req.params.provider as any;
+      const metrics = monitoringService.getProviderPerformance(provider);
+      
+      if (!metrics) {
+        return res.status(404).json({
+          error: `Performance metrics not found for provider: ${provider}`,
+        });
+      }
+
+      res.json({
+        timestamp: new Date().toISOString(),
+        metrics,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get provider performance',
+      });
+    }
+  });
+
+  // Provider reliability report endpoint
+  app.get('/api/admin/monitoring/reliability-report', apiKeyAuth, async (_req, res) => {
+    try {
+      const report = monitoringService.getReliabilityReport();
+      res.json({
+        timestamp: new Date().toISOString(),
+        report,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get reliability report',
+      });
+    }
+  });
+
+  // Fallback metrics endpoint
+  app.get('/api/admin/monitoring/fallback', apiKeyAuth, async (_req, res) => {
+    try {
+      const metrics = monitoringService.getFallbackMetrics(orchestrator);
+      res.json({
+        timestamp: new Date().toISOString(),
+        metrics,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get fallback metrics',
+      });
+    }
+  });
+
+  // Load balancer strategy endpoints
+  app.get('/api/admin/load-balancer/strategy', apiKeyAuth, async (_req, res) => {
+    try {
+      const strategy = orchestrator.getLoadBalancingStrategy();
+      res.json({
+        timestamp: new Date().toISOString(),
+        strategy,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to get load balancer strategy',
+      });
+    }
+  });
+
+  app.post('/api/admin/load-balancer/strategy', apiKeyAuth, async (req, res) => {
+    try {
+      const { strategy } = req.body;
+      if (typeof strategy !== 'string') {
+        return res.status(400).json({ error: 'strategy must be a string' });
+      }
+      orchestrator.setLoadBalancingStrategy(strategy as any);
+      res.json({
+        timestamp: new Date().toISOString(),
+        strategy,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to set load balancer strategy',
+      });
+    }
+  });
+
 
   // --- Mount routes ---
   app.get('/', (_req, res) => {

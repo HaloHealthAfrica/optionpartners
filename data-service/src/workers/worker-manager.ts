@@ -23,7 +23,7 @@ export interface WorkerManagerConfig {
   enableChainPrice?: boolean;
 }
 
-const DEFAULT_SYMBOLS = ['SPY', 'QQQ', 'IWM'];
+const DEFAULT_SYMBOLS = ['SPY', 'QQQ', 'IWM', 'IWN'];
 
 export class WorkerManager {
   readonly gexPoller: GexPoller;

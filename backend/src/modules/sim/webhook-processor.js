@@ -2,6 +2,7 @@
 
 const Sentry = require('@sentry/node');
 const webhookService = require('../webhooks/webhook.service');
+const webhookMetricsService = require('../webhooks/webhook-metrics.service');
 const { detectIndicatorSource } = require('../webhooks/indicator-detector');
 const decisionRouter = require('./decision-router');
 const executor = require('./executor');
@@ -41,39 +42,63 @@ class WebhookProcessor {
   async processEvent(event) {
     assertSimMode();
 
+    // Record total processing start
+    await webhookMetricsService.recordProcessingStart(event.id, 'total');
+
     if (event.status !== 'RECEIVED' && event.status !== 'REJECTED') {
       return { skipped: true, reason: `Event status is ${event.status}` };
     }
 
-    if (!event.user_id) {
-      await webhookService.markRejected(event.id, 'No user_id associated with webhook');
-      return { skipped: true, reason: 'No user_id' };
+    // Use SIM_DEFAULT_USER_ID for unassigned webhooks (e.g. legacy/marketplaybook schema)
+    let userId = event.user_id;
+    if (!userId) {
+      userId = process.env.SIM_DEFAULT_USER_ID;
+      if (!userId && process.env.NODE_ENV !== 'production') {
+        const { rows } = await require('../../config/database').query('SELECT id FROM users ORDER BY created_at ASC LIMIT 1');
+        userId = rows[0]?.id;
+      }
+      if (!userId) {
+        await webhookService.markRejected(event.id, 'No user_id associated with webhook');
+        await webhookMetricsService.recordProcessingComplete(event.id, 'total', false, 'no_user_id');
+        return { skipped: true, reason: 'No user_id' };
+      }
     }
 
     try {
-      const payload = typeof event.raw_payload === 'string'
-        ? JSON.parse(event.raw_payload)
-        : event.raw_payload;
+      const rawPayload = event.raw_payload ?? event.payload;
+      const payload = typeof rawPayload === 'string'
+        ? JSON.parse(rawPayload)
+        : rawPayload;
 
       const source = detectIndicatorSource(payload);
       await webhookService.setIndicatorSource(event.id, source);
 
       if (source === 'STRAT') {
-        maybeCreateStratAlertFromWebhook(payload, event.user_id, event.id)
+        maybeCreateStratAlertFromWebhook(payload, userId, event.id)
           .catch(err => logger.error(`STRAT alert creation failed: ${err.message}`, 'webhook-processor'));
       }
 
       // Step 1: Decision router
-      const decision = await decisionRouter.evaluate(payload, event.id, event.user_id);
+      await webhookMetricsService.recordProcessingStart(event.id, 'decision_router');
+      const decision = await decisionRouter.evaluate(payload, event.id, userId);
+      await webhookMetricsService.recordProcessingComplete(event.id, 'decision_router', true, null, {
+        approved: decision.approved,
+        indicatorSource: decision.indicatorSource,
+        convictionScore: decision.convictionScore
+      });
 
       if (decision.contextUpdateOnly) {
         await webhookService.markProcessed(event.id);
+        await webhookMetricsService.recordProcessingComplete(event.id, 'total', true);
         return { contextUpdate: true, indicatorSource: decision.indicatorSource };
       }
 
       if (!decision.approved) {
         await webhookService.markRejected(event.id, decision.reason);
-        NotificationService.sendSimSignalNotification(event.user_id, {
+        await webhookMetricsService.recordProcessingComplete(event.id, 'total', false, 'decision_rejected', {
+          reason: decision.reason
+        });
+        NotificationService.sendSimSignalNotification(userId, {
           symbol: decision.signal?.symbol, action: decision.signal?.action,
           indicatorSource: decision.indicatorSource, approved: false,
           reason: decision.reason, convictionScore: decision.convictionScore,
@@ -85,29 +110,47 @@ class WebhookProcessor {
       const intents = decision.orderIntents || [decision.orderIntent];
       const execResults = [];
 
-      NotificationService.sendSimSignalNotification(event.user_id, {
+      NotificationService.sendSimSignalNotification(userId, {
         symbol: decision.signal?.symbol, action: decision.signal?.action,
         indicatorSource: decision.indicatorSource, approved: true,
         convictionScore: decision.convictionScore,
       }).catch(() => {});
 
       for (const intent of intents) {
-        const { order, fill, position } = await executor.simulateOrder(intent, event.user_id);
+        await webhookMetricsService.recordProcessingStart(event.id, 'executor');
+        const { order, fill, position } = await executor.simulateOrder(intent, userId);
+        await webhookMetricsService.recordProcessingComplete(event.id, 'executor', order.status !== 'REJECTED', null, {
+          orderId: order.id,
+          executed: order.status !== 'REJECTED',
+          symbol: intent.symbol,
+          side: intent.side
+        });
 
         if (order.status === 'REJECTED') {
           execResults.push({ orderId: order.id, executed: false, reason: order.rejection_reason });
           continue;
         }
 
-        NotificationService.sendSimOrderFilledNotification(event.user_id, {
+        if (order.status === 'REJECTED') {
+          execResults.push({ orderId: order.id, executed: false, reason: order.rejection_reason });
+          continue;
+        }
+
+        NotificationService.sendSimOrderFilledNotification(userId, {
           symbol: intent.symbol, side: intent.side, contractType: intent.contractType,
           quantity: intent.quantity, fillPrice: fill?.fill_price, positionId: position?.id,
         }).catch(() => {});
 
         let trade = null;
         if (position && position.status === 'CLOSED') {
-          trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), event.user_id);
-          NotificationService.sendSimTradeClosedNotification(event.user_id, {
+          await webhookMetricsService.recordProcessingStart(event.id, 'finalizer');
+          trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), userId);
+          await webhookMetricsService.recordProcessingComplete(event.id, 'finalizer', true, null, {
+            tradeId: trade?.id,
+            pnl: trade?.pnl,
+            positionId: position.id
+          });
+          NotificationService.sendSimTradeClosedNotification(userId, {
             symbol: position.symbol, contractType: position.contract_type,
             pnl: trade?.pnl, pnlPercent: trade?.pnl_percent,
             tradeId: trade?.id,
@@ -127,12 +170,20 @@ class WebhookProcessor {
       if (!anyExecuted) {
         const reasons = execResults.map(r => r.reason).filter(Boolean).join('; ');
         await webhookService.markRejected(event.id, reasons);
+        await webhookMetricsService.recordProcessingComplete(event.id, 'total', false, 'execution_failed', {
+          reasons: reasons
+        });
         return { approved: true, executed: false, reason: reasons };
       }
 
       // Step 3: Mark webhook as processed
       await webhookService.markProcessed(event.id);
       this._processedCount++;
+
+      await webhookMetricsService.recordProcessingComplete(event.id, 'total', true, null, {
+        orderCount: execResults.length,
+        executedCount: execResults.filter(r => r.executed).length
+      });
 
       return {
         approved: true,
@@ -147,9 +198,16 @@ class WebhookProcessor {
       logger.error(`Processing event ${event.id} failed: ${error.message}`, 'webhook-processor');
       Sentry.captureException(error, {
         tags: { module: 'webhook-processor', eventId: event.id, source: 'processEvent' },
-        extra: { userId: event.user_id, rawPayload: event.raw_payload },
+        extra: { userId, rawPayload: event.raw_payload },
       });
       await webhookService.markRejected(event.id, `Processing error: ${error.message}`);
+      await webhookMetricsService.recordProcessingComplete(event.id, 'total', false, 'processing_error', {
+        error: error.message
+      });
+      await webhookMetricsService.recordError('processing_error', 'webhook_processor', userId, event.id, {
+        error: error.message,
+        stack: error.stack
+      });
       return { approved: false, reason: error.message };
     }
   }
@@ -160,45 +218,77 @@ class WebhookProcessor {
    */
   async processPending() {
     const pending = await webhookService.getPending(50);
-    if (pending.length === 0) return [];
+    if (pending.length === 0) {
+      // Record empty queue depth
+      await webhookMetricsService.recordQueueDepth(0, 50);
+      return [];
+    }
+
+    // Record initial queue depth
+    await webhookMetricsService.recordQueueDepth(pending.length, 50);
 
     // Sort batch: context sources first, then trade triggers, preserving received_at order within each group
+    const getPayload = (e) => {
+      const r = e.raw_payload ?? e.payload;
+      return typeof r === 'string' ? JSON.parse(r) : r;
+    };
     pending.sort((a, b) => {
-      const payloadA = typeof a.raw_payload === 'string' ? JSON.parse(a.raw_payload) : a.raw_payload;
-      const payloadB = typeof b.raw_payload === 'string' ? JSON.parse(b.raw_payload) : b.raw_payload;
+      const payloadA = getPayload(a);
+      const payloadB = getPayload(b);
       const srcA = a._detectedSource || (a._detectedSource = detectIndicatorSource(payloadA));
       const srcB = b._detectedSource || (b._detectedSource = detectIndicatorSource(payloadB));
       const prioA = SOURCE_PRIORITY[srcA] ?? 10;
       const prioB = SOURCE_PRIORITY[srcB] ?? 10;
       if (prioA !== prioB) return prioA - prioB;
-      return new Date(a.received_at) - new Date(b.received_at);
+      const tsA = a.received_at ?? a.created_at;
+      const tsB = b.received_at ?? b.created_at;
+      return new Date(tsA) - new Date(tsB);
     });
 
     // Phase 1: Run all through decision router to get approvals
     const evaluated = [];
     const rejected = [];
+    // Batch-aware strike exclusion: so multiple approved entries in same batch pick different strikes
+    const batchExcludedStrikes = new Map();
 
     for (const event of pending) {
-      if ((event.status !== 'RECEIVED' && event.status !== 'REJECTED') || !event.user_id) {
+      if (event.status !== 'RECEIVED' && event.status !== 'REJECTED') {
         const result = await this.processEvent(event);
         rejected.push({ eventId: event.id, ...result });
         continue;
       }
 
+      // Resolve userId for unassigned webhooks (legacy/marketplaybook schema)
+      let batchUserId = event.user_id;
+      if (!batchUserId) {
+        batchUserId = process.env.SIM_DEFAULT_USER_ID;
+        if (!batchUserId && process.env.NODE_ENV !== 'production') {
+          const { rows } = await require('../../config/database').query('SELECT id FROM users ORDER BY created_at ASC LIMIT 1');
+          batchUserId = rows[0]?.id;
+        }
+      }
+      if (!batchUserId) {
+        const result = await this.processEvent(event);
+        rejected.push({ eventId: event.id, ...result });
+        continue;
+      }
+      event._resolvedUserId = batchUserId;
+
       try {
-        const payload = typeof event.raw_payload === 'string'
-          ? JSON.parse(event.raw_payload)
-          : event.raw_payload;
+        const rawPayload = event.raw_payload ?? event.payload;
+        const payload = typeof rawPayload === 'string'
+          ? JSON.parse(rawPayload)
+          : rawPayload;
 
         const batchSource = detectIndicatorSource(payload);
         await webhookService.setIndicatorSource(event.id, batchSource);
 
         if (batchSource === 'STRAT') {
-          maybeCreateStratAlertFromWebhook(payload, event.user_id, event.id)
+          maybeCreateStratAlertFromWebhook(payload, batchUserId, event.id)
             .catch(err => logger.error(`STRAT alert creation failed: ${err.message}`, 'webhook-processor'));
         }
 
-        const decision = await decisionRouter.evaluate(payload, event.id, event.user_id);
+        const decision = await decisionRouter.evaluate(payload, event.id, batchUserId, { batchExcludedStrikes });
 
         if (decision.contextUpdateOnly) {
           await webhookService.markProcessed(event.id);
@@ -213,7 +303,7 @@ class WebhookProcessor {
         logger.error(`Decision evaluation failed for ${event.id}: ${error.message}`, 'webhook-processor');
         Sentry.captureException(error, {
           tags: { module: 'webhook-processor', eventId: event.id, source: 'processPending' },
-          extra: { userId: event.user_id },
+          extra: { userId: batchUserId },
         });
         await webhookService.markRejected(event.id, `Evaluation error: ${error.message}`);
         rejected.push({ eventId: event.id, approved: false, reason: error.message });
@@ -223,7 +313,7 @@ class WebhookProcessor {
     // Phase 2: Prioritize approved signals per user (not globally)
     const byUser = new Map();
     for (const item of evaluated) {
-      const uid = item.event.user_id;
+      const uid = item.event._resolvedUserId || item.event.user_id;
       if (!byUser.has(uid)) byUser.set(uid, []);
       byUser.get(uid).push(item);
     }
@@ -262,33 +352,34 @@ class WebhookProcessor {
    * Execute an already-approved decision through the sim pipeline.
    */
   async _executeApprovedDecision(event, decision, score) {
+    const userId = event._resolvedUserId || event.user_id;
     try {
       const intents = decision.orderIntents || [decision.orderIntent];
       const execResults = [];
 
-      NotificationService.sendSimSignalNotification(event.user_id, {
+      NotificationService.sendSimSignalNotification(userId, {
         symbol: decision.signal?.symbol, action: decision.signal?.action,
         indicatorSource: decision.indicatorSource, approved: true,
         convictionScore: decision.convictionScore,
       }).catch(() => {});
 
       for (const intent of intents) {
-        const { order, fill, position } = await executor.simulateOrder(intent, event.user_id);
+        const { order, fill, position } = await executor.simulateOrder(intent, userId);
 
         if (order.status === 'REJECTED') {
           execResults.push({ orderId: order.id, executed: false, reason: order.rejection_reason });
           continue;
         }
 
-        NotificationService.sendSimOrderFilledNotification(event.user_id, {
+        NotificationService.sendSimOrderFilledNotification(userId, {
           symbol: intent.symbol, side: intent.side, contractType: intent.contractType,
           quantity: intent.quantity, fillPrice: fill?.fill_price, positionId: position?.id,
         }).catch(() => {});
 
         let trade = null;
         if (position && position.status === 'CLOSED') {
-          trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), event.user_id);
-          NotificationService.sendSimTradeClosedNotification(event.user_id, {
+          trade = await tradeFinalizer.finalize(position, parseFloat(fill.fill_price), userId);
+          NotificationService.sendSimTradeClosedNotification(userId, {
             symbol: position.symbol, contractType: position.contract_type,
             pnl: trade?.pnl, pnlPercent: trade?.pnl_percent,
             tradeId: trade?.id,
@@ -327,7 +418,7 @@ class WebhookProcessor {
       logger.error(`Execution failed for ${event.id}: ${error.message}`, 'webhook-processor');
       Sentry.captureException(error, {
         tags: { module: 'webhook-processor', eventId: event.id, source: 'executeApprovedDecision' },
-        extra: { userId: event.user_id },
+        extra: { userId },
       });
       await webhookService.markRejected(event.id, `Execution error: ${error.message}`);
       return { approved: true, executed: false, reason: error.message };
@@ -354,6 +445,8 @@ class WebhookProcessor {
           await webhookService.cleanupOldEvents(
             parseInt(process.env.WEBHOOK_RETENTION_DAYS || '30', 10)
           );
+          // Clean up old metrics data
+          await webhookMetricsService.cleanupOldMetrics();
         }
       } catch (error) {
         logger.error(`Processor poll error: ${error.message}`, 'webhook-processor');

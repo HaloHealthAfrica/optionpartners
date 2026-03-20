@@ -1,13 +1,16 @@
 import NodeCache from 'node-cache';
 import { createChildLogger } from '../utils/logger';
+import { config } from '../config';
 import type { DataType } from '../types';
 
 const log = createChildLogger('memory-cache');
 
-const TTL_MAP: Record<DataType, number> = {
-  quote: 15,
-  candles: 30,
-  options_chain: 270,
+// default TTLs (seconds)
+const DEFAULT_TTL_MAP: Record<DataType, number> = {
+  // reduced TTLs for high‑velocity data
+  quote: 10,
+  candles: 20,
+  options_chain: 180,
   gex: 270,
   flow: 270,
   iv: 540,
@@ -21,7 +24,17 @@ const TTL_MAP: Record<DataType, number> = {
   hist_candles: 86400,
   hist_metrics: 21600,
   hist_regime: 900,
+  circuit: 86400, // Circuit breaker states persist for 24 hours
+  ratelimit: 3600, // Rate limiter states persist for 1 hour
 };
+
+function resolveTtl(dataType: DataType): number {
+  const override = config.cache?.ttl?.[dataType];
+  if (override && override > 0) {
+    return override;
+  }
+  return DEFAULT_TTL_MAP[dataType] ?? 30;
+}
 
 export class MemoryCache {
   private cache: NodeCache;
@@ -31,15 +44,18 @@ export class MemoryCache {
     log.info('Memory cache initialized (fallback mode)');
   }
 
-  get<T>(dataType: DataType, key: string): T | undefined {
+  get<T>(dataType: DataType, key: string): { data: T; provider?: string } | undefined {
     const fullKey = `${dataType}:${key}`;
-    return this.cache.get<T>(fullKey);
+    return this.cache.get<{ data: T; provider?: string }>(fullKey);
   }
 
-  set<T>(dataType: DataType, key: string, value: T): void {
+  set<T>(dataType: DataType, key: string, value: { data: T; provider?: string } | T): void {
     const fullKey = `${dataType}:${key}`;
-    const ttl = TTL_MAP[dataType] ?? 30;
-    this.cache.set(fullKey, value, ttl);
+    const ttl = resolveTtl(dataType);
+    const payload = (value && (value as any).data !== undefined)
+      ? value
+      : { data: value as T };
+    this.cache.set(fullKey, payload, ttl);
     log.debug({ key: fullKey, ttl }, 'Cache set');
   }
 

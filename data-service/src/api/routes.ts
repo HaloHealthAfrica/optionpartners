@@ -304,7 +304,7 @@ export function createRoutes(
   router.post('/seed', async (req: Request, res: Response) => {
     try {
       const body = req.body as { symbols?: string[] };
-      const symbols = (body.symbols || ['SPY', 'QQQ', 'IWM']).map((s: string) => s.toUpperCase());
+      const symbols = (body.symbols || ['SPY', 'QQQ', 'IWM', 'IWN']).map((s: string) => s.toUpperCase());
       const lookbackDays = 252;
 
       const results: Record<string, { candles?: number; regime?: string; gex?: boolean; flow?: boolean; iv?: boolean; vix?: boolean; macro?: boolean; errors: string[] }> = {};

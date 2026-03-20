@@ -9,6 +9,19 @@ const { detectIndicatorSource, isMarketDataType } = require('./indicator-detecto
 const symbolStateService = require('../sim/symbol-state.service');
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
+let _sourceColumnCache = null;
+
+async function _getSourceColumn() {
+  if (_sourceColumnCache !== null) return _sourceColumnCache;
+  const r = await db.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'webhook_events'
+     AND column_name IN ('indicator_source', 'strategy_detected')
+     ORDER BY CASE column_name WHEN 'indicator_source' THEN 0 ELSE 1 END LIMIT 1`
+  );
+  _sourceColumnCache = r.rows[0]?.column_name || null;
+  return _sourceColumnCache;
+}
 
 /**
  * @typedef {Object} WebhookEvent
@@ -29,37 +42,30 @@ class WebhookService {
    * @param {string} rawBody - Raw string body for signature verification
    * @param {string} [signature] - HMAC signature header
    * @param {string} [userId] - Associated user ID (from API key or auth)
+   * @param {Object} [sourceInfo] - Source identification info { clientIP, userAgent, apiKeyId }
    * @returns {Promise<{event: WebhookEvent, isDuplicate: boolean}>}
    */
-  async ingest(rawPayload, rawBody, signature, userId) {
+  async ingest(rawPayload, rawBody, signature, userId, sourceInfo = {}) {
+    let { clientIP, userAgent, apiKeyId } = sourceInfo;
+    // PostgreSQL INET rejects 'unknown' — use null for storage
+    if (clientIP === 'unknown') clientIP = null;
     // Test ping early-exit — acknowledge without queueing for processing
     if (rawPayload.test === true || rawPayload.type === 'PING') {
       const id = uuidv4();
       const result = await db.query(
-        `INSERT INTO webhook_events (id, source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
-         VALUES ($1, 'tradingview', $2, true, $3, 'TEST_PING', NULL, $4)
+        `INSERT INTO webhook_events (id, source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id, client_ip, user_agent, api_key_id)
+         VALUES ($1, 'tradingview', $2, true, $3, 'TEST_PING', NULL, $4, $5, $6, $7)
          RETURNING *`,
-        [id, JSON.stringify(rawPayload), `ping_${id}`, userId]
+        [id, JSON.stringify(rawPayload), `ping_${id}`, userId, clientIP, userAgent, apiKeyId]
       );
       logger.info(`Test ping received: ${id}`, 'webhook');
       return { event: result.rows[0], isDuplicate: false, isTestPing: true };
     }
 
-    // Signature verification runs FIRST — before any routing or storage
+    // Signature verification is optional — we record validity for auditing but never reject
     const signatureValid = WEBHOOK_SECRET
       ? verifySignature(rawBody, signature, WEBHOOK_SECRET)
       : true;
-
-    if (!signatureValid) {
-      const id = uuidv4();
-      const result = await db.query(
-        `INSERT INTO webhook_events (id, source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
-         VALUES ($1, 'tradingview', $2, false, $3, 'REJECTED', 'Invalid HMAC signature', $4)
-         RETURNING *`,
-        [id, JSON.stringify(rawPayload), `rejected_sig_${id}`, userId]
-      );
-      return { event: result.rows[0], isDuplicate: false };
-    }
 
     // Detect source early so timestamp validation uses source-specific limits
     const detectedSource = detectIndicatorSource(rawPayload);
@@ -69,10 +75,10 @@ class WebhookService {
     if (!tsResult.valid) {
       const id = uuidv4();
       const result = await db.query(
-        `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
-         VALUES ($1, 'tradingview', $2, $3, true, $4, 'REJECTED', $5, $6)
+        `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id, client_ip, user_agent, api_key_id)
+         VALUES ($1, 'tradingview', $2, $3, true, $4, 'REJECTED', $5, $6, $7, $8, $9)
          RETURNING *`,
-        [id, detectedSource, JSON.stringify(rawPayload), `rejected_ts_${id}`, tsResult.error, userId]
+        [id, detectedSource, JSON.stringify(rawPayload), `rejected_ts_${id}`, tsResult.error, userId, clientIP, userAgent, apiKeyId]
       );
       return { event: result.rows[0], isDuplicate: false };
     }
@@ -98,11 +104,11 @@ class WebhookService {
     // Atomic insert with dedupe: ON CONFLICT returns existing row
     const id = uuidv4();
     const result = await db.query(
-      `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id)
-       VALUES ($1, 'tradingview', $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id, client_ip, user_agent, api_key_id)
+       VALUES ($1, 'tradingview', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (dedupe_key) DO NOTHING
        RETURNING *`,
-      [id, detectedSource, JSON.stringify(rawPayload), signatureValid, dedupeKey, status, errorMessage, userId]
+      [id, detectedSource, JSON.stringify(rawPayload), signatureValid, dedupeKey, status, errorMessage, userId, clientIP, userAgent, apiKeyId]
     );
 
     if (result.rows.length === 0) {
@@ -147,8 +153,10 @@ class WebhookService {
    */
   async setIndicatorSource(eventId, indicatorSource) {
     if (!indicatorSource) return;
+    const col = await _getSourceColumn();
+    if (!col) return;
     await db.query(
-      `UPDATE webhook_events SET indicator_source = $2 WHERE id = $1 AND indicator_source IS NULL`,
+      `UPDATE webhook_events SET ${col} = $2 WHERE id = $1`,
       [eventId, indicatorSource]
     );
   }
@@ -171,7 +179,39 @@ class WebhookService {
        RETURNING *`,
       [eventId]
     );
-    return result.rows[0] || null;
+    const row = result.rows[0] || null;
+    if (row) {
+      logger.info(`Webhook event ${eventId} requeued for retry (count=${row.retry_count})`, 'webhook');
+    } else {
+      logger.warn(`Webhook event ${eventId} not eligible for retry`, 'webhook');
+    }
+    return row;
+  }
+
+  /**
+   * Bulk requeue REJECTED events (processing errors only) for retry.
+   * Resets status to RECEIVED so they get picked up by the processor.
+   * Optional: limit to events from past N days.
+   */
+  async bulkRequeueForRetry(days = 3) {
+    const result = await db.query(
+      `UPDATE webhook_events
+       SET status = 'RECEIVED',
+           retry_count = COALESCE(retry_count, 0) + 1,
+           error_message = NULL,
+           processed_at = NULL
+       WHERE status = 'REJECTED'
+         AND error_message LIKE 'Processing error:%'
+         AND COALESCE(retry_count, 0) < 3
+         AND received_at >= NOW() - (INTERVAL '1 day' * $1)
+       RETURNING id`,
+      [days]
+    );
+    const count = result.rowCount || 0;
+    if (count > 0) {
+      logger.info(`Bulk requeue: ${count} webhook(s) reset to RECEIVED for retry`, 'webhook');
+    }
+    return { requeued: count, ids: result.rows.map(r => r.id) };
   }
 
   /**
@@ -179,13 +219,19 @@ class WebhookService {
    * Also picks up REJECTED events eligible for automatic retry (processing errors only, < 3 attempts).
    */
   async getPending(limit = 50) {
+    // Select events ready for processing. Includes:
+    //  - Freshly RECEIVED events.
+    //  - Previously REJECTED events with a processing error that are still
+    //    eligible for retry.  Retries are spaced using an exponential backoff
+    //    multiplier (30s, 60s, 120s, ...), capped to avoid huge delays.
     const result = await db.query(
       `SELECT * FROM webhook_events
        WHERE status = 'RECEIVED'
           OR (status = 'REJECTED'
               AND error_message LIKE 'Processing error:%'
               AND COALESCE(retry_count, 0) < 3
-              AND processed_at < NOW() - INTERVAL '30 seconds')
+              -- exponential backoff: 30s * 2^retry_count, cap factor at 64
+              AND processed_at < NOW() - (INTERVAL '30 seconds' * LEAST(POWER(2, COALESCE(retry_count,0)), 64)))
        ORDER BY received_at ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED`,
@@ -242,6 +288,116 @@ class WebhookService {
       [eventId, userId]
     );
     return result.rows[0] || null;
+  }
+
+  /**
+   * Check if userId is the default/sim user (webhooks with user_id=NULL may belong to them).
+   */
+  async _isDefaultUser(userId) {
+    const envId = process.env.SIM_DEFAULT_USER_ID;
+    if (envId && envId === userId) return true;
+    if (process.env.NODE_ENV !== 'production') {
+      const result = await db.query('SELECT id FROM users ORDER BY created_at ASC LIMIT 1');
+      if (result.rows[0]?.id === userId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Extract strategy name from payload (broad field coverage for backtest filtering).
+   */
+  _extractStrategyFromPayload(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    const s = payload.strategy ?? payload.pattern ?? payload.meta?.strategy ?? payload.meta?.pattern
+      ?? payload.setup?.pattern ?? payload.setup?.strategy ?? payload.setup?.strategy_name
+      ?? (typeof payload.strategy === 'object' ? payload.strategy?.name ?? payload.strategy?.pattern : null)
+      ?? payload.signal?.pattern ?? payload.signal?.strategy ?? '';
+    return String(s || '').toLowerCase();
+  }
+
+  /**
+   * Get webhooks by date range for backtest replay.
+   * @param {string} userId
+   * @param {string} startDate - ISO date (YYYY-MM-DD)
+   * @param {string} endDate - ISO date (YYYY-MM-DD)
+   * @param {Object} [options]
+   * @param {string[]} [options.indicatorSources] - Filter by indicator_source (STRAT, SIGNALS, REVERSAL, etc.)
+   * @param {string[]} [options.strategies] - Filter by strategy name (from normalizers)
+   * @param {number} [options.limit=5000]
+   * @returns {Promise<Object[]>}
+   */
+  async getByDateRange(userId, startDate, endDate, options = {}) {
+    const { indicatorSources = null, strategies = null, limit = 5000 } = options;
+
+    // Include user_id IS NULL when requesting user is the default/sim user (unassigned webhooks)
+    const includeUnassigned = await this._isDefaultUser(userId);
+    const userCondition = includeUnassigned ? '(user_id = $1 OR user_id IS NULL)' : 'user_id = $1';
+
+    const conditions = [userCondition, 'received_at >= $2::date', 'received_at < ($3::date + INTERVAL \'1 day\')'];
+    const params = [userId, startDate, endDate];
+    let paramIdx = 4;
+
+    if (indicatorSources && indicatorSources.length > 0) {
+      const sourceSet = new Set(indicatorSources.map((s) => String(s).toUpperCase()));
+      conditions.push(`(indicator_source = ANY($${paramIdx}) OR indicator_source IS NULL)`);
+      params.push(indicatorSources);
+      paramIdx++;
+    }
+
+    params.push(limit);
+    const result = await db.query(
+      `SELECT * FROM webhook_events
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY received_at ASC
+       LIMIT $${paramIdx}`,
+      params
+    );
+
+    let rows = result.rows;
+
+    if (indicatorSources && indicatorSources.length > 0) {
+      const sourceSet = new Set(indicatorSources.map((s) => String(s).toUpperCase()));
+      rows = rows.filter((r) => {
+        const payload = typeof r.raw_payload === 'string' ? JSON.parse(r.raw_payload) : r.raw_payload;
+        const dbSource = (r.indicator_source || '').toUpperCase();
+        if (dbSource && sourceSet.has(dbSource)) return true;
+        if (!dbSource) {
+          const detected = detectIndicatorSource(payload);
+          return sourceSet.has(detected);
+        }
+        return false;
+      });
+    }
+
+    if (strategies && strategies.length > 0) {
+      const stratSet = new Set(strategies.map((s) => String(s).toLowerCase()));
+      rows = rows.filter((r) => {
+        const payload = typeof r.raw_payload === 'string' ? JSON.parse(r.raw_payload) : r.raw_payload;
+        const s = this._extractStrategyFromPayload(payload);
+        if (!s) return false;
+        return stratSet.has(s) || (payload.setup && typeof payload.setup === 'object' && stratSet.has(String(payload.setup.pattern || payload.setup.strategy || '').toLowerCase()));
+      });
+    }
+
+    return rows;
+  }
+
+  /**
+   * Get webhook count for a date range (for backtest preflight).
+   * @param {string} userId
+   * @param {string} startDate - YYYY-MM-DD
+   * @param {string} endDate - YYYY-MM-DD
+   * @param {Object} [options]
+   * @param {string[]} [options.indicatorSources]
+   * @param {string[]} [options.strategies]
+   * @returns {Promise<number>}
+   */
+  async getCountByDateRange(userId, startDate, endDate, options = {}) {
+    const rows = await this.getByDateRange(userId, startDate, endDate, {
+      ...options,
+      limit: 10000,
+    });
+    return rows.length;
   }
 
   /**

@@ -160,7 +160,7 @@ const props = defineProps({
   }
 })
 
-const { showError, showWarning } = useNotification()
+const { showError, showApiError, showWarning } = useNotification()
 const authStore = useAuthStore()
 
 const chartContainer = ref(null)
@@ -849,7 +849,7 @@ const fetchChartData = async () => {
     } else if (err.response?.status === 503) {
       isConfigured.value = false
       error.value = err.response.data.error || 'Chart service not configured'
-      showError('Chart Service Unavailable', 'Chart visualization requires API configuration. Contact your administrator.')
+      showApiError('Chart Service Unavailable', err, 'Chart visualization requires API configuration. Contact your administrator.')
     } else if (err.response?.status === 429) {
       error.value = err.response.data.error || 'API rate limit exceeded'
       const limitMessage = isBillingEnabled.value

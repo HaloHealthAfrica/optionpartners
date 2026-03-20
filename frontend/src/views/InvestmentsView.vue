@@ -933,7 +933,7 @@ const router = useRouter();
 const route = useRoute();
 const investmentsStore = useInvestmentsStore();
 const scannerStore = useScannerStore();
-const { showSuccess, showError } = useNotification();
+const { showSuccess, showError, showApiError } = useNotification();
 
 // Valid tab names
 const validTabs = ["screener", "holdings", "scanner", "analyzer"];
@@ -1045,7 +1045,7 @@ async function loadAnalyzerData() {
         };
     } catch (error) {
         console.error("Failed to load analyzer data:", error);
-        showError("Error", "Failed to load stock data. Please try again.");
+        showApiError("Error", error, "Failed to load stock data. Please try again.");
     } finally {
         analyzerLoading.value = false;
     }
@@ -1142,7 +1142,7 @@ async function loadWatchlists() {
         }
     } catch (error) {
         console.error("Error loading watchlists:", error);
-        showError("Error", "Failed to load watchlists");
+        showApiError("Error", error, "Failed to load watchlists");
     } finally {
         watchlistsLoading.value = false;
     }
@@ -1169,12 +1169,13 @@ async function addToWatchlist() {
         if (
             error.response?.data?.error?.includes("already in this watchlist")
         ) {
-            showError(
+            showApiError(
                 "Already in Watchlist",
+                error,
                 `${symbolToAddToWatchlist.value} is already in this watchlist`,
             );
         } else {
-            showError("Error", "Failed to add symbol to watchlist");
+            showApiError("Error", error, "Failed to add symbol to watchlist");
         }
     } finally {
         addingToWatchlist.value = false;

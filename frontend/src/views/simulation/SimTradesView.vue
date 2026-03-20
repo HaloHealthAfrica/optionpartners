@@ -225,8 +225,17 @@ function formatContractSymbol(trade) {
   if (trade.contract_type && trade.contract_type !== 'STOCK' && trade.expiration) {
     const underlying = (trade.underlying_symbol || sym).toUpperCase()
     const exp = trade.expiration.slice(0, 10).replace(/-/g, '')
+    if (trade.contract_type === 'CREDIT_SPREAD' || trade.contract_type === 'DEBIT_SPREAD') {
+      const lo = trade.strike_long ?? trade.strike_short
+      const hi = trade.strike_short ?? trade.strike_long
+      const typeChar = trade.contract_type === 'CREDIT_SPREAD' ? 'P' : 'C'
+      if (lo != null && hi != null) {
+        return `${underlying} ${exp} ${Math.min(lo, hi)}/${Math.max(lo, hi)} ${typeChar}`
+      }
+    }
     const typeChar = trade.contract_type === 'PUT' ? 'P'
-      : trade.contract_type === 'CREDIT_SPREAD' ? 'CS' : 'C'
+      : trade.contract_type === 'CREDIT_SPREAD' ? 'CS'
+      : trade.contract_type === 'DEBIT_SPREAD' ? 'DS' : 'C'
     const strike = trade.strike
       ? (Number(trade.strike) % 1 === 0 ? Number(trade.strike).toFixed(0) : String(Number(trade.strike)))
       : ''
@@ -246,6 +255,7 @@ function contractTypeClass(type) {
     PUT: 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400',
     STOCK: 'bg-blue-100 text-blue-800 dark:bg-blue-900/20 dark:text-blue-400',
     CREDIT_SPREAD: 'bg-purple-100 text-purple-800 dark:bg-purple-900/20 dark:text-purple-400',
+    DEBIT_SPREAD: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-400',
   }
   return map[type] || 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400'
 }

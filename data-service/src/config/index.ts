@@ -51,6 +51,11 @@ const configSchema = z.object({
   }),
 
   logLevel: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+
+  cache: z.object({
+    // optional TTL overrides per data type (seconds)
+    ttl: z.record(z.string(), z.coerce.number()).optional(),
+  }).optional(),
 });
 
 export type AppConfig = z.infer<typeof configSchema>;

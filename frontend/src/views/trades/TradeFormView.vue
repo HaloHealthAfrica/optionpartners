@@ -1586,7 +1586,7 @@ const route = useRoute()
 const router = useRouter()
 const tradesStore = useTradesStore()
 const authStore = useAuthStore()
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showError, showApiError } = useNotification()
 const { trackTradeAction } = useAnalytics()
 const { toLocalInput, toUTC, getCurrentTimeLocal, timezoneLabel } = useUserTimezone()
 
@@ -2117,7 +2117,7 @@ async function loadTrade() {
     tagsInput.value = tradeData.tags ? tradeData.tags.join(', ') : ''
     currentImages.value = tradeData.attachments || []
   } catch (err) {
-    showError('Error', 'Failed to load trade')
+    showApiError('Error', err, 'Failed to load trade')
     router.push('/trades')
   } finally {
     loading.value = false
@@ -2545,7 +2545,7 @@ async function handleSubmit() {
     const serverError = err.response?.data?.error || err.message || 'An unexpected error occurred. Please try again.'
     error.value = serverError
     validationErrors.value = err.response?.data?.details || []
-    showError('Error', error.value)
+    showApiError('Error', err, 'An unexpected error occurred. Please try again.')
     nextTick(() => errorRef.value?.scrollIntoView({ behavior: 'smooth', block: 'center' }))
   } finally {
     loading.value = false
@@ -2621,7 +2621,7 @@ async function enablePublicProfile() {
     showSuccess('Success', 'Your profile is now public')
   } catch (error) {
     console.error('Failed to enable public profile:', error)
-    showError('Error', 'Failed to enable public profile. Please try again.')
+    showApiError('Error', error, 'Failed to enable public profile. Please try again.')
     // Revert the checkbox
     form.value.isPublic = previousIsPublicValue.value
     showPublicProfileModal.value = false
@@ -3146,7 +3146,7 @@ async function saveFuturesTemplate() {
     newFuturesTemplateName.value = ''
     showSuccess('Template Saved', 'Futures template saved successfully')
   } catch (err) {
-    showError('Save Failed', err.response?.data?.message || 'Failed to save template')
+    showApiError('Save Failed', err, 'Failed to save template')
   } finally {
     savingTemplate.value = false
   }
@@ -3169,7 +3169,7 @@ async function saveOptionsTemplate() {
     newOptionsTemplateName.value = ''
     showSuccess('Template Saved', 'Options template saved successfully')
   } catch (err) {
-    showError('Save Failed', err.response?.data?.message || 'Failed to save template')
+    showApiError('Save Failed', err, 'Failed to save template')
   } finally {
     savingTemplate.value = false
   }
@@ -3186,7 +3186,7 @@ async function deleteTemplate(id, type) {
     }
     showSuccess('Template Deleted', 'Template deleted successfully')
   } catch (err) {
-    showError('Delete Failed', err.response?.data?.message || 'Failed to delete template')
+    showApiError('Delete Failed', err, 'Failed to delete template')
   } finally {
     deletingTemplateId.value = null
   }

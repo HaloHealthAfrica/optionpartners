@@ -31,6 +31,7 @@ export class MacroRegimeService {
   async getVixData(): Promise<VixData> {
     const cached = await cacheManager.get<VixData>('vix', 'current');
     if (cached) {
+      log.debug({ provider: cached.provider }, 'Returning cached VIX data');
       const validated = this.validateVixData(cached.data);
       return validated;
     }

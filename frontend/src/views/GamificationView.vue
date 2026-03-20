@@ -1100,7 +1100,7 @@ export default {
         MdiIcon,
     },
     setup() {
-        const { showSuccess, showError, showWarning } = useNotification();
+        const { showSuccess, showError, showApiError, showWarning } = useNotification();
         const { celebrationQueue } = usePriceAlertNotifications();
         const authStore = useAuthStore();
 
@@ -1774,8 +1774,9 @@ export default {
                 }
             } catch (error) {
                 console.error("[CHECK] Error checking achievements:", error);
-                showError(
+                showApiError(
                     "Achievement Check Failed",
+                    error,
                     "Please try again later.",
                 );
             } finally {
@@ -1984,8 +1985,9 @@ export default {
                 }
             } catch (error) {
                 console.error("Error loading full leaderboard:", error);
-                showError(
+                showApiError(
                     "Failed to Load Rankings",
+                    error,
                     "Unable to load complete leaderboard data.",
                 );
                 fullLeaderboardEntries.value = [];

@@ -16,15 +16,18 @@ primary_region = "iad"
     soft_limit = 200
 
 [[http_service.checks]]
-  grace_period = "30s"
+  grace_period = "90s"
   interval = "15s"
   method = "GET"
   path = "/api/health"
-  timeout = "5s"
+  timeout = "10s"
+  headers = { X-Forwarded-Proto = "https" }
 
 [env]
   NODE_ENV = "production"
   PORT = "3000"
+  # Data service (optionpartners-data) — backend fetches quotes, chains, VIX, regime from here
+  DATA_SERVICE_URL = "https://optionpartners-data.fly.dev"
 
 [[vm]]
   size = "shared-cpu-1x"

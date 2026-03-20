@@ -103,6 +103,7 @@ class SymbolStateService {
 
     switch (source) {
       case 'MTF_BIAS':
+      case 'DATA_SERVICE_MACRO':
         this._applyMtfBias(state, rawPayload);
         break;
       case 'SIGNALS':
@@ -137,6 +138,9 @@ class SymbolStateService {
         break;
       case 'SQUEEZE_PRO':
         this._applySqueezePro(state, rawPayload);
+        break;
+      case 'REVERSAL':
+        this._applyReversal(state, rawPayload);
         break;
       default:
         break;
@@ -680,6 +684,49 @@ class SymbolStateService {
     }
   }
 
+  // ── REVERSAL: EME, SPE, Strat Trigger (STRAT_SETUP stored separately) ──
+
+  _applyReversal(state, payload) {
+    const price = parseFloat(payload.price);
+    if (!isNaN(price)) state.last_price = price;
+
+    const signalVal = (payload.signal || '').toUpperCase();
+    if (signalVal === 'STRAT_SETUP') return; // Setup only — no entry signal
+
+    let direction = null;
+    const signalType = (payload.signal_type || '').toUpperCase();
+    const pattern = (payload.pattern || '').toUpperCase();
+    if (['EM_CALL_ZONE'].includes(signalType) || signalVal === 'CALL_SPREAD_FAVORABLE' || pattern.includes('BULL')) {
+      direction = 'long';
+    } else if (['EM_PUT_ZONE'].includes(signalType) || signalVal === 'PUT_SPREAD_FAVORABLE' || pattern.includes('BEAR')) {
+      direction = 'short';
+    }
+    if (!direction) return;
+
+    const confidence = parseInt(payload.confidence ?? payload.probability_score ?? payload.confidence_score, 10) || 0;
+    const expectedMove = parseFloat(payload.expected_move) || parseFloat(payload.atr) || null;
+
+    state.latest_entry_signal = {
+      direction: normalizeDirection(direction),
+      confidence,
+      score: confidence,
+      entry_price: price,
+      stop_loss: null,
+      target_1: null,
+      target_2: null,
+      rr_ratio: null,
+      max_loss: null,
+      market_session: null,
+      volume_vs_avg: null,
+      atr: expectedMove,
+      pattern: payload.pattern || signalType || signalVal,
+      strategy: 'reversal',
+      trend_alignment: null,
+      timeframe: payload.timeframe || null,
+    };
+    state.entry_signal_at = new Date().toISOString();
+  }
+
   // ── MARKET_CONTEXT: rich context data (regime, levels, market bias) ──
 
   _applyMarketContext(state, payload) {
@@ -873,6 +920,29 @@ class SymbolStateService {
 
   clearCache(userId, symbol) {
     this._cache.delete(`${userId}:${symbol}`);
+  }
+
+  /**
+   * Clear stale macro and trend timestamps for a symbol (staleness auto-purge).
+   * When trades are blocked for data_staleness (macro/trend severely stale),
+   * clearing ensures the next webhook triggers a fresh fetch via macro backfill
+   * and trend data instead of reusing stale cached data.
+   */
+  async clearStaleMacroAndTrend(userId, symbol) {
+    const sym = (symbol || '').toUpperCase();
+    if (!sym || !userId) return;
+    try {
+      await db.query(
+        `UPDATE symbol_state
+         SET macro_updated_at = NULL, local_updated_at = NULL, updated_at = NOW()
+         WHERE user_id = $1 AND symbol = $2`,
+        [userId, sym]
+      );
+      this.clearCache(userId, sym);
+      logger.info(`[SYMBOL_STATE] ${sym}: macro/trend timestamps purged (staleness auto-purge)`, 'symbol-state');
+    } catch (err) {
+      logger.warn(`[SYMBOL_STATE] ${sym}: failed to clear stale macro/trend: ${err.message}`, 'symbol-state');
+    }
   }
 }
 

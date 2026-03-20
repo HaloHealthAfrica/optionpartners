@@ -136,6 +136,11 @@ function resolveContractType(payload) {
     if (payload.strike_short && payload.strike_long) return 'CREDIT_SPREAD';
     return payload.option_type?.toUpperCase() === 'PUT' ? 'PUT' : 'CALL';
   }
+  // CRT: has strike + option_type, expiration resolved from dte_suggestion later
+  const optType = (payload.option_type || '').toLowerCase();
+  if (payload.strike && (optType === 'call' || optType === 'put')) {
+    return optType === 'put' ? 'PUT' : 'CALL';
+  }
 
   // No explicit type and no strike/expiration — needs options construction.
   // Returns null instead of silently defaulting to STOCK.
@@ -161,7 +166,8 @@ function validateSignal(signal) {
 
   // Only enforce options fields when contractType is already resolved
   if (signal.contractType && signal.contractType !== 'STOCK') {
-    if (!signal.expiration) errors.push('Options/spreads require expiration date');
+    const hasDteSuggestion = signal.meta?.indicatorMeta?.dte_suggestion != null;
+    if (!signal.expiration && !hasDteSuggestion) errors.push('Options/spreads require expiration date or dte_suggestion');
     if (signal.contractType === 'CREDIT_SPREAD') {
       if (!signal.strikeShort || !signal.strikeLong) {
         errors.push('Credit spreads require strikeShort and strikeLong');

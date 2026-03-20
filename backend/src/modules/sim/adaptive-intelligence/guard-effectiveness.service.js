@@ -126,6 +126,8 @@ class GuardEffectivenessService {
    * Answers: are stops too tight? Are targets too conservative?
    */
   async _exitQualityAnalysis(userId, cutoff) {
+    // Fix 3: Exclude MAE/MFE > 200% from aggregates — corrupt values from denominator errors
+    const MAE_MFE_SANITY_CAP = parseFloat(process.env.MAE_MFE_SANITY_CAP_PCT || '200') / 100;
     const { rows } = await db.query(
       `SELECT
          COUNT(*) as total,
@@ -159,8 +161,10 @@ class GuardEffectivenessService {
          AND exit_time IS NOT NULL
          AND entry_time >= $2
          AND max_adverse_excursion IS NOT NULL
-         AND max_favorable_excursion IS NOT NULL`,
-      [userId, cutoff]
+         AND max_favorable_excursion IS NOT NULL
+         AND max_adverse_excursion <= $3
+         AND max_favorable_excursion <= $3`,
+      [userId, cutoff, MAE_MFE_SANITY_CAP]
     );
 
     const r = rows[0] || {};
@@ -169,10 +173,9 @@ class GuardEffectivenessService {
     const winnerMaeP90 = parseFloat(r.winner_mae_p90) || 0;
     const loserMfeP75 = parseFloat(r.loser_mfe_p75) || 0;
 
-    // Data integrity guard: MAE/MFE values > 2.0 (200%) are almost certainly
+    // Data integrity guard: MAE/MFE values > cap are almost certainly
     // a calculation pipeline error (wrong denominator, unit mismatch, or
     // dollar values stored where percentages are expected).
-    const MAE_MFE_SANITY_CAP = 2.0;
     const maeIntegrityWarning = winnerMaeP90 > MAE_MFE_SANITY_CAP;
     const mfeIntegrityWarning = loserMfeP75 > MAE_MFE_SANITY_CAP;
     const dataIntegrityOk = !maeIntegrityWarning && !mfeIntegrityWarning;

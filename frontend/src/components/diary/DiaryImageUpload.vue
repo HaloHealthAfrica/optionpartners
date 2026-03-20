@@ -210,7 +210,7 @@ const props = defineProps({
 
 const emit = defineEmits(['uploaded', 'deleted', 'pending-changed'])
 
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showError, showApiError } = useNotification()
 
 const pendingFiles = ref([])
 const isDragOver = ref(false)
@@ -342,7 +342,7 @@ async function uploadPendingImages(entryId) {
 
   } catch (error) {
     console.error('Image upload error:', error)
-    showError('Upload Failed', error.response?.data?.error || 'Failed to upload images')
+    showApiError('Upload Failed', error, 'Failed to upload images')
     return { success: false, error: error.message }
   } finally {
     uploading.value = false
@@ -371,7 +371,7 @@ async function deleteImage(image) {
     emit('deleted', image.id)
   } catch (error) {
     console.error('Image delete error:', error)
-    showError('Delete Failed', error.response?.data?.error || 'Failed to delete image')
+    showApiError('Delete Failed', error, 'Failed to delete image')
   } finally {
     deleting.value = null
   }

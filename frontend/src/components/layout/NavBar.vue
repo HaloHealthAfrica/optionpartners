@@ -396,6 +396,12 @@ const baseNavigation = [
         description: 'View raw TradingView webhook events and processing status'
       },
       {
+        name: 'Pipeline Observatory',
+        to: '/sim/pipeline-observatory',
+        route: 'sim-pipeline-observatory',
+        description: 'End-to-end webhook pipeline visibility and troubleshooting'
+      },
+      {
         name: 'Sim Trades',
         to: '/sim/trades',
         route: 'sim-trades',
@@ -419,6 +425,18 @@ const baseNavigation = [
         route: 'sim-adaptive',
         description: 'Feedback loop: conviction calibration, regime edge, temporal patterns',
         notification: 'adaptiveInsightUnread'
+      },
+      {
+        name: 'Revenue Target',
+        to: '/sim/revenue-target',
+        route: 'sim-revenue-target',
+        description: 'Daily target, gate, and position sizing for SPY/QQQ/IWM strategies'
+      },
+      {
+        name: 'Data Provider Validation',
+        to: '/sim/data-validation',
+        route: 'sim-data-validation',
+        description: 'Scheduled pulls: Tradier, Tastytrade, Internal Proxy — freshness and run status'
       }
     ]
   },
@@ -476,6 +494,12 @@ const navigation = computed(() => {
           to: '/admin/backups',
           route: 'admin-backups',
           description: 'Full site backups and restore'
+        },
+        {
+          name: 'Error Reference',
+          to: '/admin/errors',
+          route: 'admin-errors',
+          description: 'Error codes, severity, and troubleshooting'
         }
       ]
     })

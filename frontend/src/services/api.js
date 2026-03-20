@@ -39,6 +39,11 @@ api.interceptors.response.use(
     return response
   },
   error => {
+    // Attach errorCode from API response for easy access throughout the app
+    if (error.response?.data?.errorCode) {
+      error.errorCode = error.response.data.errorCode
+    }
+
     // Handle 429 Too Many Requests
     if (error.response?.status === 429) {
       const retryAfter = parseInt(error.response.headers['retry-after']) || 60

@@ -17,8 +17,13 @@ const regimeIntegration = require('../portfolio/regime-integration');
 const adaptiveParams = require('../strategy/adaptive-params');
 const riskScaler = require('./risk-scaler');
 const expectedMoveFilter = require('./expected-move-filter');
+const revenueTargetGate = require('./revenue-target/revenue-target-gate');
+const revenueTargetSizer = require('./revenue-target/revenue-target-sizer');
+const revenueTargetDecisionLog = require('./revenue-target/revenue-target-decision-log.service');
+const revenueTargetTradeTypeFilter = require('./revenue-target/revenue-target-trade-type-filter');
 const db = require('../../config/database');
 const globalMarketState = require('./global-market-state.service');
+const macroRegimeBackfill = require('./macro-regime-backfill.service');
 const simEventBus = require('./sim-event-bus');
 const logger = require('../../utils/logger');
 const { assertSimMode } = require('../../config/tradingMode');
@@ -27,7 +32,7 @@ const { assertSimMode } = require('../../config/tradingMode');
  * Sources that trigger trade evaluation.
  * All other sources update SymbolState only (context providers).
  */
-const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'SQUEEZE_PRO']);
+const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'SQUEEZE_PRO', 'REVERSAL', 'CRT', 'SATY_PHASE']);
 
 /**
  * @typedef {Object} DecisionResult
@@ -54,8 +59,9 @@ class DecisionRouter {
    * @param {string} userId
    * @returns {Promise<DecisionResult>}
    */
-  async evaluate(webhookPayload, webhookEventId, userId) {
+  async evaluate(webhookPayload, webhookEventId, userId, options = {}) {
     assertSimMode();
+    const bypassGuards = !!options.bypassGuards;
 
     const indicatorSource = detectIndicatorSource(webhookPayload);
     const isKnownIndicator = indicatorSource !== 'UNKNOWN';
@@ -178,7 +184,9 @@ class DecisionRouter {
 
     const safetyResult = await safetyGuards.evaluate(signal, accountState, userId);
     if (!safetyResult.safe) {
-      await this._logRejection(userId, webhookEventId, signal, 'SAFETY_GUARD', safetyResult.violations.join('; '), 'safety_violation');
+      // Use primaryRule for sub-category visibility (regime_block, drawdown_limit, etc.)
+      const rejectionReason = safetyResult.primaryRule || 'safety_violation';
+      await this._logRejection(userId, webhookEventId, signal, 'SAFETY_GUARD', safetyResult.violations.join('; '), rejectionReason);
       return {
         approved: false,
         reason: `Safety guard violation: ${safetyResult.violations.join('; ')}`,
@@ -190,7 +198,8 @@ class DecisionRouter {
     if (signal.action !== 'CLOSE') {
       // Strategy suppression gate: strategies in this list are blocked from live execution
       const rawSuppressed = process.env.SUPPRESSED_STRATEGIES;
-      const SUPPRESSED_STRATEGIES = (rawSuppressed != null ? rawSuppressed : 'SIGNALS').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      // Default: SIGNALS (PF 0.07) + squeeze_pro (PF 0.81, -$621 on 3/10) per assessment
+      const SUPPRESSED_STRATEGIES = (rawSuppressed != null ? rawSuppressed : 'SIGNALS,squeeze_pro').split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
       const stratUpper = (signal.strategy || '').toUpperCase();
       if (SUPPRESSED_STRATEGIES.includes(stratUpper)) {
         const reason = `Strategy ${signal.strategy} is suppressed (SIM_ONLY) — 0% WR on executed trades, consuming excessive filter capacity`;
@@ -198,18 +207,20 @@ class DecisionRouter {
         return { approved: false, reason, signal, indicatorSource };
       }
 
-      // Strategy gate
-      const strategyGate = await strategyScorecardService.checkStrategyGate(userId, signal.strategy);
-      if (!strategyGate.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'STRATEGY_GATE', strategyGate.reason, 'strategy_gate');
-        return { approved: false, reason: strategyGate.reason, signal, indicatorSource };
-      }
+      // Strategy gate (bypassed in backtest)
+      if (!bypassGuards) {
+        const strategyGate = await strategyScorecardService.checkStrategyGate(userId, signal.strategy);
+        if (!strategyGate.allowed) {
+          await this._logRejection(userId, webhookEventId, signal, 'STRATEGY_GATE', strategyGate.reason, 'strategy_gate');
+          return { approved: false, reason: strategyGate.reason, signal, indicatorSource };
+        }
 
-      // Adaptive guards
-      const adaptiveResult = await adaptiveGuards.evaluate(signal, accountState, userId);
-      if (!adaptiveResult.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'ADAPTIVE_GUARD', adaptiveResult.reason, 'adaptive_guard');
-        return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
+        // Adaptive guards (cooldown, scorecard)
+        const adaptiveResult = await adaptiveGuards.evaluate(signal, accountState, userId);
+        if (!adaptiveResult.allowed) {
+          await this._logRejection(userId, webhookEventId, signal, 'ADAPTIVE_GUARD', adaptiveResult.reason, 'adaptive_guard');
+          return { approved: false, reason: adaptiveResult.reason, signal, indicatorSource };
+        }
       }
 
       // ── Phase 2.4: Portfolio-level Greeks guard ──
@@ -220,16 +231,42 @@ class DecisionRouter {
       }
 
       // ── Phase 2.45: Market Intelligence (confluence, flow, price action) ──
-      const intelResult = await marketIntelligence.evaluate(signal, userId);
-      if (!intelResult.allowed) {
-        await this._logRejection(userId, webhookEventId, signal, 'MARKET_INTELLIGENCE', intelResult.reason, 'market_intelligence');
-        return {
-          approved: false,
-          reason: `Market intelligence rejection: ${intelResult.reason}`,
-          signal,
-          indicatorSource,
-          intelligenceScore: intelResult.intelligenceScore,
-        };
+      if (!bypassGuards) {
+        const intelResult = await marketIntelligence.evaluate(signal, userId);
+        if (!intelResult.allowed) {
+          await this._logRejection(userId, webhookEventId, signal, 'MARKET_INTELLIGENCE', intelResult.reason, 'market_intelligence');
+          return {
+            approved: false,
+            reason: `Market intelligence rejection: ${intelResult.reason}`,
+            signal,
+            indicatorSource,
+            intelligenceScore: intelResult.intelligenceScore,
+          };
+        }
+      }
+
+      // ── Phase 2.46: Revenue target gate (daily target, max trades) ──
+      if (!bypassGuards) {
+        const revenueGateResult = await revenueTargetGate.shouldAllowNewTrades(userId, { allowFallback: true });
+        if (!revenueGateResult.allowed) {
+          await this._logRejection(userId, webhookEventId, signal, 'REVENUE_TARGET_GATE', revenueGateResult.reason, 'revenue_target');
+          revenueTargetDecisionLog.logDecision({
+            userId,
+            symbol: signal.symbol,
+            action: 'OPEN',
+            instrumentDesc: this._buildInstrumentDesc(signal),
+            decision: 'BLOCKED',
+            reason: revenueGateResult.reason,
+            sizeMultiplier: 0,
+            webhookEventId,
+          }).catch(() => {});
+          return {
+            approved: false,
+            reason: `Revenue target gate: ${revenueGateResult.reason}`,
+            signal,
+            indicatorSource,
+          };
+        }
       }
 
       // ── Phase 2.5: Refresh chain data + volatility regime + market context ──
@@ -262,8 +299,27 @@ class DecisionRouter {
         );
       }
 
+      // ── Phase 2.56: NEUTRAL fallback when volatility_snapshots/VIX unavailable (Fix 1)
+      // Prevents UNKNOWN cascade — regime-dependent logic uses NEUTRAL instead of failing silently.
+      const REGIME_FALLBACK_STALENESS_SECONDS = parseInt(process.env.REGIME_FALLBACK_STALENESS_SECONDS || '300', 10);
+      if (!effectiveRegime?.regime) {
+        effectiveRegime = {
+          regime: 'NEUTRAL',
+          metrics: { regimeStalenessFallback: true },
+          _source: 'regime_staleness_fallback',
+          _stale: true,
+        };
+        logger.info(
+          `[VOL_REGIME] ${effectiveSymbol}: volatility_snapshots/VIX unavailable >${REGIME_FALLBACK_STALENESS_SECONDS}s — defaulting to NEUTRAL (regime_staleness_fallback)`,
+          'decision-router'
+        );
+      }
+
       // ── Phase 2.6: Adaptive portfolio config from regime ──
       const portfolioConfig = regimeIntegration.getAdaptivePortfolioConfig(effectiveRegime);
+
+      // ── Phase 2.9: Macro backfill from data-service when MTF_BIAS is stale ──
+      await macroRegimeBackfill.refreshIfStale(userId, effectiveSymbol);
 
       // ── Phase 3: Trade Decision Engine (deterministic) ──
       const symState = await symbolStateService.getState(userId, effectiveSymbol);
@@ -305,7 +361,35 @@ class DecisionRouter {
       const hvRiskResult = riskScaler.applyRiskScaling(tradeDecision.size_multiplier || 1, hvPercentile);
       const portfolioRiskMult = portfolioConfig.riskMultiplier || 1.0;
       const combinedRiskMultiplier = hvRiskResult.multiplier * portfolioRiskMult;
-      const adjustedSizeMultiplier = (tradeDecision.size_multiplier || 1) * combinedRiskMultiplier;
+      let adjustedSizeMultiplier = (tradeDecision.size_multiplier || 1) * combinedRiskMultiplier;
+
+      // ── Phase 3.65: Revenue target size adjustment ──
+      let revenueSizerResult;
+      if (bypassGuards) {
+        revenueSizerResult = { multiplier: 1, reason: 'bypass (backtest)' };
+      } else {
+        revenueSizerResult = await revenueTargetSizer.getSizeAdjustment(userId, adjustedSizeMultiplier, { allowFallback: true });
+      }
+      if (revenueSizerResult.multiplier <= 0) {
+        await this._logRejection(userId, webhookEventId, signal, 'REVENUE_TARGET_SIZER', revenueSizerResult.reason, 'revenue_target');
+        revenueTargetDecisionLog.logDecision({
+          userId,
+          symbol: signal.symbol,
+          action: 'OPEN',
+          instrumentDesc: this._buildInstrumentDesc(signal),
+          decision: 'BLOCKED',
+          reason: revenueSizerResult.reason,
+          sizeMultiplier: 0,
+          webhookEventId,
+        }).catch(() => {});
+        return {
+          approved: false,
+          reason: `Revenue target sizer: ${revenueSizerResult.reason}`,
+          signal,
+          indicatorSource,
+        };
+      }
+      adjustedSizeMultiplier = revenueSizerResult.multiplier;
 
       // ── Build versioned regime audit context (Phase 7) ──
       const regimeAuditContext = {
@@ -347,6 +431,17 @@ class DecisionRouter {
         const reason = tradeDecision.rationale.join('; ');
         const rejectionReason = tradeDecision.rejection_reason || 'other';
         await this._logRejection(userId, webhookEventId, signal, 'TRADE_ENGINE', reason, rejectionReason);
+
+        // Staleness auto-purge: clear stale chain so next signal triggers fresh fetch
+        if (rejectionReason === 'data_staleness' || rejectionReason === 'chain_data_unavailable') {
+          const sym = (signal.symbol || '').toUpperCase();
+          if (sym) {
+            globalMarketState.clearChainCache(sym).catch(() => {});
+          }
+          // Also clear macro/trend timestamps in symbol_state so next webhook triggers
+          // macro backfill and fresh trend fetch instead of reusing severely stale data
+          symbolStateService.clearStaleMacroAndTrend(userId, effectiveSymbol).catch(() => {});
+        }
 
         simEventBus.sendToUser(userId, 'trade:blocked', {
           symbol: signal.symbol,
@@ -391,7 +486,10 @@ class DecisionRouter {
 
         // ── Gather open-position strikes so the constructor picks an alternative ──
         const resolvedContractType = tradeDecision.contractType || 'CALL';
-        const excludedStrikes = await this._getOpenPositionStrikes(userId, effectiveSymbol, resolvedContractType);
+        const dbExcludedStrikes = await this._getOpenPositionStrikes(userId, effectiveSymbol, resolvedContractType);
+        const batchKey = `${userId}|${effectiveSymbol}|${resolvedContractType}`;
+        const batchExcludedStrikes = (options.batchExcludedStrikes && options.batchExcludedStrikes.get(batchKey)) || [];
+        const excludedStrikes = [...new Set([...dbExcludedStrikes, ...batchExcludedStrikes])];
         if (excludedStrikes.length > 0) {
           logger.info(
             `[STRIKE_AVOIDANCE] ${effectiveSymbol} ${resolvedContractType}: ${excludedStrikes.length} open strike(s) to exclude: [${excludedStrikes.join(', ')}]`,
@@ -475,8 +573,42 @@ class DecisionRouter {
         }
       }
 
-      // ── Build approved order intent ──
+      // ── Revenue target: trade type filter (credit spreads, debit spreads, LEAPs only) ──
       const resolvedContractType = signal.contractType || tradeDecision.contractType || 'STOCK';
+      const expiration = signal.expiration || signal.meta?.selectedExpiration;
+      let dte = null;
+      if (expiration) {
+        const expDate = new Date(expiration);
+        dte = Math.ceil((expDate - Date.now()) / (1000 * 60 * 60 * 24));
+      }
+      let tradeTypeFilter;
+      if (bypassGuards) {
+        tradeTypeFilter = { allowed: true, tradeType: resolvedContractType };
+      } else {
+        tradeTypeFilter = await revenueTargetTradeTypeFilter.isTradeTypeAllowed(userId, resolvedContractType, dte);
+      }
+      if (!tradeTypeFilter.allowed) {
+        await this._logRejection(userId, webhookEventId, signal, 'REVENUE_TARGET_TRADE_TYPE', tradeTypeFilter.reason, 'revenue_target');
+        revenueTargetDecisionLog.logDecision({
+          userId,
+          symbol: signal.symbol,
+          action: 'OPEN',
+          instrumentDesc: this._buildInstrumentDesc(signal),
+          decision: 'BLOCKED',
+          reason: tradeTypeFilter.reason,
+          sizeMultiplier: 0,
+          tradeType: tradeTypeFilter.tradeType,
+          webhookEventId,
+        }).catch(() => {});
+        return {
+          approved: false,
+          reason: `Revenue target: ${tradeTypeFilter.reason}`,
+          signal,
+          indicatorSource,
+        };
+      }
+
+      // ── Build approved order intent ──
       const isEntry = tradeDecision.action === 'BUY_CALL' || tradeDecision.action === 'BUY_PUT' || tradeDecision.action === 'SELL_SPREAD';
       const side = isEntry ? 'BUY' : (signal.action === 'BUY' ? 'BUY' : 'SELL');
       const baseQty = signal.quantity || 1;
@@ -511,6 +643,18 @@ class DecisionRouter {
         },
       };
 
+      revenueTargetDecisionLog.logDecision({
+        userId,
+        symbol: signal.symbol,
+        action: 'OPEN',
+        instrumentDesc: this._buildInstrumentDesc(signal),
+        decision: 'ALLOWED',
+        reason: 'open',
+        sizeMultiplier: adjustedSizeMultiplier,
+        tradeType: tradeTypeFilter.tradeType,
+        webhookEventId,
+      }).catch(() => {});
+
       simEventBus.sendToUser(userId, 'trade:approved', {
         symbol: signal.symbol,
         action: tradeDecision.action,
@@ -521,6 +665,13 @@ class DecisionRouter {
         timestamp: new Date().toISOString(),
       });
       simEventBus.emit('trade:approved', { userId, decision: approvedResult });
+
+      // Accumulate strike for batch-aware exclusion (so subsequent events in same batch pick different strikes)
+      if (options.batchExcludedStrikes && side === 'BUY' && signal.strike != null && resolvedContractType && resolvedContractType !== 'STOCK') {
+        const key = `${userId}|${signal.symbol}|${resolvedContractType}`;
+        if (!options.batchExcludedStrikes.has(key)) options.batchExcludedStrikes.set(key, []);
+        options.batchExcludedStrikes.get(key).push(Number(signal.strike));
+      }
 
       return approvedResult;
     }
@@ -536,6 +687,20 @@ class DecisionRouter {
           indicatorSource,
         };
       }
+
+      const closeInstrumentDesc = position.underlying_symbol
+        ? `${position.underlying_symbol} ${position.strike}${position.contract_type === 'CALL' ? 'C' : 'P'}`
+        : signal.symbol;
+      revenueTargetDecisionLog.logDecision({
+        userId,
+        symbol: position.underlying_symbol || signal.symbol,
+        action: 'CLOSE',
+        instrumentDesc: closeInstrumentDesc,
+        decision: 'ALLOWED',
+        reason: 'exempt - close leg',
+        sizeMultiplier: 1,
+        webhookEventId,
+      }).catch(() => {});
 
       return {
         approved: true,
@@ -710,6 +875,15 @@ class DecisionRouter {
     return null;
   }
 
+  _buildInstrumentDesc(signal) {
+    if (!signal?.symbol) return '';
+    const sym = signal.symbol;
+    const strike = signal.strike ?? signal.strikeShort;
+    const ct = signal.contractType || '';
+    const suffix = ct === 'CALL' ? 'C' : ct === 'PUT' ? 'P' : ct === 'CREDIT_SPREAD' && strike ? 'P' : '';
+    return strike ? `${sym} ${strike}${suffix}` : sym;
+  }
+
   _estimateExtrinsicValue(underlyingPrice, strike, dte) {
     if (dte <= 0) return 0;
     const moneyness = Math.abs(underlyingPrice - strike) / underlyingPrice;
@@ -811,12 +985,13 @@ class DecisionRouter {
 
   /**
    * Refresh chain and price data via global_market_state.
-   * Updates the shared global state so all users benefit.
-   * Also fans out chain data to the requesting user's symbol_state
-   * for backward compatibility.
+   * Fix 4: Retry chain fetch up to CHAIN_FETCH_RETRY_COUNT times with backoff before giving up.
    */
   async _refreshChainData(symbol, userId) {
     const CHAIN_REFRESH_TTL_MS = parseInt(process.env.SIM_CHAIN_REFRESH_TTL_MS || '300000', 10);
+    const CHAIN_FETCH_RETRY_COUNT = parseInt(process.env.CHAIN_FETCH_RETRY_COUNT || '3', 10);
+    const CHAIN_FETCH_RETRY_BACKOFF_MS = parseInt(process.env.CHAIN_FETCH_RETRY_BACKOFF_MS || '1000', 10);
+
     try {
       // Check global market state first (shared across users)
       const gms = await globalMarketState.getState(symbol);
@@ -831,10 +1006,21 @@ class DecisionRouter {
         return;
       }
 
-      // Refresh both price and chain via global market state
-      const result = await globalMarketState.refreshAll(symbol);
+      // Fix 4: Retry chain fetch before hard-rejecting (chain_data_unavailable)
+      let result = null;
+      for (let attempt = 1; attempt <= CHAIN_FETCH_RETRY_COUNT; attempt++) {
+        result = await globalMarketState.refreshAll(symbol);
+        if (result?.chain) break;
+        if (attempt < CHAIN_FETCH_RETRY_COUNT) {
+          logger.warn(
+            `[CHAIN_REFRESH] ${symbol}: attempt ${attempt}/${CHAIN_FETCH_RETRY_COUNT} returned no chain, retrying in ${CHAIN_FETCH_RETRY_BACKOFF_MS}ms`,
+            'decision-router'
+          );
+          await new Promise(r => setTimeout(r, CHAIN_FETCH_RETRY_BACKOFF_MS));
+        }
+      }
 
-      if (result.chain) {
+      if (result?.chain) {
         // Fan out to the requesting user's symbol_state for backward compat
         await symbolStateService.update('CHAIN_SNAPSHOT', {
           ticker: symbol,
@@ -847,10 +1033,10 @@ class DecisionRouter {
 
         logger.info(`[CHAIN_REFRESH] ${symbol}: refreshed via global state — ${result.chain.contracts?.length || 0} contracts`, 'decision-router');
       } else {
-        logger.warn(`[CHAIN_REFRESH] ${symbol}: global refresh returned no chain data`, 'decision-router');
+        logger.warn(`[CHAIN_REFRESH] ${symbol}: global refresh returned no chain after ${CHAIN_FETCH_RETRY_COUNT} attempts`, 'decision-router');
       }
 
-      if (result.price) {
+      if (result?.price) {
         logger.info(`[PRICE_REFRESH] ${symbol}: global price refreshed $${result.price}`, 'decision-router');
       }
     } catch (err) {

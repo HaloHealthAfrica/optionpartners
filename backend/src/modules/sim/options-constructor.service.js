@@ -61,13 +61,13 @@ class OptionsConstructor {
       if (!chainResult.success) {
         // Fallback: synthetic construction from signal data when chain unavailable
         logger.warn(`[OPTIONS_CONSTRUCTOR] Chain unavailable for ${signal.symbol} — using synthetic construction`, 'options-constructor');
-        return this._constructSynthetic(signal, recipe, direction);
+        return this._constructSynthetic(signal, recipe, direction, excludedStrikes);
       }
       const chain = chainResult.chain;
 
       const expiration = this._selectExpiration(chain.expirations, recipe);
       if (!expiration) {
-        return this._constructSynthetic(signal, recipe, direction);
+        return this._constructSynthetic(signal, recipe, direction, excludedStrikes);
       }
 
       const expirationContracts = chain.contracts.filter(
@@ -88,9 +88,14 @@ class OptionsConstructor {
 
   /**
    * Check if a signal needs construction (missing options specifics).
+   * Also true when strike/contractType are set but expiration is missing (e.g. CRT with dte_suggestion).
    */
   needsConstruction(signal) {
-    return signal.contractType === null;
+    if (signal.contractType === null) return true;
+    if (signal.contractType && !signal.expiration && (signal.strike || signal.meta?.indicatorMeta?.dte_suggestion)) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -219,7 +224,7 @@ class OptionsConstructor {
 
   // --- Synthetic construction when chain data unavailable ---
 
-  _constructSynthetic(signal, recipe, direction) {
+  _constructSynthetic(signal, recipe, direction, excludedStrikes = []) {
     const underlyingPrice = signal.limitPrice || signal.meta?.originalPayload?.price ||
       signal.meta?.originalPayload?.entry?.price || signal.meta?.originalPayload?.current_price;
     if (!underlyingPrice) {
@@ -239,7 +244,32 @@ class OptionsConstructor {
 
     // Snap to realistic strike grid: $1 for sub-$50, $5 for $50-$500, $10 for $500+
     const strikeIncrement = underlyingPrice < 50 ? 1 : underlyingPrice < 500 ? 5 : 10;
-    const strike = Math.round(underlyingPrice / strikeIncrement) * strikeIncrement;
+    let strike = Math.round(underlyingPrice / strikeIncrement) * strikeIncrement;
+
+    // Respect excluded strikes: pick next-best strike when ATM already held (same direction)
+    if (excludedStrikes.length > 0) {
+      const excludedSet = new Set(excludedStrikes.map(Number));
+      if (excludedSet.has(strike)) {
+        // Try strikes above and below ATM; prefer OTM for puts (lower strike), calls (higher strike)
+        const candidates = [strike - strikeIncrement, strike + strikeIncrement];
+        for (const c of candidates) {
+          if (c > 0 && !excludedSet.has(c)) {
+            strike = c;
+            logger.info(
+              `[STRIKE_EXCLUSION] Synthetic: excluded [${[...excludedSet].join(', ')}] — picked $${strike} instead of ATM`,
+              'options-constructor'
+            );
+            break;
+          }
+        }
+        if (excludedSet.has(strike)) {
+          return {
+            success: false,
+            reason: `All eligible strikes already held as open positions (excluded: ${excludedStrikes.join(', ')})`,
+          };
+        }
+      }
+    }
 
     // Black-Scholes-inspired premium estimate using sqrt(DTE) time-value scaling.
     // Base: ATM premium ≈ 0.4 × IV × price × sqrt(DTE/365)
@@ -332,7 +362,18 @@ class OptionsConstructor {
       };
     }
 
-    const strike = this._selectStrikeByDelta(candidates, recipe, regimeContext);
+    // CRT and other indicators may provide a fixed strike — use it when available
+    let strike;
+    if (signal.strike != null && typeof signal.strike === 'number') {
+      const fixedMatch = candidates.find((c) => Math.abs(Number(c.strike) - signal.strike) < 0.01);
+      if (fixedMatch) {
+        fixedMatch._riskScore = this._scoreContract(fixedMatch, 0.5, candidates, this._getDynamicWeights(regimeContext));
+        strike = fixedMatch;
+      }
+    }
+    if (!strike) {
+      strike = this._selectStrikeByDelta(candidates, recipe, regimeContext);
+    }
     if (!strike) {
       return {
         success: false,

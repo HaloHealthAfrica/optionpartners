@@ -5696,7 +5696,7 @@ import {
     mdiTrophy,
 } from "@mdi/js";
 
-const { showSuccess, showError } = useNotification();
+const { showSuccess, showError, showApiError } = useNotification();
 const authStore = useAuthStore();
 const { selectedAccount } = useGlobalAccountFilter();
 const { formatTime: formatTimeTz } = useUserTimezone();
@@ -5822,7 +5822,7 @@ const loadData = async () => {
         if (error.response?.status === 403) {
             hasAccess.value = false;
         } else {
-            showError("Error", "Failed to load behavioral analytics data");
+            showApiError("Error", error, "Failed to load behavioral analytics data");
         }
     } finally {
         loading.value = false;
@@ -5957,7 +5957,7 @@ const analyzeHistoricalTrades = async () => {
         await loadData();
     } catch (error) {
         console.error("Error analyzing historical trades:", error);
-        showError("Error", "Failed to analyze historical trades");
+        showApiError("Error", error, "Failed to analyze historical trades");
     } finally {
         loadingHistorical.value = false;
     }
@@ -5972,7 +5972,7 @@ const acknowledgeAlert = async (alertId) => {
         );
         showSuccess("Success", "Alert acknowledged");
     } catch (error) {
-        showError("Error", "Failed to acknowledge alert");
+        showApiError("Error", error, "Failed to acknowledge alert");
     }
 };
 
@@ -5991,7 +5991,7 @@ const updateSettings = async () => {
         await api.put("/behavioral-analytics/settings", settings.value);
         showSuccess("Success", "Settings updated");
     } catch (error) {
-        showError("Error", "Failed to update settings");
+        showApiError("Error", error, "Failed to update settings");
     }
 };
 
@@ -6007,7 +6007,7 @@ const onSensitivityChange = async () => {
             "Detection sensitivity updated and data refreshed",
         );
     } catch (error) {
-        showError("Error", "Failed to update sensitivity");
+        showApiError("Error", error, "Failed to update sensitivity");
     }
 };
 
@@ -6049,7 +6049,7 @@ const reRunAnalysis = async () => {
         await loadData();
     } catch (error) {
         console.error("Error re-running analysis:", error);
-        showError("Error", "Failed to re-run analysis");
+        showApiError("Error", error, "Failed to re-run analysis");
     } finally {
         loadingHistorical.value = false;
     }
@@ -6199,7 +6199,7 @@ const toggleOverconfidenceEventExpansion = async (eventId) => {
                 }
             } catch (error) {
                 console.error("Error loading trade details:", error);
-                showError("Error", "Failed to load trade details");
+                showApiError("Error", error, "Failed to load trade details");
             }
         }
     }
@@ -6259,9 +6259,9 @@ const analyzeLossAversion = async () => {
 
         // Check if it's a 400 error with specific requirements message
         if (error.response?.status === 400 && error.response?.data?.message) {
-            showError("Requirements Not Met", error.response.data.message);
+            showApiError("Requirements Not Met", error, "Failed to analyze loss aversion patterns");
         } else {
-            showError("Error", "Failed to analyze loss aversion patterns");
+            showApiError("Error", error, "Failed to analyze loss aversion patterns");
         }
     } finally {
         loadingLossAversion.value = false;
@@ -6347,9 +6347,9 @@ const analyzeOverconfidence = async () => {
 
         // Check if it's a 400 error with specific requirements message
         if (error.response?.status === 400 && error.response?.data?.message) {
-            showError("Requirements Not Met", error.response.data.message);
+            showApiError("Requirements Not Met", error, "Failed to analyze overconfidence patterns");
         } else {
-            showError("Error", "Failed to analyze overconfidence patterns");
+            showApiError("Error", error, "Failed to analyze overconfidence patterns");
         }
     } finally {
         loadingOverconfidence.value = false;
@@ -6435,9 +6435,9 @@ const loadTopMissedTrades = async (forceRefresh = false) => {
     } catch (error) {
         console.error("Failed to load top missed trades:", error);
         if (error.response?.status === 403) {
-            showError("Pro Tier Required", error.response.data.message);
+            showApiError("Pro Tier Required", error, "Failed to load top missed trades analysis");
         } else {
-            showError("Error", "Failed to load top missed trades analysis");
+            showApiError("Error", error, "Failed to load top missed trades analysis");
         }
     } finally {
         loadingTopMissedTrades.value = false;
@@ -6486,9 +6486,9 @@ const analyzePersonality = async () => {
 
         // Check if it's a 400 error with specific requirements message
         if (error.response?.status === 400 && error.response?.data?.message) {
-            showError("Requirements Not Met", error.response.data.message);
+            showApiError("Requirements Not Met", error, "Failed to analyze trading personality");
         } else {
-            showError("Error", "Failed to analyze trading personality");
+            showApiError("Error", error, "Failed to analyze trading personality");
         }
     } finally {
         loadingPersonality.value = false;

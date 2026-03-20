@@ -153,7 +153,7 @@ const props = defineProps({
 
 const emit = defineEmits(['deleted'])
 
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showError, showApiError } = useNotification()
 
 const selectedImage = ref(null)
 const imageToDelete = ref(null)
@@ -218,7 +218,7 @@ async function confirmDelete() {
     imageToDelete.value = null
   } catch (error) {
     console.error('Failed to delete image:', error)
-    showError('Error', error.response?.data?.error || 'Failed to delete image')
+    showApiError('Error', error, 'Failed to delete image')
     imageToDelete.value = null
   }
 }

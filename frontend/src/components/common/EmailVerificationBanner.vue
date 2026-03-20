@@ -50,7 +50,7 @@ import { ExclamationTriangleIcon, XMarkIcon } from '@heroicons/vue/24/outline'
 import api from '@/services/api'
 
 const authStore = useAuthStore()
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showApiError } = useNotification()
 
 const dismissed = ref(false)
 const resendLoading = ref(false)
@@ -105,7 +105,7 @@ async function handleResend() {
       }
     }, 1000)
   } catch (err) {
-    showError('Error', err.response?.data?.error || 'Failed to resend verification email')
+    showApiError('Error', err, 'Failed to resend verification email')
   } finally {
     resendLoading.value = false
   }

@@ -1,6 +1,7 @@
 import { createChildLogger, logger } from '../utils/logger';
-import { circuitBreaker } from './circuit-breaker';
 import { rateLimiter } from './rate-limiter';
+import { performanceTracker } from './provider-performance-tracker';
+import { loadBalancer, LoadBalancingStrategy } from './load-balancer';
 import { ProviderError, ServiceUnavailableError } from '../providers/base-provider';
 import { cacheManager } from '../cache';
 import { snapshotStore } from '../persistence';
@@ -9,6 +10,7 @@ import type {
   MarketDataProvider,
   ProviderName,
   ProviderCapabilities,
+  ProviderPriority,
   ProviderHealth,
   ProviderResponse,
   Candle,
@@ -22,9 +24,20 @@ import type {
   MarketHours,
   Timeframe,
   DataType,
+  Cached,
+  OptionsContract,
 } from '../types';
 
 const log = createChildLogger('orchestrator');
+
+/**
+ * Priority order for provider selection (lower index = higher priority)
+ */
+const PRIORITY_ORDER: Record<ProviderPriority, number> = {
+  primary: 0,
+  secondary: 1,
+  tertiary: 2,
+};
 
 type CapabilityKey = keyof ProviderCapabilities;
 
@@ -40,11 +53,36 @@ export class DataOrchestrator {
   private providerRegistrationInfo = new Map<ProviderName, { registered: boolean; reason?: string; apiKeyConfigured: boolean }>();
   private lastErrors = new Map<ProviderName, string>();
 
+  // Tracks fallback counts: how many times a given provider was used as a
+  // non-primary (index > 0) for a capability. Useful for failover metrics.
+  private fallbackStats = new Map<CapabilityKey, Map<ProviderName, number>>();
+
+  /**
+   * Allows callers to specify how the first provider is chosen when multiple
+   * candidates are healthy.  Defaults to `none` (always use the highest-priority
+   * provider).  See `LoadBalancer` for supported strategies.
+   */
+  setLoadBalancingStrategy(strategy: LoadBalancingStrategy): void {
+    loadBalancer.setStrategy(strategy);
+    log.info({ strategy }, 'Load balancing strategy set');
+  }
+
+  getLoadBalancingStrategy(): LoadBalancingStrategy {
+    return loadBalancer.getStrategy();
+  }
+
+
   registerProvider(provider: MarketDataProvider): void {
     this.providers.push(provider);
     this.requestMetrics.set(provider.name, { successes: 0, failures: 0, totalLatencyMs: 0 });
     this.providerRegistrationInfo.set(provider.name, { registered: true, apiKeyConfigured: true });
-    log.info({ provider: provider.name }, 'Provider registered');
+    // Sort providers by priority after registration
+    this.providers.sort((a, b) => {
+      const aPriority = PRIORITY_ORDER[a.priority || 'tertiary'];
+      const bPriority = PRIORITY_ORDER[b.priority || 'tertiary'];
+      return aPriority - bPriority;
+    });
+    log.info({ provider: provider.name, priority: provider.priority }, 'Provider registered');
   }
 
   trackProviderRegistrationFailure(providerName: ProviderName, reason: string, apiKeyConfigured: boolean): void {
@@ -63,6 +101,31 @@ export class DataOrchestrator {
     this.macroRegime = service;
     log.info('Macro regime service registered');
   }
+
+  /**
+   * Increment fallback counter when a provider other than the first choice
+   * successfully handles a request for the given capability.
+   */
+  private recordFallback(capability: CapabilityKey, provider: ProviderName): void {
+    const capMap = this.fallbackStats.get(capability) ?? new Map<ProviderName, number>();
+    capMap.set(provider, (capMap.get(provider) ?? 0) + 1);
+    this.fallbackStats.set(capability, capMap);
+  }
+
+  /**
+   * Retrieve fallback statistics in consumable format.
+   */
+  getFallbackMetrics(): Record<CapabilityKey, { provider: ProviderName; count: number }[]> {
+    const result: Record<CapabilityKey, { provider: ProviderName; count: number }[]> = {} as any;
+    for (const [cap, map] of this.fallbackStats.entries()) {
+      result[cap] = [];
+      for (const [prov, cnt] of map.entries()) {
+        result[cap].push({ provider: prov, count: cnt });
+      }
+    }
+    return result;
+  }
+
 
   // --- Public data methods (cache-aware) ---
 
@@ -107,10 +170,72 @@ export class DataOrchestrator {
   }
 
   async getIV(symbol: string): Promise<ProviderResponse<IVData>> {
-    return this.cachedExecute('iv', symbol, 'iv', `iv:${symbol}`, (p) => {
-      if (!p.getIV) throw new ProviderError(p.name, 'NOT_SUPPORTED', 'No IV');
-      return p.getIV(symbol);
-    });
+    try {
+      return await this.cachedExecute('iv', symbol, 'iv', `iv:${symbol}`, (p) => {
+        if (!p.getIV) throw new ProviderError(p.name, 'NOT_SUPPORTED', 'No IV');
+        return p.getIV(symbol);
+      });
+    } catch (firstErr) {
+      // if there was an error (no provider usable or all failed), attempt to
+      // compute implied vol from the options chain as a last-resort fallback.
+      try {
+        const chainResp = await this.cachedExecute(
+          'options_chain',
+          symbol,
+          'optionsChain',
+          `${symbol}`,
+          (p) => {
+            if (!p.getOptionsChain) throw new ProviderError(p.name, 'NOT_SUPPORTED', 'No options chain');
+            return p.getOptionsChain(symbol);
+          },
+        );
+
+        const ivValue = DataOrchestrator.computeIvFromChain(chainResp.data.contracts);
+        log.warn({ symbol, ivValue }, 'Computed IV fallback used');
+        // record fallback for computed provider
+        this.recordFallback('iv', 'computed');
+        // mark as computed provider
+        const ivData: IVData = {
+          symbol,
+          currentIV: ivValue,
+          ivRank: 0,
+          ivPercentile: 0,
+          historicalIV30: 0,
+          historicalIV60: 0,
+          historicalIV90: 0,
+          timestamp: Date.now(),
+        };
+        return {
+          data: ivData,
+          provider: 'computed',
+          cached: false,
+          latencyMs: 0,
+          timestamp: Date.now(),
+        };
+      } catch (secondErr) {
+        log.warn({ symbol, error: secondErr instanceof Error ? secondErr.message : secondErr }, 'IV compute fallback failed');
+        // rethrow original so caller sees the original failure
+        throw firstErr;
+      }
+    }
+  }
+
+
+  /**
+   * Calculate an approximate implied volatility from an options chain.
+   * This is a naive implementation that averages the `impliedVolatility` field
+   * across all contracts. Used only as a last‑resort fallback when no real API
+   * providers are available.
+   */
+  private static computeIvFromChain(chain: OptionsContract[]): number {
+    const ivs = chain
+      .map((c) => c.impliedVolatility)
+      .filter((v): v is number => typeof v === 'number' && !isNaN(v));
+    if (ivs.length === 0) {
+      throw new Error('Cannot compute IV from empty chain');
+    }
+    const sum = ivs.reduce((a, b) => a + b, 0);
+    return sum / ivs.length;
   }
 
   // --- VIX / Macro / Regime ---
@@ -199,37 +324,22 @@ export class DataOrchestrator {
       const registrationInfo = this.providerRegistrationInfo.get(providerName);
       const metrics = this.requestMetrics.get(providerName);
       const total = (metrics?.successes ?? 0) + (metrics?.failures ?? 0);
-      const cbStats = circuitBreaker.getStats(providerName);
-      const circuitState = circuitBreaker.getState(providerName);
       const lastError = this.lastErrors.get(providerName);
-
-      // Determine circuit breaker reason if OPEN
-      let circuitBreakerReason: string | undefined;
-      if (circuitState === 'open') {
-        const failures = circuitBreaker.getConsecutiveFailures(providerName);
-        if (lastError) {
-          circuitBreakerReason = `${failures} consecutive failures - ${lastError}`;
-        } else {
-          circuitBreakerReason = `${failures} consecutive failures`;
-        }
-      }
 
       return {
         name: providerName,
-        healthy: provider ? circuitBreaker.canExecute(providerName) : false,
-        circuitState,
+        healthy: !!provider,
+        circuitState: 'closed' as const,
         successRate: total > 0 && metrics ? (metrics.successes / total) * 100 : 100,
         avgLatencyMs: total > 0 && metrics ? Math.round(metrics.totalLatencyMs / total) : 0,
         rateLimitRemaining: rateLimiter.getRemaining(providerName),
         rateLimitMax: rateLimiter.getMax(providerName),
-        lastSuccess: cbStats?.lastSuccessTime ?? null,
-        lastFailure: cbStats?.lastFailureTime ?? null,
-        consecutiveFailures: circuitBreaker.getConsecutiveFailures(providerName),
-        // Enhanced diagnostics
+        lastSuccess: null,
+        lastFailure: null,
+        consecutiveFailures: 0,
         registered: registrationInfo?.registered ?? false,
         registrationReason: registrationInfo?.reason,
         apiKeyConfigured: registrationInfo?.apiKeyConfigured ?? false,
-        circuitBreakerReason,
         lastErrorMessage: lastError,
       };
     });
@@ -256,10 +366,10 @@ export class DataOrchestrator {
   ): Promise<ProviderResponse<T>> {
     const cached = await cacheManager.get<T>(dataType, cacheKey);
     if (cached) {
-      log.debug({ dataType, key: cacheKey, source: cached.source }, 'Cache hit');
+      log.debug({ dataType, key: cacheKey, source: cached.source, provider: cached.provider }, 'Cache hit');
       return {
         data: cached.data,
-        provider: 'twelvedata', // cache doesn't track origin provider
+        provider: (cached.provider as ProviderName) || 'twelvedata',
         cached: true,
         latencyMs: 0,
         timestamp: Date.now(),
@@ -268,7 +378,8 @@ export class DataOrchestrator {
 
     const result = await this.executeWithFallback<T>(capability, coalescingKey, fn);
 
-    await cacheManager.set(dataType, cacheKey, result.data);
+    // persist with provider info so future hits know origin
+    await cacheManager.set(dataType, cacheKey, { data: result.data, provider: result.provider });
 
     return result;
   }
@@ -301,9 +412,22 @@ export class DataOrchestrator {
     capability: CapabilityKey,
     fn: (provider: MarketDataProvider) => Promise<T>,
   ): Promise<ProviderResponse<T>> {
-    const eligible = this.providers.filter(
-      (p) => p.capabilities[capability] && circuitBreaker.canExecute(p.name),
-    );
+    let eligible = this.providers.filter((p) => p.capabilities[capability]);
+
+    // traffic shaping: proactively skip any provider that is completely out of
+    // rate-limit tokens.  We'll only apply this filter if at least one
+    // provider still has tokens, otherwise we'll let the normal logic proceed
+    // and let the rate limiter handle waiting.
+    const withTokens = eligible.filter((p) => rateLimiter.getRemaining(p.name) > 0);
+    if (withTokens.length > 0) {
+      eligible = withTokens;
+    }
+
+    // For GEX, skip computed provider if any real-API providers are available
+    if (capability === 'gex' && eligible.some(p => p.name !== 'computed')) {
+      eligible = eligible.filter(p => p.name !== 'computed');
+      log.debug('Skipping computed GEX provider — real-API providers available');
+    }
 
     if (eligible.length === 0) {
       // Check if no providers are registered at all
@@ -314,23 +438,47 @@ export class DataOrchestrator {
         );
       }
       
-      // Providers exist but all have circuit breakers open or don't support this capability
-      throw new ProviderError(
-        'twelvedata',
-        'CIRCUIT_OPEN',
+      throw new ServiceUnavailableError(
         `No available providers for capability: ${capability}`,
       );
     }
 
+    // Sort providers by performance (intelligent fallback ordering)
+    const providerNames = eligible.map((p) => p.name);
+    let sortedProviderNames = performanceTracker.getRecommendedFallbackOrder(providerNames);
+
+    // Apply load balancing strategy to choose which provider should be tried
+    // first.  This may rotate the sorted list depending on the chosen strategy.
+    if (loadBalancer.getStrategy() !== 'none') {
+      const primary = loadBalancer.choose(sortedProviderNames, capability);
+      const idx = sortedProviderNames.indexOf(primary);
+      if (idx > 0) {
+        // move primary to front while preserving relative order of the others
+        sortedProviderNames.splice(idx, 1);
+        sortedProviderNames.unshift(primary);
+      }
+    }
+
+    // Reorder eligible providers by the possibly-rotated list
+    eligible = sortedProviderNames
+      .map((name) => eligible.find((p) => p.name === name))
+      .filter((p): p is MarketDataProvider => p !== undefined);
+
     const errors: Error[] = [];
 
-    for (const provider of eligible) {
+    for (let idx = 0; idx < eligible.length; idx++) {
+      const provider = eligible[idx];
       const start = Date.now();
       try {
         const data = await fn(provider);
         const latencyMs = Date.now() - start;
 
         this.recordSuccess(provider.name, latencyMs);
+
+        // record fallback if we didn't use the first provider in the list
+        if (idx > 0) {
+          this.recordFallback(capability, provider.name);
+        }
 
         return {
           data,
@@ -367,6 +515,8 @@ export class DataOrchestrator {
       metrics.successes++;
       metrics.totalLatencyMs += latencyMs;
     }
+    // Also record in performance tracker for intelligent fallback
+    performanceTracker.recordSuccess(provider, latencyMs);
   }
 
   private recordFailure(provider: ProviderName, latencyMs: number): void {
@@ -375,6 +525,8 @@ export class DataOrchestrator {
       metrics.failures++;
       metrics.totalLatencyMs += latencyMs;
     }
+    // Also record in performance tracker for intelligent fallback
+    performanceTracker.recordFailure(provider, latencyMs);
   }
 
   private sanitizeErrorMessage(message: string): string {

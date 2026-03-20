@@ -837,7 +837,7 @@ export default {
     setup() {
         const route = useRoute();
         const router = useRouter();
-        const { showSuccess, showError, showCriticalError, showConfirmation } =
+        const { showSuccess, showError, showApiCriticalError, showConfirmation } =
             useNotification();
         const investmentsStore = useInvestmentsStore();
 
@@ -895,7 +895,7 @@ export default {
                 }
             } catch (error) {
                 console.error("Error loading watchlist:", error);
-                showCriticalError("Error", "Failed to load watchlist");
+                showApiCriticalError("Error", error, "Failed to load watchlist");
                 router.push("/markets");
             } finally {
                 loading.value = false;
@@ -919,7 +919,7 @@ export default {
                 watchlistNews.value = response.data.data || [];
             } catch (error) {
                 console.error("Error loading watchlist news:", error);
-                showCriticalError("Error", "Failed to load news");
+                showApiCriticalError("Error", error, "Failed to load news");
                 watchlistNews.value = [];
             } finally {
                 loadingNews.value = false;
@@ -942,7 +942,7 @@ export default {
                 watchlistEarnings.value = response.data.data || [];
             } catch (error) {
                 console.error("Error loading watchlist earnings:", error);
-                showCriticalError("Error", "Failed to load earnings");
+                showApiCriticalError("Error", error, "Failed to load earnings");
                 watchlistEarnings.value = [];
             } finally {
                 loadingEarnings.value = false;
@@ -978,7 +978,7 @@ export default {
                 pillarsLoaded.value = true;
             } catch (error) {
                 console.error("Error loading watchlist pillars:", error);
-                showCriticalError("Error", "Failed to load 8 Pillars analysis");
+                showApiCriticalError("Error", error, "Failed to load 8 Pillars analysis");
             } finally {
                 loadingPillars.value = false;
                 pillarsLoadingSymbol.value = "";
@@ -1009,9 +1009,7 @@ export default {
                 cancelAddSymbol();
             } catch (error) {
                 console.error("Error adding symbol:", error);
-                const message =
-                    error.response?.data?.error || "Failed to add symbol";
-                showCriticalError("Error", message);
+                showApiCriticalError("Error", error, "Failed to add symbol");
             } finally {
                 adding.value = false;
             }
@@ -1030,7 +1028,7 @@ export default {
                         showSuccess("Success", "Symbol removed from watchlist");
                     } catch (error) {
                         console.error("Error removing symbol:", error);
-                        showCriticalError("Error", "Failed to remove symbol");
+                        showApiCriticalError("Error", error, "Failed to remove symbol");
                     }
                 },
             );
@@ -1053,7 +1051,7 @@ export default {
                 cancelEditNotes();
             } catch (error) {
                 console.error("Error updating notes:", error);
-                showCriticalError("Error", "Failed to update notes");
+                showApiCriticalError("Error", error, "Failed to update notes");
             } finally {
                 updating.value = false;
             }

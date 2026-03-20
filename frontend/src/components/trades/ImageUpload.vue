@@ -148,7 +148,7 @@ const props = defineProps({
 
 const emit = defineEmits(['uploaded'])
 
-const { showSuccess, showError } = useNotification()
+const { showSuccess, showError, showApiError } = useNotification()
 
 const selectedFiles = ref([])
 const isDragOver = ref(false)
@@ -257,7 +257,7 @@ async function uploadImages() {
 
   } catch (error) {
     console.error('Image upload error:', error)
-    showError('Upload Failed', error.response?.data?.error || 'Failed to upload images')
+    showApiError('Upload Failed', error, 'Failed to upload images')
   } finally {
     uploading.value = false
   }
