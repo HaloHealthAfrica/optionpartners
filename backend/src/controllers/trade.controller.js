@@ -1,6 +1,7 @@
 const Trade = require('../models/Trade');
 const User = require('../models/User');
 const { parseCSV, detectBrokerFormat, getCsvHeaderLine, getCsvSampleRows } = require('../utils/csvParser');
+const { getUserTimezone } = require('../utils/timezone');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
 const logger = require('../utils/logger');
@@ -1481,10 +1482,13 @@ const tradeController = {
             }
           }
 
+          const userTimezone = await getUserTimezone(fileUserId);
+
           const context = {
             existingPositions,
             existingExecutions,
             userId: req.user.id,
+            userTimezone,
             tradeGroupingSettings: {
               enabled: userSettings.enable_trade_grouping ?? true,
               timeGapMinutes: userSettings.trade_grouping_time_gap_minutes ?? 60

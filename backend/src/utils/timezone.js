@@ -194,6 +194,110 @@ function getETDate() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: ET_TZ }).format(new Date());
 }
 
+/**
+ * Convert a naive datetime string (no timezone info) from a given timezone to UTC.
+ * If the datetime already has a Z suffix or timezone offset, it is returned as-is.
+ *
+ * @param {string} naiveDatetime - Datetime string like "2025-09-05T16:33:00" or "2025-09-05 16:33:00"
+ * @param {string} timezone - IANA timezone (e.g., "Europe/Berlin", "America/New_York")
+ * @returns {string|null} UTC datetime with Z suffix, e.g., "2025-09-05T14:33:00Z"
+ */
+function localToUTC(naiveDatetime, timezone) {
+  if (!naiveDatetime || !timezone || timezone === 'UTC') {
+    if (naiveDatetime && !naiveDatetime.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(naiveDatetime)) {
+      return naiveDatetime + 'Z';
+    }
+    return naiveDatetime;
+  }
+
+  if (naiveDatetime.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(naiveDatetime)) {
+    return naiveDatetime;
+  }
+
+  try {
+    const match = naiveDatetime.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (!match) {
+      return naiveDatetime + 'Z';
+    }
+
+    const [, yearStr, monthStr, dayStr, hourStr, minStr, secStr = '00'] = match;
+    const year = parseInt(yearStr);
+    const month = parseInt(monthStr) - 1;
+    const day = parseInt(dayStr);
+    const hour = parseInt(hourStr);
+    const min = parseInt(minStr);
+    const sec = parseInt(secStr);
+
+    const estimateUTC = new Date(Date.UTC(year, month, day, hour, min, sec));
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).formatToParts(estimateUTC);
+
+    const getPart = (type) => {
+      const part = parts.find(p => p.type === type);
+      return part ? parseInt(part.value) : 0;
+    };
+
+    const localYear = getPart('year');
+    const localMonth = getPart('month') - 1;
+    const localDay = getPart('day');
+    const localHour = getPart('hour') === 24 ? 0 : getPart('hour');
+    const localMin = getPart('minute');
+    const localSec = getPart('second');
+
+    const localMs = new Date(localYear, localMonth, localDay, localHour, localMin, localSec).getTime();
+    const utcMs = new Date(year, month, day, hour, min, sec).getTime();
+    const offsetMs = localMs - utcMs;
+    const resultUTC = new Date(estimateUTC.getTime() - offsetMs);
+
+    const verifyParts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).formatToParts(resultUTC);
+
+    const getVerifyPart = (type) => {
+      const part = verifyParts.find(p => p.type === type);
+      return part ? parseInt(part.value) : 0;
+    };
+
+    const vHour = getVerifyPart('hour') === 24 ? 0 : getVerifyPart('hour');
+    const vMin = getVerifyPart('minute');
+
+    if (vHour !== hour || vMin !== min) {
+      const vLocalMs = new Date(
+        getVerifyPart('year'),
+        getVerifyPart('month') - 1,
+        getVerifyPart('day'),
+        vHour,
+        vMin,
+        getVerifyPart('second')
+      ).getTime();
+      const targetLocalMs = new Date(year, month, day, hour, min, sec).getTime();
+      const correction = targetLocalMs - vLocalMs;
+      const correctedUTC = new Date(resultUTC.getTime() + correction);
+      return correctedUTC.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    }
+
+    return resultUTC.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  } catch (error) {
+    console.error('Error in localToUTC:', error, { naiveDatetime, timezone });
+    return naiveDatetime + 'Z';
+  }
+}
+
 module.exports = {
   getUserTimezone,
   getDateInTimezone,
@@ -205,4 +309,5 @@ module.exports = {
   isWithinTradingHours,
   deriveSessionPhase,
   getETDate,
+  localToUTC,
 };

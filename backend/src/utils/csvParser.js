@@ -6,6 +6,7 @@ const cusipQueue = require('./cusipQueue');
 const currencyConverter = require('./currencyConverter');
 const db = require('../config/database');
 const { getFuturesPointValue, extractUnderlyingFromFuturesSymbol } = require('./futuresUtils');
+const { localToUTC } = require('./timezone');
 
 // CUSIP resolution is now handled by the cusipQueue module
 
@@ -249,13 +250,29 @@ function detectBrokerFormat(fileBuffer) {
       return 'thinkorswim';
     }
 
-    // TradingView detection - look for specific column combination
+    // TradingView detection - covers all 3 sub-formats (futures transactions, performance, paper trading)
+    // Performance export: buyFillId, sellFillId, boughtTimestamp, soldTimestamp, pnl
+    if (headers.includes('buyfillid') &&
+        headers.includes('sellfillid') &&
+        headers.includes('boughttimestamp') &&
+        headers.includes('soldtimestamp') &&
+        headers.includes('pnl')) {
+      console.log('[AUTO-DETECT] Detected: TradingView (performance export format)');
+      return 'tradingview';
+    }
+    // Paper trading: buyPrice/sellPrice with status but no buyFillId
+    if (headers.includes('buyprice') && headers.includes('sellprice') &&
+        headers.includes('boughttimestamp') && headers.includes('soldtimestamp') &&
+        headers.includes('status') && !headers.includes('buyfillid')) {
+      console.log('[AUTO-DETECT] Detected: TradingView (paper trading format)');
+      return 'tradingview';
+    }
+    // Futures transaction format: Side, Fill Price or Avg Fill Price, Order ID
     if (headers.includes('symbol') &&
         headers.includes('side') &&
-        headers.includes('fill price') &&
-        headers.includes('status') &&
         headers.includes('order id') &&
-        headers.includes('leverage')) {
+        (headers.includes('fill price') || headers.includes('avg fill price')) &&
+        (headers.includes('leverage') || headers.includes('placing time') || headers.includes('closing time') || headers.includes('update time'))) {
       console.log('[AUTO-DETECT] Detected: TradingView (futures trading format)');
       return 'tradingview';
     }
@@ -362,24 +379,6 @@ function detectBrokerFormat(fileBuffer) {
         (headers.includes('gross proceeds') || headers.includes('net proceeds'))) {
       console.log('[AUTO-DETECT] Detected: TradeStation/TradeNote');
       return 'tradestation';
-    }
-
-    // TradingView Performance export detection - look for buyFillId, sellFillId, boughtTimestamp, soldTimestamp
-    if (headers.includes('buyfillid') &&
-        headers.includes('sellfillid') &&
-        headers.includes('boughttimestamp') &&
-        headers.includes('soldtimestamp') &&
-        headers.includes('pnl')) {
-      console.log('[AUTO-DETECT] Detected: TradingView Performance Export');
-      return 'tradingview_performance';
-    }
-
-    // TradingView Paper Trading detection - buyPrice/sellPrice with status but no buyFillId/pnl
-    if (headers.includes('buyprice') && headers.includes('sellprice') &&
-        headers.includes('boughttimestamp') && headers.includes('soldtimestamp') &&
-        headers.includes('status') && !headers.includes('buyfillid')) {
-      console.log('[AUTO-DETECT] Detected: TradingView (paper trading format)');
-      return 'tradingview_paper';
     }
 
     // Tastytrade detection - look for unique tastytrade headers
@@ -817,17 +816,17 @@ const brokerParsers = {
     const symbol = cleanString(row.Symbol);
     const side = row.Side ? row.Side.toLowerCase() : '';
     const status = row.Status || '';
-    const quantity = Math.abs(parseInteger(row.Qty));
-    const fillPrice = parseNumeric(row['Fill Price']);
+    const quantity = Math.abs(parseInteger(row['Filled Qty'] || row.Qty));
+    const fillPrice = parseNumeric(row['Fill Price'] || row['Avg Fill Price']);
     const commission = parseNumeric(row.Commission);
     const placingTime = row['Placing Time'] || '';
-    const closingTime = row['Closing Time'] || '';
+    const closingTime = row['Closing Time'] || row['Update Time'] || '';
     const orderId = row['Order ID'] || '';
     const orderType = row.Type || '';
     const leverage = row.Leverage || '';
 
-    // Only process filled orders
-    if (status !== 'Filled') {
+    // Only process filled orders - if no Status column exists, treat all rows as filled
+    if (status && status !== 'Filled') {
       return null;
     }
 
@@ -960,13 +959,26 @@ const brokerParsers = {
     const sellPrice = parseNumeric(row.sellPrice);
     const pnl = parseNumeric(row.pnl);
 
-    // Parse timestamps (Unix timestamps in milliseconds)
-    const boughtTimestamp = parseInt(row.boughtTimestamp);
-    const soldTimestamp = parseInt(row.soldTimestamp);
+    // Parse timestamps - can be Unix timestamps in milliseconds or local date strings like "02/26/2026 09:12:07"
+    const parseTradingViewPerformanceTimestamp = (value) => {
+      if (!value) return null;
+      const ts = Number(value);
+      if (Number.isFinite(ts) && Math.abs(ts) > 1e10) {
+        const parsed = new Date(ts);
+        return isNaN(parsed.getTime()) ? null : parsed.toISOString();
+      }
+      return parseDateTime(value);
+    };
 
-    const entryTime = !isNaN(boughtTimestamp) ? new Date(boughtTimestamp) : null;
-    const exitTime = !isNaN(soldTimestamp) ? new Date(soldTimestamp) : null;
-    const tradeDate = entryTime ? new Date(entryTime.toISOString().split('T')[0]) : null;
+    let entryTime = null;
+    let exitTime = null;
+    if (row.boughtTimestamp) {
+      entryTime = parseTradingViewPerformanceTimestamp(row.boughtTimestamp);
+    }
+    if (row.soldTimestamp) {
+      exitTime = parseTradingViewPerformanceTimestamp(row.soldTimestamp);
+    }
+    const tradeDate = parseDate(row.boughtTimestamp) || (entryTime ? entryTime.split('T')[0] : null);
 
     // Determine side based on P&L and prices
     // If sellPrice > buyPrice and PnL > 0, it was a long trade
@@ -989,7 +1001,7 @@ const brokerParsers = {
       side: side,
       commission: 0, // No commission data in this format
       fees: 0,
-      broker: 'tradingview_performance',
+      broker: 'tradingview',
       profitLoss: pnl,
       notes: `Duration: ${row.duration || 'N/A'}`,
       ...instrumentData
@@ -1262,7 +1274,50 @@ function applyTradeGrouping(trades, settings) {
  * @param {Array} unresolvedCusips - Optional unresolved CUSIPs
  * @returns {Object} - { trades, diagnostics, unresolvedCusips }
  */
-function wrapResultWithDiagnostics(trades, diagnostics, unresolvedCusips = []) {
+/**
+ * Convert all naive datetime fields in trades to UTC using the user's timezone.
+ * Fields that already have a Z suffix or timezone offset are left unchanged.
+ *
+ * @param {Array} trades - Array of trade objects
+ * @param {string} timezone - IANA timezone (e.g., "America/New_York")
+ * @returns {Array} trades with datetime fields converted to UTC
+ */
+function convertTradeDatetimesToUTC(trades, timezone) {
+  if (!timezone || timezone === 'UTC' || !trades || trades.length === 0) {
+    return trades;
+  }
+
+  const datetimeFields = ['entryTime', 'exitTime', 'entry_time', 'exit_time'];
+  const executionDatetimeFields = ['datetime', 'time', 'entry_time', 'exit_time', 'entryTime', 'exitTime'];
+
+  for (const trade of trades) {
+    for (const field of datetimeFields) {
+      if (trade[field] && typeof trade[field] === 'string') {
+        trade[field] = localToUTC(trade[field], timezone);
+      }
+    }
+
+    const executions = trade.executions || trade.execution;
+    if (Array.isArray(executions)) {
+      for (const exec of executions) {
+        for (const field of executionDatetimeFields) {
+          if (exec[field] && typeof exec[field] === 'string') {
+            exec[field] = localToUTC(exec[field], timezone);
+          }
+        }
+      }
+    }
+  }
+
+  return trades;
+}
+
+function wrapResultWithDiagnostics(trades, diagnostics, unresolvedCusips = [], userTimezone = null) {
+  if (userTimezone && userTimezone !== 'UTC') {
+    console.log(`[TIMEZONE] Converting trade datetimes from ${userTimezone} to UTC`);
+    convertTradeDatetimesToUTC(trades, userTimezone);
+  }
+
   // Update diagnostics with final counts
   diagnostics.parsedRows = trades.length;
 
@@ -1321,9 +1376,11 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
     }
 
     const existingPositions = context.existingPositions || {};
+    const userTimezone = context.userTimezone || null;
     console.log(`\n=== IMPORT CONTEXT ===`);
     console.log(`Broker format: ${broker}`);
     console.log(`User ID: ${context.userId || 'NOT PROVIDED'}`);
+    console.log(`User timezone: ${userTimezone || 'NOT PROVIDED (will store as-is)'}`);
     console.log(`Existing open positions: ${Object.keys(existingPositions).length}`);
     Object.entries(existingPositions).forEach(([symbol, position]) => {
       console.log(`  ${symbol}: ${position.side} ${position.quantity} shares @ $${position.entryPrice}`);
@@ -1341,6 +1398,24 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
     if (csvString.startsWith('\uFEFF')) {
       csvString = csvString.slice(1);
       console.log('Removed UTF-8 BOM from CSV file');
+    }
+
+    // TradingView sub-format detection: inspect CSV headers to route to the correct parser
+    // All TradingView formats come in as broker='tradingview', we determine the sub-format here
+    if (broker === 'tradingview') {
+      const headerLine = csvString.split('\n').find(line => line.trim().length > 0) || '';
+      const tvHeaders = headerLine.toLowerCase();
+      if (tvHeaders.includes('buyfillid') && tvHeaders.includes('sellfillid') && tvHeaders.includes('pnl')) {
+        broker = 'tradingview_performance';
+        console.log('[TRADINGVIEW] Sub-format detected: Performance export');
+      } else if (tvHeaders.includes('buyprice') && tvHeaders.includes('sellprice') &&
+                 tvHeaders.includes('status') && !tvHeaders.includes('buyfillid')) {
+        broker = 'tradingview_paper';
+        console.log('[TRADINGVIEW] Sub-format detected: Paper trading');
+      } else {
+        console.log('[TRADINGVIEW] Sub-format detected: Futures transactions');
+      }
+      diagnostics.detectedBroker = 'tradingview';
     }
 
     // Handle Lightspeed CSV files that start with a title row
@@ -1799,7 +1874,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(result, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     if (broker === 'schwab') {
@@ -1812,7 +1887,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       // Trade grouping would incorrectly merge multiple round trips on the same day
       console.log('[INFO] Skipping trade grouping for Schwab (already grouped by round-trip logic)');
 
-      return wrapResultWithDiagnostics(result, diagnostics);
+      return wrapResultWithDiagnostics(result, diagnostics, [], userTimezone);
     }
 
     if (broker === 'thinkorswim') {
@@ -1827,7 +1902,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(result, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     if (broker === 'papermoney') {
@@ -1842,7 +1917,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(result, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     if (broker === 'tradingview') {
@@ -1857,14 +1932,14 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(result, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     if (broker === 'tradingview_paper') {
       console.log('Starting TradingView Paper Trading parsing');
       const result = await parseTradingViewPaperTrades(records, context);
       console.log('Finished TradingView Paper Trading parsing');
-      return wrapResultWithDiagnostics(result, diagnostics);
+      return wrapResultWithDiagnostics(result, diagnostics, [], userTimezone);
     }
 
     if (broker === 'ibkr' || broker === 'ibkr_trade_confirmation') {
@@ -1872,7 +1947,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       const tradeGroupingSettings = context.tradeGroupingSettings || { enabled: true, timeGapMinutes: 60 };
       const result = await parseIBKRTransactions(records, existingPositions, tradeGroupingSettings, context);
       console.log('Finished IBKR transaction parsing');
-      return wrapResultWithDiagnostics(result, diagnostics);
+      return wrapResultWithDiagnostics(result, diagnostics, [], userTimezone);
     }
 
     if (broker === 'webull') {
@@ -1887,7 +1962,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(result, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     if (broker === 'tradovate') {
@@ -1900,7 +1975,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       // Trade grouping would incorrectly merge multiple round trips when exit and new entry have same timestamp
       console.log('[INFO] Skipping trade grouping for Tradovate (already grouped by round-trip logic)');
 
-      return wrapResultWithDiagnostics(result, diagnostics);
+      return wrapResultWithDiagnostics(result, diagnostics, [], userTimezone);
     }
 
     if (broker === 'questrade') {
@@ -1912,7 +1987,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       // and trade grouping would incorrectly merge partial close trades back together
       console.log('[INFO] Skipping trade grouping for Questrade (already grouped by round-trip logic)');
 
-      return wrapResultWithDiagnostics(result, diagnostics);
+      return wrapResultWithDiagnostics(result, diagnostics, [], userTimezone);
     }
 
     if (broker === 'tastytrade') {
@@ -1923,7 +1998,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       // Skip trade grouping for Tastytrade - the parser already handles position tracking
       console.log('[INFO] Skipping trade grouping for Tastytrade (already grouped by round-trip logic)');
 
-      return wrapResultWithDiagnostics(result, diagnostics);
+      return wrapResultWithDiagnostics(result, diagnostics, [], userTimezone);
     }
 
     // TradeStation exports transactions, needs position tracking
@@ -2015,7 +2090,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       }
 
       console.log(`[SUCCESS] Parsed ${completedTrades.length} TradeStation trades`);
-      return wrapResultWithDiagnostics(completedTrades, diagnostics);
+      return wrapResultWithDiagnostics(completedTrades, diagnostics, [], userTimezone);
     }
 
     // ProjectX provides completed trades (not transactions), use simple parsing
@@ -2066,7 +2141,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(trades, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     // TradingView Performance also provides completed trades (not transactions), use simple parsing
@@ -2102,7 +2177,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(trades, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     // Generic parser - Use transaction-based processing for better position tracking
@@ -2122,7 +2197,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
         finalTrades = applyTradeGrouping(result, tradeGroupingSettings);
       }
 
-      return wrapResultWithDiagnostics(finalTrades, diagnostics);
+      return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
     }
 
     // Fallback to simple row-by-row parsing (legacy mode)
@@ -2256,7 +2331,7 @@ async function parseCSV(fileBuffer, broker = 'generic', context = {}) {
       finalTrades = applyTradeGrouping(trades, tradeGroupingSettings);
     }
 
-    return wrapResultWithDiagnostics(finalTrades, diagnostics);
+    return wrapResultWithDiagnostics(finalTrades, diagnostics, [], userTimezone);
   } catch (error) {
     throw new Error(`CSV parsing failed: ${error.message}`);
   }
@@ -4743,7 +4818,10 @@ async function parseTradingViewTransactions(records, existingPositions = {}, con
     return undefined;
   };
 
-  // First, parse all filled orders
+  // Some TradingView transaction exports omit the Status column entirely.
+  // In that format, all rows represent executed fills and should be parsed.
+  const fileHasStatusColumn = records.some(record => getField(record, 'Status') !== undefined);
+
   let rowIndex = 0;
   for (const record of records) {
     rowIndex++;
@@ -4752,17 +4830,17 @@ async function parseTradingViewTransactions(records, existingPositions = {}, con
       const side = getField(record, 'Side') ? getField(record, 'Side').toLowerCase() : '';
       const statusRaw = getField(record, 'Status') || '';
       const status = statusRaw.toLowerCase();
-      const quantity = Math.abs(parseInteger(getField(record, 'Qty')));
-      const fillPrice = parseNumeric(getField(record, 'Fill Price'));
+      const quantity = Math.abs(parseInteger(getField(record, 'Filled Qty') || getField(record, 'Qty')));
+      const fillPrice = parseNumeric(getField(record, 'Fill Price') || getField(record, 'Avg Fill Price'));
       const commission = parseNumeric(getField(record, 'Commission'));
       const placingTime = getField(record, 'Placing Time') || '';
-      const closingTime = getField(record, 'Closing Time') || placingTime;
+      const closingTime = getField(record, 'Closing Time') || getField(record, 'Update Time') || placingTime;
       const orderId = getField(record, 'Order ID') || '';
       const orderType = getField(record, 'Type') || '';
       const leverage = getField(record, 'Leverage') || '';
 
-      // Only process filled orders
-      if (status !== 'filled') {
+      // Only process filled orders - if no Status column, treat all rows as filled
+      if (fileHasStatusColumn && status !== 'filled') {
         console.log(`Skipping non-filled order: ${statusRaw}`);
         if (diagnostics) {
           diagnostics.skippedRows++;
@@ -5276,7 +5354,7 @@ async function parseTradingViewPaperTrades(records, context = {}) {
         fees: 0,
         pnl,
         profitLoss: pnl,
-        broker: 'TradingView',
+        broker: 'tradingview',
         accountIdentifier,
         notes: leverage ? `Leverage: ${leverage}` : '',
         executions: [
