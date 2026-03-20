@@ -298,6 +298,29 @@ function localToUTC(naiveDatetime, timezone) {
   }
 }
 
+/**
+ * Parse a timestamp (string or number) to Unix milliseconds.
+ * Naive datetime strings like "yyyy-MM-dd HH:mm:ss" (no T, no Z) are assumed
+ * to be in exchange timezone (America/New_York) — TradingView/Pine bar times.
+ *
+ * @param {string|number} ts - Timestamp: Unix ms, Unix seconds, or datetime string
+ * @param {string} [assumedTimezone] - For naive strings only (default: America/New_York)
+ * @returns {number} Unix milliseconds, or NaN if invalid
+ */
+function parseTimestampToMs(ts, assumedTimezone = ET_TZ) {
+  if (ts == null) return NaN;
+  const numericTs = typeof ts === 'string' && /^\d+$/.test(ts) ? Number(ts) : ts;
+  if (typeof numericTs === 'number') {
+    return numericTs < 1e10 ? numericTs * 1000 : numericTs;
+  }
+  const str = String(ts);
+  if (!str.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(str) && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(str)) {
+    const utcStr = localToUTC(str.replace('T', ' ').substring(0, 19), assumedTimezone);
+    return new Date(utcStr).getTime();
+  }
+  return new Date(ts).getTime();
+}
+
 module.exports = {
   getUserTimezone,
   getDateInTimezone,
@@ -310,4 +333,5 @@ module.exports = {
   deriveSessionPhase,
   getETDate,
   localToUTC,
+  parseTimestampToMs,
 };

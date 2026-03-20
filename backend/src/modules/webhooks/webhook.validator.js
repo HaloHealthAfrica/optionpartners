@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { detectIndicatorSource } = require('./indicator-detector');
+const { parseTimestampToMs } = require('../../utils/timezone');
 
 /**
  * @typedef {Object} WebhookValidationResult
@@ -213,14 +214,7 @@ function validateTimestamp(payload, source) {
   const ts = payload.time || payload.timestamp || payload.event_ts_ms || payload.fired_at || payload.meta?.ts;
   if (!ts) return { valid: true };
 
-  let payloadTime;
-  const numericTs = typeof ts === 'string' && /^\d+$/.test(ts) ? Number(ts) : ts;
-  if (typeof numericTs === 'number') {
-    // Unix seconds vs milliseconds: if < 10 billion, treat as seconds
-    payloadTime = numericTs < 1e10 ? numericTs * 1000 : numericTs;
-  } else {
-    payloadTime = new Date(ts).getTime();
-  }
+  const payloadTime = parseTimestampToMs(ts);
 
   if (isNaN(payloadTime)) {
     return { valid: false, error: 'Invalid timestamp format' };

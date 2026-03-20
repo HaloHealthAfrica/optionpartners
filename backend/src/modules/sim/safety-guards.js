@@ -2,7 +2,7 @@
 
 const db = require('../../config/database');
 const logger = require('../../utils/logger');
-const { isWithinTradingHours, getETDate } = require('../../utils/timezone');
+const { isWithinTradingHours, getETDate, parseTimestampToMs } = require('../../utils/timezone');
 
 /**
  * @typedef {Object} SafetyConfig
@@ -149,13 +149,7 @@ class SafetyGuards {
     if (signal.meta?.originalPayload) {
       const ts = signal.meta.originalPayload.time || signal.meta.originalPayload.timestamp;
       if (ts) {
-        let payloadTimeMs;
-        const numericTs = typeof ts === 'string' && /^\d+$/.test(ts) ? Number(ts) : ts;
-        if (typeof numericTs === 'number') {
-          payloadTimeMs = numericTs < 1e10 ? numericTs * 1000 : numericTs;
-        } else {
-          payloadTimeMs = new Date(ts).getTime();
-        }
+        const payloadTimeMs = parseTimestampToMs(ts);
         const age = Date.now() - payloadTimeMs;
         if (!isNaN(age) && age > this.config.maxSignalAgeMs) {
           violations.push(`Signal is stale: ${Math.round(age / 1000)}s old (max ${this.config.maxSignalAgeMs / 1000}s)`);
