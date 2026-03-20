@@ -886,6 +886,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useSimulationStore } from '@/stores/simulation'
 import { useAIStore } from '@/stores/ai'
+import { useAuthStore } from '@/stores/auth'
 import { ArrowPathIcon, XMarkIcon, BoltIcon, InboxIcon, SparklesIcon, PaperAirplaneIcon } from '@heroicons/vue/24/outline'
 import AIReportRenderer from '@/components/ai/AIReportRenderer.vue'
 import AIWebhookReport from '@/components/ai/AIWebhookReport.vue'
@@ -893,6 +894,9 @@ import api from '@/services/api'
 
 const store = useSimulationStore()
 const aiStore = useAIStore()
+const authStore = useAuthStore()
+const isAdmin = computed(() => authStore.user?.role === 'admin' || authStore.user?.role === 'owner')
+const webhookParams = computed(() => (isAdmin.value ? { all: 'true' } : {}))
 const selectedEvent = ref(null)
 const selectedTradedSignal = ref(null)
 const processing = ref(false)
@@ -1091,7 +1095,7 @@ async function retryEvent(event) {
   retrying.value = true
   try {
     await store.retryWebhook(event.id)
-    await Promise.all([store.fetchWebhookEvents(), fetchStats()])
+    await Promise.all([store.fetchWebhookEvents(webhookParams.value), fetchStats()])
   } catch (err) {
     console.error('[WEBHOOK] Retry failed:', err)
   } finally {
@@ -1121,7 +1125,8 @@ function getDetailSummary(event) {
 
 async function fetchStats() {
   try {
-    const { data } = await api.get('/webhooks/stats')
+    const params = webhookParams.value
+    const { data } = await api.get('/webhooks/stats', { params })
     stats.value = data
   } catch { /* ignore */ }
 }
@@ -1221,12 +1226,12 @@ function filterByStatus(status) {
   }
   store.filters.webhookStatus = status
   store.webhookPagination.page = 1
-  store.fetchWebhookEvents()
+  store.fetchWebhookEvents(webhookParams.value)
 }
 
 function changePage(delta) {
   store.webhookPagination.page += delta
-  store.fetchWebhookEvents()
+  store.fetchWebhookEvents(webhookParams.value)
 }
 
 async function refresh() {
@@ -1239,7 +1244,7 @@ async function refresh() {
         store.fetchTradedSignalsSummary()
       )
     } else {
-      fetches.push(store.fetchWebhookEvents())
+      fetches.push(store.fetchWebhookEvents(webhookParams.value))
     }
     await Promise.all(fetches)
   } finally {
@@ -1251,7 +1256,7 @@ async function processAll() {
   processing.value = true
   try {
     await store.processPending()
-    await Promise.all([store.fetchWebhookEvents(), fetchStats()])
+    await Promise.all([store.fetchWebhookEvents(webhookParams.value), fetchStats()])
   } finally {
     processing.value = false
   }
@@ -1280,7 +1285,7 @@ watch(autoRefresh, (val) => {
 
 onMounted(async () => {
   await Promise.all([
-    store.fetchWebhookEvents(),
+    store.fetchWebhookEvents(webhookParams.value),
     fetchStats(),
     store.fetchTradedSignals(),
     store.fetchTradedSignalsSummary(),

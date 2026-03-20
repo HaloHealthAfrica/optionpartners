@@ -273,13 +273,16 @@ async function receiveTradingViewWebhook(req, res) {
 
 /**
  * GET /api/webhooks
- * List webhook events for the authenticated user
+ * List webhook events for the authenticated user.
+ * Admin: ?all=true returns events across all users.
  */
 async function listWebhooks(req, res) {
   try {
-    const { status, page, limit } = req.query;
+    const { status, page, limit, all } = req.query;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
+    const allUsers = isAdmin && all === 'true';
     const result = await webhookService.list({
-      userId: req.user.id,
+      userId: allUsers ? null : req.user.id,
       status,
       page: parseInt(page) || 1,
       limit: parseInt(limit) || 25,
@@ -294,16 +297,21 @@ async function listWebhooks(req, res) {
 
 /**
  * GET /api/webhooks/stats
- * Get webhook status counts for the authenticated user
+ * Get webhook status counts for the authenticated user.
+ * Admin: ?all=true returns counts across all users.
  */
 async function getWebhookStats(req, res) {
   try {
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
+    const allUsers = isAdmin && req.query.all === 'true';
     const result = await db.query(
-      `SELECT status, COUNT(*)::int as count
-       FROM webhook_events
-       WHERE user_id = $1
-       GROUP BY status`,
-      [req.user.id]
+      allUsers
+        ? `SELECT status, COUNT(*)::int as count FROM webhook_events GROUP BY status`
+        : `SELECT status, COUNT(*)::int as count
+           FROM webhook_events
+           WHERE user_id = $1
+           GROUP BY status`,
+      allUsers ? [] : [req.user.id]
     );
     const counts = { RECEIVED: 0, PROCESSED: 0, REJECTED: 0, TEST_PING: 0 };
     let total = 0;

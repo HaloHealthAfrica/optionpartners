@@ -724,6 +724,13 @@ async function getPipelineObservatory(req, res) {
   try {
     const userId = req.user.id;
     const timeRangeHours = parseInt(req.query.timeRangeHours) || 24;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
+    const allUsers = isAdmin && req.query.all === 'true';
+
+    const webhookFilter = allUsers
+      ? 'received_at > NOW() - INTERVAL \'1 hour\' * $1'
+      : 'user_id = $1 AND received_at > NOW() - INTERVAL \'1 hour\' * $2';
+    const webhookParams = allUsers ? [timeRangeHours] : [userId, timeRangeHours];
 
     const [
       processorStatus,
@@ -751,16 +758,16 @@ async function getPipelineObservatory(req, res) {
            COUNT(*) FILTER (WHERE status = 'REJECTED')::int AS rejected,
            COUNT(*) FILTER (WHERE status = 'TEST_PING')::int AS test_ping
          FROM webhook_events
-         WHERE user_id = $1 AND received_at > NOW() - INTERVAL '1 hour' * $2`,
-        [userId, timeRangeHours]
+         WHERE ${webhookFilter}`,
+        webhookParams
       ),
       db.query(
         `SELECT
            COUNT(*) FILTER (WHERE status = 'REJECTED' AND error_message LIKE 'Processing error:%' AND COALESCE(retry_count, 0) < 3)::int AS retryable,
            COUNT(*) FILTER (WHERE status = 'REJECTED' AND error_message LIKE 'Processing error:%' AND COALESCE(retry_count, 0) >= 3)::int AS exhausted
          FROM webhook_events
-         WHERE user_id = $1 AND received_at > NOW() - INTERVAL '1 hour' * $2`,
-        [userId, timeRangeHours]
+         WHERE ${webhookFilter}`,
+        webhookParams
       ),
       db.query(
         `SELECT symbol, macro_updated_at,
@@ -776,8 +783,10 @@ async function getPipelineObservatory(req, res) {
       Promise.resolve(dataServiceProxy.getConnectivityState()),
       (async () => {
         const recentIP = await db.query(
-          `SELECT client_ip FROM webhook_events WHERE user_id = $1 AND client_ip IS NOT NULL ORDER BY received_at DESC LIMIT 1`,
-          [userId]
+          allUsers
+            ? `SELECT client_ip FROM webhook_events WHERE client_ip IS NOT NULL ORDER BY received_at DESC LIMIT 1`
+            : `SELECT client_ip FROM webhook_events WHERE user_id = $1 AND client_ip IS NOT NULL ORDER BY received_at DESC LIMIT 1`,
+          allUsers ? [] : [userId]
         );
         const ip = recentIP.rows[0]?.client_ip;
         const rateLimitStatus = ip ? await rateLimitService.getRateLimitStatus('ip', ip) : null;

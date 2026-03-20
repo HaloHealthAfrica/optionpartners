@@ -299,6 +299,8 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ArrowPathIcon } from '@heroicons/vue/24/outline'
 import api from '@/services/api'
+import { useAuthStore } from '@/stores/auth'
+const authStore = useAuthStore()
 
 const data = ref(null)
 const loading = ref(false)
@@ -337,9 +339,10 @@ async function fetch() {
   loading.value = true
   error.value = null
   try {
-    const { data: res } = await api.get('/sim/pipeline-observatory', {
-      params: { timeRangeHours: 24 },
-    })
+    const isAdmin = authStore.user?.role === 'admin' || authStore.user?.role === 'owner'
+    const params = { timeRangeHours: 24 }
+    if (isAdmin) params.all = 'true'
+    const { data: res } = await api.get('/sim/pipeline-observatory', { params })
     data.value = res
   } catch (err) {
     error.value = err.response?.data?.error || err.message
