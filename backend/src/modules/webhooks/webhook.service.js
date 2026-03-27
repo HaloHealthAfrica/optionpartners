@@ -103,15 +103,85 @@ class WebhookService {
       errorMessage = payloadResult.error;
     }
 
-    // Atomic insert with dedupe: ON CONFLICT returns existing row
     const id = uuidv4();
-    const result = await db.query(
-      `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id, client_ip, user_agent, api_key_id)
-       VALUES ($1, 'tradingview', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       ON CONFLICT (dedupe_key) DO NOTHING
-       RETURNING *`,
-      [id, detectedSource, JSON.stringify(rawPayload), signatureValid, dedupeKey, status, errorMessage, userId, clientIP, userAgent, apiKeyId]
-    );
+    let rawPayloadJson = JSON.stringify(rawPayload);
+    /** Pre-compute enrichment so RECEIVED rows never appear without enrichment (avoids processor race). */
+    let preEnrichment = null;
+    if (status === 'RECEIVED' && detectedSource === 'GOLF_MEDIC') {
+      try {
+        preEnrichment = await golfmedicService.enrichPayloadForTradingView(rawPayload, id);
+        logger.info(`[TradingView→GolfMedic] pre-insert enrich ${id} status=${preEnrichment.enrichment_status}`, 'webhook');
+      } catch (err) {
+        logger.error(`GolfMedic TradingView enrichment failed: ${err.message}`, err, 'webhook');
+        Sentry.captureException(err, { tags: { module: 'webhook-service', phase: 'golfmedic-enrichment' } });
+        preEnrichment = {
+          enrichment_status: 'BLOCKED',
+          enrichment: { reason: 'enrichment_exception', message: err.message },
+          provider_context: { internal_signal_id: id, ingest_path: 'tradingview', error: true },
+        };
+      }
+    } else if (status === 'RECEIVED' && detectedSource === 'MARUBOZU') {
+      try {
+        const m = await marubozuService.enrichSingleEntryForTradingView(rawPayload, id);
+        if (m.mergedPayload) {
+          rawPayloadJson = JSON.stringify(m.mergedPayload);
+        }
+        preEnrichment = {
+          enrichment_status: m.enrichment_status,
+          enrichment: m.enrichment,
+          provider_context: m.provider_context,
+        };
+        logger.info(`[TradingView→Marubozu] pre-insert enrich ${id} status=${m.enrichment_status}`, 'webhook');
+      } catch (err) {
+        logger.error(`Marubozu TradingView enrichment failed: ${err.message}`, err, 'webhook');
+        Sentry.captureException(err, { tags: { module: 'webhook-service', phase: 'marubozu-enrichment' } });
+        preEnrichment = {
+          enrichment_status: 'BLOCKED',
+          enrichment: { reason: 'enrichment_exception', message: err.message },
+          provider_context: { internal_signal_id: id, ingest_path: 'tradingview', error: true },
+        };
+      }
+    }
+
+    let result;
+    if (preEnrichment) {
+      result = await db.query(
+        `INSERT INTO webhook_events (
+          id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message,
+          user_id, client_ip, user_agent, api_key_id,
+          enrichment_status, enrichment, provider_context
+        ) VALUES (
+          $1, 'tradingview', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+          $12, $13::jsonb, $14::jsonb
+        )
+        ON CONFLICT (dedupe_key) DO NOTHING
+        RETURNING *`,
+        [
+          id,
+          detectedSource,
+          rawPayloadJson,
+          signatureValid,
+          dedupeKey,
+          status,
+          errorMessage,
+          userId,
+          clientIP,
+          userAgent,
+          apiKeyId,
+          preEnrichment.enrichment_status,
+          JSON.stringify(preEnrichment.enrichment),
+          JSON.stringify(preEnrichment.provider_context),
+        ],
+      );
+    } else {
+      result = await db.query(
+        `INSERT INTO webhook_events (id, source, indicator_source, raw_payload, signature_valid, dedupe_key, status, error_message, user_id, client_ip, user_agent, api_key_id)
+         VALUES ($1, 'tradingview', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (dedupe_key) DO NOTHING
+         RETURNING *`,
+        [id, detectedSource, rawPayloadJson, signatureValid, dedupeKey, status, errorMessage, userId, clientIP, userAgent, apiKeyId],
+      );
+    }
 
     if (result.rows.length === 0) {
       const existing = await db.query(
@@ -125,65 +195,7 @@ class WebhookService {
     const event = result.rows[0];
     logger.info(`Webhook stored: ${id} status=${status}`, 'webhook');
 
-    if (status === 'RECEIVED') {
-      if (detectedSource === 'GOLF_MEDIC') {
-        try {
-          await this._enrichTradingViewGolfMedic(id, rawPayload);
-        } catch (err) {
-          logger.error(`GolfMedic TradingView enrichment failed: ${err.message}`, err, 'webhook');
-          Sentry.captureException(err, { tags: { module: 'webhook-service', phase: 'golfmedic-enrichment' } });
-        }
-      } else if (detectedSource === 'MARUBOZU') {
-        try {
-          await this._enrichTradingViewMarubozu(id, rawPayload);
-        } catch (err) {
-          logger.error(`Marubozu TradingView enrichment failed: ${err.message}`, err, 'webhook');
-          Sentry.captureException(err, { tags: { module: 'webhook-service', phase: 'marubozu-enrichment' } });
-        }
-      }
-    }
-
     return { event, isDuplicate: false };
-  }
-
-  async _enrichTradingViewGolfMedic(eventId, rawPayload) {
-    const { enrichment_status, enrichment, provider_context } =
-      await golfmedicService.enrichPayloadForTradingView(rawPayload, eventId);
-    await db.query(
-      `UPDATE webhook_events
-       SET enrichment_status = $2,
-           enrichment = $3::jsonb,
-           provider_context = $4::jsonb
-       WHERE id = $1`,
-      [eventId, enrichment_status, JSON.stringify(enrichment), JSON.stringify(provider_context)],
-    );
-    logger.info(`[TradingView→GolfMedic] enriched ${eventId} status=${enrichment_status}`, 'webhook');
-  }
-
-  async _enrichTradingViewMarubozu(eventId, rawPayload) {
-    const { enrichment_status, enrichment, provider_context, mergedPayload } =
-      await marubozuService.enrichSingleEntryForTradingView(rawPayload, eventId);
-    if (mergedPayload) {
-      await db.query(
-        `UPDATE webhook_events
-         SET enrichment_status = $2,
-             enrichment = $3::jsonb,
-             provider_context = $4::jsonb,
-             raw_payload = $5::jsonb
-         WHERE id = $1`,
-        [eventId, enrichment_status, JSON.stringify(enrichment), JSON.stringify(provider_context), JSON.stringify(mergedPayload)],
-      );
-    } else {
-      await db.query(
-        `UPDATE webhook_events
-         SET enrichment_status = $2,
-             enrichment = $3::jsonb,
-             provider_context = $4::jsonb
-         WHERE id = $1`,
-        [eventId, enrichment_status, JSON.stringify(enrichment), JSON.stringify(provider_context)],
-      );
-    }
-    logger.info(`[TradingView→Marubozu] enriched ${eventId} status=${enrichment_status}`, 'webhook');
   }
 
   /**
