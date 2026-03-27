@@ -7,6 +7,9 @@ const logger = require('../../utils/logger');
 const dataServiceProxy = require('../../services/dataServiceProxy');
 
 const ALLOWED_EVENTS = new Set(['ELITE_SETUP', 'SIGNAL_BULL', 'SIGNAL_BEAR', 'TFC_ALIGN', 'EXIT_SIGNAL']);
+
+/** Router never requires COMPLETE/PARTIAL for these — avoid slow data-service calls (TradingView ~3s timeout). */
+const GOLF_MEDIC_NO_MARKET_ENRICHMENT = new Set(['TFC_ALIGN', 'EXIT_SIGNAL']);
 const SYMBOL_ALLOWLIST = new Set(
   (process.env.GOLF_MEDIC_SYMBOL_ALLOWLIST || 'SPY,QQQ,IWM')
     .split(',')
@@ -279,6 +282,37 @@ async function runEnrichment(symbol) {
 }
 
 /**
+ * Allowlist + event-aware enrichment: TFC_ALIGN / EXIT_SIGNAL skip data-service (fast webhook ACK).
+ */
+async function resolveGolfMedicEnrichment(rawPayload, symbolUpper) {
+  if (!SYMBOL_ALLOWLIST.has(symbolUpper)) {
+    return {
+      enrichment_status: 'BLOCKED',
+      enrichment: {
+        reason: 'symbol_not_allowlisted',
+        symbol: symbolUpper,
+        allowlist: [...SYMBOL_ALLOWLIST],
+      },
+    };
+  }
+  const ev = String(rawPayload.event || '').toUpperCase();
+  if (GOLF_MEDIC_NO_MARKET_ENRICHMENT.has(ev)) {
+    return {
+      enrichment_status: 'SKIPPED',
+      enrichment: {
+        reason: 'no_market_snapshot_required',
+        event: ev,
+      },
+    };
+  }
+  const enriched = await runEnrichment(symbolUpper);
+  return {
+    enrichment_status: enriched.enrichment_status,
+    enrichment: enriched.enrichment,
+  };
+}
+
+/**
  * Build enrichment + provider_context for POST /tradingview GolfMedic rows
  * (same quote/chain policy as POST /golfmedic).
  */
@@ -301,22 +335,7 @@ async function enrichPayloadForTradingView(rawPayload, webhookEventId) {
     },
   };
 
-  const allowlisted = SYMBOL_ALLOWLIST.has(symbolUpper);
-  let enrichment_status = 'SKIPPED';
-  let enrichment = {};
-
-  if (!allowlisted) {
-    enrichment_status = 'BLOCKED';
-    enrichment = {
-      reason: 'symbol_not_allowlisted',
-      symbol: symbolUpper,
-      allowlist: [...SYMBOL_ALLOWLIST],
-    };
-  } else {
-    const enriched = await runEnrichment(symbolUpper);
-    enrichment_status = enriched.enrichment_status;
-    enrichment = enriched.enrichment;
-  }
+  const { enrichment_status, enrichment } = await resolveGolfMedicEnrichment(rawPayload, symbolUpper);
 
   return { enrichment_status, enrichment, provider_context };
 }
@@ -373,22 +392,7 @@ class GolfMedicService {
       },
     };
 
-    const allowlisted = SYMBOL_ALLOWLIST.has(symbolUpper);
-    let enrichment_status = 'SKIPPED';
-    let enrichment = {};
-
-    if (!allowlisted) {
-      enrichment_status = 'BLOCKED';
-      enrichment = {
-        reason: 'symbol_not_allowlisted',
-        symbol: symbolUpper,
-        allowlist: [...SYMBOL_ALLOWLIST],
-      };
-    } else {
-      const enriched = await runEnrichment(symbolUpper);
-      enrichment_status = enriched.enrichment_status;
-      enrichment = enriched.enrichment;
-    }
+    const { enrichment_status, enrichment } = await resolveGolfMedicEnrichment(rawPayload, symbolUpper);
 
     const result = await db.query(
       `INSERT INTO webhook_events (
