@@ -69,17 +69,20 @@ class WebhookMetricsService {
    */
   async _updateLatencyStats(stage, latencyMs, success) {
     try {
+      const ms = Math.round(Number(latencyMs));
+      if (Number.isNaN(ms) || ms < 0) return;
+
       await db.query(
         `INSERT INTO webhook_latency_stats
          (stage, success, total_operations, total_latency_ms, min_latency_ms, max_latency_ms, updated_at)
-         VALUES ($1, $2, 1, $3, $3, $3, NOW())
+         VALUES ($1, $2, 1, $3::bigint, $3::bigint, $3::bigint, NOW())
          ON CONFLICT (stage, success) DO UPDATE SET
            total_operations = webhook_latency_stats.total_operations + 1,
-           total_latency_ms = webhook_latency_stats.total_latency_ms + $3,
-           min_latency_ms = LEAST(webhook_latency_stats.min_latency_ms, $3),
-           max_latency_ms = GREATEST(webhook_latency_stats.max_latency_ms, $3),
+           total_latency_ms = webhook_latency_stats.total_latency_ms + $3::bigint,
+           min_latency_ms = LEAST(webhook_latency_stats.min_latency_ms, $3::bigint),
+           max_latency_ms = GREATEST(webhook_latency_stats.max_latency_ms, $3::bigint),
            updated_at = NOW()`,
-        [stage, success, latencyMs]
+        [stage, success, ms]
       );
     } catch (error) {
       logger.error(`Failed to update latency stats: ${error.message}`, 'webhook-metrics');

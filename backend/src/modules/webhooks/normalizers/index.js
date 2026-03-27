@@ -11,6 +11,8 @@ const pivotMb = require('./pivot-mb.normalizer');
 const squeezePro = require('./squeeze-pro.normalizer');
 const reversal = require('./reversal.normalizer');
 const crt = require('./crt.normalizer');
+const golfmedic = require('./golfmedic.normalizer');
+const marubozu = require('./marubozu.normalizer');
 const generic = require('./generic.normalizer');
 
 /**
@@ -41,6 +43,8 @@ const NORMALIZERS = {
   SQUEEZE_PRO: squeezePro,
   REVERSAL: reversal,
   CRT: crt,
+  GOLF_MEDIC: golfmedic,
+  MARUBOZU: marubozu,
   UNKNOWN: generic,
 };
 

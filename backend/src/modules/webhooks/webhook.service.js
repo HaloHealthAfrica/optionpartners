@@ -7,6 +7,8 @@ const Sentry = require('@sentry/node');
 const { verifySignature, generateDedupeKey, validateTimestamp, validatePayload } = require('./webhook.validator');
 const { detectIndicatorSource, isMarketDataType } = require('./indicator-detector');
 const symbolStateService = require('../sim/symbol-state.service');
+const golfmedicService = require('./golfmedic.service');
+const marubozuService = require('./marubozu.service');
 
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';
 let _sourceColumnCache = null;
@@ -123,7 +125,65 @@ class WebhookService {
     const event = result.rows[0];
     logger.info(`Webhook stored: ${id} status=${status}`, 'webhook');
 
+    if (status === 'RECEIVED') {
+      if (detectedSource === 'GOLF_MEDIC') {
+        try {
+          await this._enrichTradingViewGolfMedic(id, rawPayload);
+        } catch (err) {
+          logger.error(`GolfMedic TradingView enrichment failed: ${err.message}`, err, 'webhook');
+          Sentry.captureException(err, { tags: { module: 'webhook-service', phase: 'golfmedic-enrichment' } });
+        }
+      } else if (detectedSource === 'MARUBOZU') {
+        try {
+          await this._enrichTradingViewMarubozu(id, rawPayload);
+        } catch (err) {
+          logger.error(`Marubozu TradingView enrichment failed: ${err.message}`, err, 'webhook');
+          Sentry.captureException(err, { tags: { module: 'webhook-service', phase: 'marubozu-enrichment' } });
+        }
+      }
+    }
+
     return { event, isDuplicate: false };
+  }
+
+  async _enrichTradingViewGolfMedic(eventId, rawPayload) {
+    const { enrichment_status, enrichment, provider_context } =
+      await golfmedicService.enrichPayloadForTradingView(rawPayload, eventId);
+    await db.query(
+      `UPDATE webhook_events
+       SET enrichment_status = $2,
+           enrichment = $3::jsonb,
+           provider_context = $4::jsonb
+       WHERE id = $1`,
+      [eventId, enrichment_status, JSON.stringify(enrichment), JSON.stringify(provider_context)],
+    );
+    logger.info(`[TradingView→GolfMedic] enriched ${eventId} status=${enrichment_status}`, 'webhook');
+  }
+
+  async _enrichTradingViewMarubozu(eventId, rawPayload) {
+    const { enrichment_status, enrichment, provider_context, mergedPayload } =
+      await marubozuService.enrichSingleEntryForTradingView(rawPayload, eventId);
+    if (mergedPayload) {
+      await db.query(
+        `UPDATE webhook_events
+         SET enrichment_status = $2,
+             enrichment = $3::jsonb,
+             provider_context = $4::jsonb,
+             raw_payload = $5::jsonb
+         WHERE id = $1`,
+        [eventId, enrichment_status, JSON.stringify(enrichment), JSON.stringify(provider_context), JSON.stringify(mergedPayload)],
+      );
+    } else {
+      await db.query(
+        `UPDATE webhook_events
+         SET enrichment_status = $2,
+             enrichment = $3::jsonb,
+             provider_context = $4::jsonb
+         WHERE id = $1`,
+        [eventId, enrichment_status, JSON.stringify(enrichment), JSON.stringify(provider_context)],
+      );
+    }
+    logger.info(`[TradingView→Marubozu] enriched ${eventId} status=${enrichment_status}`, 'webhook');
   }
 
   /**

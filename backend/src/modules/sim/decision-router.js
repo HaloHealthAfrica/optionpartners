@@ -32,7 +32,9 @@ const { assertSimMode } = require('../../config/tradingMode');
  * Sources that trigger trade evaluation.
  * All other sources update SymbolState only (context providers).
  */
-const TRADE_TRIGGERS = new Set(['SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'SQUEEZE_PRO', 'REVERSAL', 'CRT', 'SATY_PHASE']);
+const TRADE_TRIGGERS = new Set([
+  'SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'SQUEEZE_PRO', 'REVERSAL', 'CRT', 'SATY_PHASE', 'GOLF_MEDIC', 'MARUBOZU',
+]);
 
 /**
  * @typedef {Object} DecisionResult
@@ -143,6 +145,109 @@ class DecisionRouter {
         indicatorSource,
         contextUpdateOnly: true,
       };
+    }
+
+    // ── Phase 0.75: GolfMedic — TFC snapshot is context-only; entries require COMPLETE enrichment ──
+    if (indicatorSource === 'GOLF_MEDIC') {
+      const ev = String(webhookPayload.event || '').toUpperCase();
+      if (ev === 'TFC_ALIGN') {
+        return {
+          approved: false,
+          reason: '[GOLF_MEDIC] TFC_ALIGN is a context snapshot — no trade',
+          indicatorSource,
+          contextUpdateOnly: true,
+        };
+      }
+
+      if (ev !== 'EXIT_SIGNAL') {
+        if (!webhookEventId) {
+          return {
+            approved: false,
+            reason: 'GOLF_MEDIC: missing webhook_event_id',
+            indicatorSource,
+          };
+        }
+        const { rows: enrRows } = await db.query(
+          'SELECT enrichment_status FROM webhook_events WHERE id = $1',
+          [webhookEventId],
+        );
+        const enrStatus = enrRows[0]?.enrichment_status;
+        if (enrStatus !== 'COMPLETE' && enrStatus !== 'PARTIAL') {
+          return {
+            approved: false,
+            reason: `GOLF_MEDIC: enrichment_status must be COMPLETE or PARTIAL (got ${enrStatus || 'null'})`,
+            indicatorSource,
+          };
+        }
+
+        const grade = String(webhookPayload.grade || '').toUpperCase();
+        const convRaw = parseInt(webhookPayload.conviction, 10);
+        if (grade === 'B' && (!Number.isFinite(convRaw) || convRaw < 4)) {
+          return {
+            approved: false,
+            reason: 'GOLF_MEDIC: B-grade requires conviction >= 4',
+            indicatorSource,
+          };
+        }
+
+        const tq = (webhookPayload.trend_context && webhookPayload.trend_context.trend_quality)
+          || (webhookPayload.trendContext && webhookPayload.trendContext.trend_quality)
+          || null;
+        const dirU = String(webhookPayload.direction || '').toUpperCase();
+        if (tq === 'STRONG_BEAR' && dirU === 'LONG') {
+          return {
+            approved: false,
+            reason: 'GOLF_MEDIC: STRONG_BEAR trend_context conflicts with LONG',
+            indicatorSource,
+          };
+        }
+        if (tq === 'STRONG_BULL' && dirU === 'SHORT') {
+          return {
+            approved: false,
+            reason: 'GOLF_MEDIC: STRONG_BULL trend_context conflicts with SHORT',
+            indicatorSource,
+          };
+        }
+      }
+    }
+
+    if (indicatorSource === 'MARUBOZU') {
+      if (!webhookEventId) {
+        return {
+          approved: false,
+          reason: 'MARUBOZU: missing webhook_event_id',
+          indicatorSource,
+        };
+      }
+      const { rows: enrRowsMz } = await db.query(
+        'SELECT enrichment_status FROM webhook_events WHERE id = $1',
+        [webhookEventId],
+      );
+      const enrMz = enrRowsMz[0]?.enrichment_status;
+      if (enrMz !== 'COMPLETE' && enrMz !== 'PARTIAL') {
+        return {
+          approved: false,
+          reason: `MARUBOZU: enrichment_status must be COMPLETE or PARTIAL (got ${enrMz || 'null'})`,
+          indicatorSource,
+        };
+      }
+      const dirMz = String(webhookPayload.direction || '').toUpperCase();
+      const biasMz = webhookPayload.context?.bias;
+      const bMz = typeof biasMz === 'number' ? biasMz : parseFloat(biasMz);
+      if (dirMz === 'CALL' && Number.isFinite(bMz) && bMz < 0) {
+        return {
+          approved: false,
+          reason: 'MARUBOZU: CALL conflicts with negative bias',
+          indicatorSource,
+        };
+      }
+      if (dirMz === 'PUT' && Number.isFinite(bMz) && bMz > 0) {
+        return {
+          approved: false,
+          reason: 'MARUBOZU: PUT conflicts with positive bias',
+          indicatorSource,
+        };
+      }
     }
 
     // ── Phase 1: Map webhook to signal ──
@@ -478,10 +583,12 @@ class DecisionRouter {
         }
 
         // ── Cooldown: enforce minimum interval between entries on the same symbol ──
-        const cooldownResult = await this._checkEntryCooldown(userId, effectiveSymbol);
-        if (!cooldownResult.allowed) {
-          await this._logRejection(userId, webhookEventId, signal, 'ENTRY_COOLDOWN', cooldownResult.reason, 'entry_cooldown');
-          return { approved: false, reason: cooldownResult.reason, signal, indicatorSource };
+        if (!bypassGuards) {
+          const cooldownResult = await this._checkEntryCooldown(userId, effectiveSymbol);
+          if (!cooldownResult.allowed) {
+            await this._logRejection(userId, webhookEventId, signal, 'ENTRY_COOLDOWN', cooldownResult.reason, 'entry_cooldown');
+            return { approved: false, reason: cooldownResult.reason, signal, indicatorSource };
+          }
         }
 
         // ── Gather open-position strikes so the constructor picks an alternative ──
@@ -702,6 +809,29 @@ class DecisionRouter {
         webhookEventId,
       }).catch(() => {});
 
+      // Exit fill must be option premium (per-share), not underlying. Webhook CLOSE signals
+      // rarely pass midPrice; executor would fall back to price_cache for underlying → bogus ~$600 fills.
+      const ct = signal.contractType || position.contract_type || 'STOCK';
+      let closeMid =
+        signal.midPrice != null && Number.isFinite(parseFloat(signal.midPrice))
+          ? parseFloat(signal.midPrice)
+          : null;
+      if (ct === 'STOCK') {
+        if (closeMid == null || closeMid <= 0) {
+          closeMid = (await this._getUnderlyingPrice(position.underlying_symbol || position.symbol))
+            ?? parseFloat(position.avg_price);
+        }
+      } else {
+        const avg = parseFloat(position.avg_price);
+        const est = await this._estimateOptionExitPrice(position);
+        const maxPlausiblePremium = Math.min(Math.max(avg * 12, 25), 450);
+        const useSignal =
+          closeMid != null
+          && closeMid > 0
+          && closeMid <= maxPlausiblePremium;
+        closeMid = useSignal ? closeMid : est;
+      }
+
       return {
         approved: true,
         signal,
@@ -709,7 +839,7 @@ class DecisionRouter {
         orderIntent: {
           symbol: signal.symbol,
           side: 'SELL',
-          contractType: signal.contractType || position.contract_type || 'STOCK',
+          contractType: ct,
           strike: position.strike,
           strikeShort: position.strike_short,
           strikeLong: position.strike_long,
@@ -718,7 +848,7 @@ class DecisionRouter {
           strategy: signal.strategy,
           bidPrice: signal.bidPrice,
           askPrice: signal.askPrice,
-          midPrice: signal.midPrice,
+          midPrice: closeMid,
           indicatorSource,
           webhookEventId,
           positionId: position.id,
@@ -781,7 +911,7 @@ class DecisionRouter {
       if (chainData?.data?.contracts) {
         const targetType = position.contract_type === 'PUT' ? 'put' : 'call';
         const match = chainData.data.contracts.find(c =>
-          parseFloat(c.strike) === parseFloat(position.strike)
+          Math.abs(parseFloat(c.strike) - parseFloat(position.strike)) < 0.02
           && c.type?.toLowerCase() === targetType
         );
         if (match?.mid && match.mid > 0) return match.mid;

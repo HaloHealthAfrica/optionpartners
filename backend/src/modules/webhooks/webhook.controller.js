@@ -1,6 +1,8 @@
 'use strict';
 
 const webhookService = require('./webhook.service');
+const marubozuService = require('./marubozu.service');
+const { validateTimestamp } = require('./webhook.validator');
 const rateLimitService = require('./webhook-rate-limit.service');
 const webhookMetricsService = require('./webhook-metrics.service');
 const { detectIndicatorSource } = require('./indicator-detector');
@@ -8,6 +10,21 @@ const db = require('../../config/database');
 const Sentry = require('@sentry/node');
 const { assertSimMode } = require('../../config/tradingMode');
 const logger = require('../../utils/logger');
+
+/** Sources that may open trades — keep in sync with decision-router TRADE_TRIGGERS. */
+const TRADE_TRIGGER_SOURCES = [
+  'SIGNALS', 'STRAT', 'ORB', 'PIVOT_MB', 'SQUEEZE_PRO', 'REVERSAL', 'CRT', 'SATY_PHASE', 'GOLF_MEDIC', 'MARUBOZU', 'SIGNAL_BATCH',
+];
+
+/**
+ * Align with GET /webhooks/stats: owners/admins aggregate across all users unless ?scope=me.
+ * @returns {string|null} user UUID or null for org-wide scope
+ */
+function tradedSignalsScopeUserId(req) {
+  const isAdmin = req.user.role === 'admin' || req.user.role === 'owner';
+  if (!isAdmin) return req.user.id;
+  return req.query.scope === 'me' ? req.user.id : null;
+}
 
 /**
  * Resolve user ID from req.user (JWT), x-api-key header, or SIM default user.
@@ -179,6 +196,26 @@ async function receiveTradingViewWebhook(req, res) {
           }
         }
       }
+    }
+
+    // Marubozu SIGNAL_BATCH: fan-out into webhook_events (same pipeline as POST /marubozu)
+    if (marubozuService.isSignalBatchPayload(payload)) {
+      const tsBatch = validateTimestamp(payload, 'SIGNAL_BATCH');
+      if (!tsBatch.valid) {
+        await rateLimitService.recordMetrics('ip', clientIP, userId, 'rejected');
+        return res.status(422).json({ error: tsBatch.error || 'Invalid timestamp' });
+      }
+      const batchResult = await marubozuService.ingest(payload, {
+        clientIP: clientIPForDb,
+        userAgent,
+        userId,
+      });
+      await rateLimitService.recordMetrics('ip', clientIP, userId, 'valid');
+      return res.status(202).json({
+        message: 'Marubozu SIGNAL_BATCH received and queued',
+        batch_ingest_id: batchResult.batch_ingest_id,
+        results: batchResult.results,
+      });
     }
 
     const { event, isDuplicate, isTestPing, isMarketData, marketDataType } = await webhookService.ingest(
@@ -380,7 +417,8 @@ async function getWebhookSourceMetrics(req, res) {
 
 /**
  * GET /api/webhooks/traded-signals
- * List signals that reached the trade decision engine, with verdict + trade outcome.
+ * Pipeline decisions: trade-engine verdicts (intelligence_verdicts) plus pre-engine
+ * blocks (signal_rejections) for trade-trigger webhooks that never reached the engine.
  */
 async function listTradedSignals(req, res) {
   try {
@@ -388,19 +426,18 @@ async function listTradedSignals(req, res) {
     const pageNum = parseInt(page) || 1;
     const limitNum = Math.min(parseInt(limit) || 25, 100);
     const offset = (pageNum - 1) * limitNum;
-    const userId = req.user.id;
+    const userId = tradedSignalsScopeUserId(req);
 
-    let outcomeFilter = '';
-    const params = [userId, limitNum, offset];
+    let outcomeWhere = 'TRUE';
     if (outcome === 'traded') {
-      outcomeFilter = 'AND iv.allowed = TRUE';
+      outcomeWhere = 'combined.traded = TRUE';
     } else if (outcome === 'blocked') {
-      outcomeFilter = 'AND iv.allowed = FALSE';
+      outcomeWhere = 'combined.traded = FALSE';
     }
 
-    const [dataResult, countResult] = await Promise.all([
-      db.query(
-        `SELECT
+    const listSql = `
+      SELECT * FROM (
+        SELECT
            iv.id,
            iv.created_at,
            iv.symbol,
@@ -438,8 +475,9 @@ async function listTradedSignals(req, res) {
            COALESCE(st.strike_long, sp.strike_long) AS strike_long,
            sp.id                  AS position_id,
            (st.id IS NOT NULL OR sp.id IS NOT NULL) AS position_verified,
-           sr.gate                AS rejection_gate,
-           sr.reason              AS rejection_detail
+           sriv.gate              AS rejection_gate,
+           sriv.reason            AS rejection_detail,
+           FALSE                  AS pre_engine_block
          FROM intelligence_verdicts iv
          JOIN webhook_events we ON iv.webhook_event_id = we.id
          LEFT JOIN sim_trades st ON st.webhook_event_id = we.id
@@ -448,21 +486,103 @@ async function listTradedSignals(req, res) {
            SELECT gate, reason FROM signal_rejections
            WHERE webhook_event_id = we.id
            ORDER BY created_at DESC LIMIT 1
-         ) sr ON TRUE
-         WHERE iv.user_id = $1 ${outcomeFilter}
-         ORDER BY iv.created_at DESC
-         LIMIT $2 OFFSET $3`,
-        params
+         ) sriv ON TRUE
+         WHERE ($1::uuid IS NULL OR iv.user_id = $1)
+
+        UNION ALL
+
+        SELECT
+           sr.id,
+           sr.created_at,
+           sr.symbol,
+           (sr.raw_signal->>'direction') AS direction,
+           sr.strategy,
+           NULL::numeric(10,4) AS conviction_score,
+           FALSE AS traded,
+           sr.reason AS rejection_reason,
+           (sr.raw_signal->>'confidence')::numeric AS signal_confidence,
+           NULL::jsonb AS checks_detail,
+           NULL::int AS confluence_count,
+           NULL::text AS flow_alignment,
+           we.id AS webhook_event_id,
+           we.raw_payload,
+           we.received_at,
+           we.processed_at,
+           we.status AS webhook_status,
+           we.error_message,
+           NULL::uuid AS trade_id,
+           NULL::numeric AS pnl,
+           NULL::numeric AS pnl_percent,
+           NULL::numeric AS entry_price,
+           NULL::numeric AS exit_price,
+           NULL::timestamptz AS entry_time,
+           NULL::timestamptz AS exit_time,
+           NULL::text AS exit_reason,
+           NULL::text AS contract_type,
+           NULL::numeric AS strike,
+           NULL::date AS expiration,
+           NULL::int AS dte_at_entry,
+           NULL::numeric AS delta_at_entry,
+           'long'::text AS side,
+           NULL::numeric AS r_multiple,
+           NULL::numeric AS strike_short,
+           NULL::numeric AS strike_long,
+           NULL::uuid AS position_id,
+           FALSE AS position_verified,
+           sr.gate AS rejection_gate,
+           sr.reason AS rejection_detail,
+           TRUE AS pre_engine_block
+        FROM (
+          SELECT DISTINCT ON (sr2.webhook_event_id)
+            sr2.*
+          FROM signal_rejections sr2
+          WHERE ($1::uuid IS NULL OR sr2.user_id = $1)
+          ORDER BY sr2.webhook_event_id, sr2.created_at DESC
+        ) sr
+        JOIN webhook_events we ON we.id = sr.webhook_event_id
+        WHERE ($1::uuid IS NULL OR sr.user_id = $1)
+          AND we.indicator_source = ANY($4::text[])
+          AND NOT EXISTS (
+            SELECT 1 FROM intelligence_verdicts iv2
+            WHERE iv2.webhook_event_id = sr.webhook_event_id AND iv2.user_id = sr.user_id
+          )
+      ) combined
+      WHERE ${outcomeWhere}
+      ORDER BY combined.created_at DESC
+      LIMIT $2 OFFSET $3`;
+
+    const countSql = `
+      WITH ivc AS (
+        SELECT
+          COUNT(*)::int AS total,
+          COUNT(*) FILTER (WHERE allowed = TRUE)::int AS traded_count,
+          COUNT(*) FILTER (WHERE allowed = FALSE)::int AS blocked_count
+        FROM intelligence_verdicts
+        WHERE ($1::uuid IS NULL OR user_id = $1)
       ),
-      db.query(
-        `SELECT
-           COUNT(*)::int AS total,
-           COUNT(*) FILTER (WHERE allowed = TRUE)::int AS traded_count,
-           COUNT(*) FILTER (WHERE allowed = FALSE)::int AS blocked_count
-         FROM intelligence_verdicts
-         WHERE user_id = $1`,
-        [userId]
-      ),
+      pre AS (
+        SELECT COUNT(*)::int AS n
+        FROM (
+          SELECT DISTINCT sr.webhook_event_id
+          FROM signal_rejections sr
+          INNER JOIN webhook_events we ON we.id = sr.webhook_event_id
+          WHERE ($1::uuid IS NULL OR sr.user_id = $1)
+            AND we.indicator_source = ANY($2::text[])
+            AND NOT EXISTS (
+              SELECT 1 FROM intelligence_verdicts iv
+              WHERE iv.webhook_event_id = sr.webhook_event_id AND iv.user_id = sr.user_id
+            )
+        ) d
+      )
+      SELECT
+        ivc.total + pre.n AS total,
+        ivc.traded_count,
+        ivc.blocked_count + pre.n AS blocked_count
+      FROM ivc, pre`;
+
+    const [dataResult, countResult] = await Promise.all([
+      db.query(listSql, [userId, limitNum, offset, TRADE_TRIGGER_SOURCES]),
+      db.query(countSql, [userId, TRADE_TRIGGER_SOURCES]),
     ]);
 
     const counts = countResult.rows[0] || { total: 0, traded_count: 0, blocked_count: 0 };
@@ -470,8 +590,8 @@ async function listTradedSignals(req, res) {
     res.json({
       signals: dataResult.rows,
       total: outcome === 'traded' ? counts.traded_count
-           : outcome === 'blocked' ? counts.blocked_count
-           : counts.total,
+        : outcome === 'blocked' ? counts.blocked_count
+          : counts.total,
       traded_count: counts.traded_count,
       blocked_count: counts.blocked_count,
       page: pageNum,
@@ -490,9 +610,17 @@ async function listTradedSignals(req, res) {
  */
 async function getTradedSignalsSummary(req, res) {
   try {
-    const userId = req.user.id;
+    const userId = tradedSignalsScopeUserId(req);
 
-    const [tradedStats, blockersByGate, blockersByStrategy, performanceByStrategy, performanceBySymbol] = await Promise.all([
+    const [
+      tradedStats,
+      blockersByGate,
+      blockersByStrategy,
+      performanceByStrategy,
+      performanceBySymbol,
+      preEngineCount,
+      preEngineGates,
+    ] = await Promise.all([
       db.query(
         `SELECT
            COUNT(*)::int                                         AS total,
@@ -509,7 +637,7 @@ async function getTradedSignalsSummary(req, res) {
            COALESCE(AVG(iv.intelligence_score) FILTER (WHERE iv.allowed = FALSE), 0)::numeric(6,2) AS avg_blocked_conviction
          FROM intelligence_verdicts iv
          LEFT JOIN sim_trades st ON st.webhook_event_id = iv.webhook_event_id
-         WHERE iv.user_id = $1`,
+         WHERE ($1::uuid IS NULL OR iv.user_id = $1)`,
         [userId]
       ),
 
@@ -524,7 +652,7 @@ async function getTradedSignalsSummary(req, res) {
            WHERE webhook_event_id = iv.webhook_event_id
            ORDER BY created_at DESC LIMIT 1
          ) sr ON TRUE
-         WHERE iv.user_id = $1 AND iv.allowed = FALSE
+         WHERE ($1::uuid IS NULL OR iv.user_id = $1) AND iv.allowed = FALSE
          GROUP BY sr.gate
          ORDER BY count DESC
          LIMIT 10`,
@@ -537,7 +665,7 @@ async function getTradedSignalsSummary(req, res) {
            COUNT(*)::int AS blocked_count,
            array_agg(DISTINCT iv.rejection_reason) FILTER (WHERE iv.rejection_reason IS NOT NULL) AS reasons
          FROM intelligence_verdicts iv
-         WHERE iv.user_id = $1 AND iv.allowed = FALSE AND iv.strategy IS NOT NULL
+         WHERE ($1::uuid IS NULL OR iv.user_id = $1) AND iv.allowed = FALSE AND iv.strategy IS NOT NULL
          GROUP BY iv.strategy
          ORDER BY blocked_count DESC
          LIMIT 10`,
@@ -555,7 +683,7 @@ async function getTradedSignalsSummary(req, res) {
            COALESCE(AVG(iv.intelligence_score), 0)::numeric(6,2) AS avg_conviction
          FROM intelligence_verdicts iv
          LEFT JOIN sim_trades st ON st.webhook_event_id = iv.webhook_event_id
-         WHERE iv.user_id = $1 AND iv.strategy IS NOT NULL
+         WHERE ($1::uuid IS NULL OR iv.user_id = $1) AND iv.strategy IS NOT NULL
          GROUP BY iv.strategy
          ORDER BY traded DESC
          LIMIT 15`,
@@ -572,16 +700,72 @@ async function getTradedSignalsSummary(req, res) {
            COUNT(*) FILTER (WHERE iv.allowed = TRUE AND st.pnl IS NOT NULL)::int AS closed
          FROM intelligence_verdicts iv
          LEFT JOIN sim_trades st ON st.webhook_event_id = iv.webhook_event_id
-         WHERE iv.user_id = $1 AND iv.symbol IS NOT NULL
+         WHERE ($1::uuid IS NULL OR iv.user_id = $1) AND iv.symbol IS NOT NULL
          GROUP BY iv.symbol
          ORDER BY traded DESC
          LIMIT 15`,
         [userId]
       ),
+
+      db.query(
+        `SELECT COUNT(*)::int AS n
+         FROM (
+           SELECT DISTINCT sr.webhook_event_id
+           FROM signal_rejections sr
+           INNER JOIN webhook_events we ON we.id = sr.webhook_event_id
+           WHERE ($1::uuid IS NULL OR sr.user_id = $1)
+             AND we.indicator_source = ANY($2::text[])
+             AND NOT EXISTS (
+               SELECT 1 FROM intelligence_verdicts iv
+               WHERE iv.webhook_event_id = sr.webhook_event_id AND iv.user_id = sr.user_id
+             )
+         ) d`,
+        [userId, TRADE_TRIGGER_SOURCES]
+      ),
+
+      db.query(
+        `SELECT COALESCE(q.gate, 'UNKNOWN') AS gate, COUNT(*)::int AS count
+         FROM (
+           SELECT DISTINCT ON (sr.webhook_event_id)
+             sr.gate AS gate
+           FROM signal_rejections sr
+           INNER JOIN webhook_events we ON we.id = sr.webhook_event_id
+           WHERE ($1::uuid IS NULL OR sr.user_id = $1)
+             AND we.indicator_source = ANY($2::text[])
+             AND NOT EXISTS (
+               SELECT 1 FROM intelligence_verdicts iv
+               WHERE iv.webhook_event_id = sr.webhook_event_id AND iv.user_id = sr.user_id
+             )
+           ORDER BY sr.webhook_event_id, sr.created_at DESC
+         ) q
+         GROUP BY q.gate`,
+        [userId, TRADE_TRIGGER_SOURCES]
+      ),
     ]);
 
     const s = tradedStats.rows[0] || {};
     const closedTrades = (s.wins || 0) + (s.losses || 0);
+    const preN = parseInt(preEngineCount.rows[0]?.n, 10) || 0;
+
+    const gateMap = new Map();
+    for (const r of blockersByGate.rows) {
+      const g = r.gate || 'UNKNOWN';
+      gateMap.set(g, {
+        gate: g,
+        count: r.count,
+        avg_conviction: Number(r.avg_conviction),
+      });
+    }
+    for (const r of preEngineGates.rows) {
+      const g = r.gate || 'UNKNOWN';
+      const prev = gateMap.get(g);
+      if (prev) {
+        prev.count += r.count;
+      } else {
+        gateMap.set(g, { gate: g, count: r.count, avg_conviction: 0 });
+      }
+    }
+    const byGateMerged = [...gateMap.values()].sort((a, b) => b.count - a.count).slice(0, 10);
 
     res.json({
       traded: {
@@ -597,12 +781,13 @@ async function getTradedSignalsSummary(req, res) {
         avg_conviction: Number(s.avg_traded_conviction) || 0,
       },
       blocked: {
-        count: s.blocked_count || 0,
+        count: (s.blocked_count || 0) + preN,
         avg_conviction: Number(s.avg_blocked_conviction) || 0,
-        by_gate: blockersByGate.rows,
+        by_gate: byGateMerged,
         by_strategy: blockersByStrategy.rows,
+        pre_engine_count: preN,
       },
-      total: s.total || 0,
+      total: (s.total || 0) + preN,
       by_strategy: performanceByStrategy.rows.map(r => ({
         ...r,
         win_rate: r.closed > 0 ? Number(((r.wins / r.closed) * 100).toFixed(1)) : null,

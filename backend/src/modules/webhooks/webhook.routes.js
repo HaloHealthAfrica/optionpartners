@@ -5,6 +5,8 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const { authenticate, optionalAuth } = require('../../middleware/auth');
 const webhookController = require('./webhook.controller');
+const golfmedicController = require('./golfmedic.controller');
+const marubozuController = require('./marubozu.controller');
 
 // Global fallback rate limit (very high) - per-source limiting is now primary
 const globalRateLimit = rateLimit({
@@ -17,6 +19,17 @@ const globalRateLimit = rateLimit({
 
 // Public webhook endpoints (authenticated via HMAC or API key)
 // Note: Per-source rate limiting is now handled in the controller
+function withEmptyPathSecret(handler) {
+  return (req, res, next) => {
+    if (req.params.secret === undefined) req.params.secret = '';
+    return handler(req, res, next);
+  };
+}
+// GolfMedic / Marubozu — secret in env is optional; when set, path and/or X-Webhook-Secret must match
+router.post('/golfmedic', globalRateLimit, withEmptyPathSecret(golfmedicController.receiveGolfMedic));
+router.post('/golfmedic/:secret', globalRateLimit, golfmedicController.receiveGolfMedic);
+router.post('/marubozu', globalRateLimit, withEmptyPathSecret(marubozuController.receiveMarubozu));
+router.post('/marubozu/:secret', globalRateLimit, marubozuController.receiveMarubozu);
 router.post('/tradingview', globalRateLimit, optionalAuth, webhookController.receiveTradingViewWebhook);
 // CRT (Candle Range Theory) alias — same handler, supports "SPY CRT BULL/BEAR: {...}" message format
 router.post('/crt-signal', globalRateLimit, optionalAuth, webhookController.receiveTradingViewWebhook);

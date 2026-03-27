@@ -4,7 +4,8 @@
  * Indicator source detection and direction extraction.
  *
  * Detection priority (first match wins):
- *   Explicit event_type → SATY_PHASE → STRAT → MTF_BIAS → TREND → ORB
+ *   Explicit event_type (market data) → GolfMedic `event` + symbol
+ *   → SATY_PHASE → STRAT → MTF_BIAS → TREND → ORB
  *   → SIGNALS → OPTIONS_FLOW → PRICE_TICK → UNKNOWN
  */
 
@@ -19,6 +20,8 @@ const MARKET_DATA_TYPES = ['OPTIONS_FLOW', 'PRICE_TICK', 'CHAIN_SNAPSHOT'];
 
 const CONTEXT_SOURCES = ['MARKET_CONTEXT'];
 
+const GOLF_MEDIC_EVENTS = new Set(['ELITE_SETUP', 'SIGNAL_BULL', 'SIGNAL_BEAR', 'TFC_ALIGN', 'EXIT_SIGNAL']);
+
 /**
  * Identify which indicator or data type produced this webhook payload.
  * @param {Object} payload - Raw webhook payload
@@ -30,6 +33,23 @@ function detectIndicatorSource(payload) {
   // Explicit event_type field takes priority (lets any payload self-identify)
   const explicitType = (payload.event_type || '').toUpperCase();
   if (MARKET_DATA_TYPES.includes(explicitType)) return explicitType;
+
+  // Marubozu multi-symbol batch (TradingView often posts to /webhooks/tradingview)
+  if (String(payload.event || '').toUpperCase() === 'SIGNAL_BATCH' && Array.isArray(payload.signals)) {
+    return 'SIGNAL_BATCH';
+  }
+
+  // Marubozu batch fan-out — single-signal rows use MARUBOZU_ENTRY
+  const mbzEv = String(payload.event || '').toUpperCase();
+  if (mbzEv === 'MARUBOZU_ENTRY' && payload.symbol && payload.signal_id) {
+    return 'MARUBOZU';
+  }
+
+  // GolfMedic (TradingView) — use (event, grade, direction); `event` is the discriminator
+  const golfEvent = String(payload.event || '').toUpperCase();
+  if (GOLF_MEDIC_EVENTS.has(golfEvent) && payload.symbol) {
+    return 'GOLF_MEDIC';
+  }
 
   const metaSource = (payload.meta?.source || '').toUpperCase();
   const metaIndicator = (payload.meta?.indicator || '').toUpperCase();

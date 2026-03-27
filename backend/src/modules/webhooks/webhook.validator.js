@@ -27,6 +27,9 @@ const MAX_AGE_BY_SOURCE = {
   PIVOT_MB:       30 * 60 * 1000,
   REVERSAL:       30 * 60 * 1000,
   CRT:            30 * 60 * 1000,
+  GOLF_MEDIC:     2 * 60 * 60 * 1000,
+  SIGNAL_BATCH:   2 * 60 * 60 * 1000, // Marubozu bar-close batches (timestamp is bar time)
+  MARUBOZU:       2 * 60 * 60 * 1000,
 };
 
 /**
@@ -138,6 +141,25 @@ function generateDedupeKey(payload) {
         payload.strike,
       ].join(':');
       break;
+    case 'GOLF_MEDIC':
+      discriminator = [
+        payload.event,
+        payload.grade,
+        payload.direction,
+        payload.strat?.combo,
+        payload.nearest_pivot,
+        payload.timeframe,
+      ].join(':');
+      break;
+    case 'MARUBOZU':
+      discriminator = [payload.signal_id, payload.symbol, payload.direction, payload.rank, payload.strategy].join(':');
+      break;
+    case 'SIGNAL_BATCH':
+      discriminator = [
+        payload.strategy,
+        (payload.signals || []).map((s) => s.signal_id).filter(Boolean).join(','),
+      ].join(':');
+      break;
     case 'MARKET_CONTEXT':
       discriminator = [
         payload.event,
@@ -191,6 +213,12 @@ function _resolveTimestamp(payload, source) {
       if (payload.timestamp) return payload.timestamp;
       break;
     case 'CRT':
+      if (payload.timestamp) return payload.timestamp;
+      break;
+    case 'GOLF_MEDIC':
+      if (payload.bar_time) return payload.bar_time;
+      break;
+    case 'MARUBOZU':
       if (payload.timestamp) return payload.timestamp;
       break;
     case 'TREND':
@@ -256,6 +284,16 @@ function validatePayload(payload) {
   }
 
   const source = detectIndicatorSource(payload);
+
+  if (source === 'SIGNAL_BATCH') {
+    if (!Array.isArray(payload.signals) || payload.signals.length === 0) {
+      return { valid: false, error: '[SIGNAL_BATCH] signals must be a non-empty array' };
+    }
+    if (!payload.strategy || typeof payload.strategy !== 'string') {
+      return { valid: false, error: '[SIGNAL_BATCH] Missing strategy' };
+    }
+    return { valid: true, source };
+  }
 
   // Known indicators carry their own direction semantics — symbol is sufficient
   if (source !== 'UNKNOWN') {
